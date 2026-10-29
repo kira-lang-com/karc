@@ -1,0 +1,510 @@
+// Part of <algorithm>: sorting, binary search, merging, set operations,
+// heaps, minimum and maximum elements, and permutations. The ordering is
+// operator< or a comparator; each algorithm without one passes
+// karc_less_than to the comparator form.
+#ifndef KARC_STD_ALGORITHM_SORT
+#define KARC_STD_ALGORITHM_SORT
+
+#include <compare>
+
+namespace std {
+
+template <typename I, typename C>
+void karc_insertion_sort(I first, I last, C less) {
+    if (first == last) { return; }
+    for (I i = first + 1; i != last; ++i) {
+        I j = i;
+        while (j != first && less(*j, *(j - 1))) {
+            swap(*j, *(j - 1));
+            --j;
+        }
+    }
+}
+
+template <typename I, typename C>
+void karc_sift_down(I first, long start, long count, C less) {
+    long root = start;
+    while (2 * root + 1 < count) {
+        long child = 2 * root + 1;
+        if (child + 1 < count && less(*(first + child), *(first + child + 1))) { child++; }
+        if (!less(*(first + root), *(first + child))) { return; }
+        swap(*(first + root), *(first + child));
+        root = child;
+    }
+}
+template <typename I, typename C>
+void make_heap(I first, I last, C less) {
+    long count = last - first;
+    for (long start = count / 2 - 1; start >= 0; start--) { karc_sift_down(first, start, count, less); }
+}
+template <typename I>
+void make_heap(I first, I last) { make_heap(first, last, karc_less_than()); }
+template <typename I, typename C>
+void push_heap(I first, I last, C less) {
+    long child = last - first - 1;
+    while (child > 0) {
+        long parent = (child - 1) / 2;
+        if (!less(*(first + parent), *(first + child))) { return; }
+        swap(*(first + parent), *(first + child));
+        child = parent;
+    }
+}
+template <typename I>
+void push_heap(I first, I last) { push_heap(first, last, karc_less_than()); }
+template <typename I, typename C>
+void pop_heap(I first, I last, C less) {
+    long count = last - first;
+    if (count < 2) { return; }
+    swap(*first, *(first + (count - 1)));
+    karc_sift_down(first, 0, count - 1, less);
+}
+template <typename I>
+void pop_heap(I first, I last) { pop_heap(first, last, karc_less_than()); }
+template <typename I, typename C>
+void sort_heap(I first, I last, C less) {
+    while (last - first > 1) {
+        pop_heap(first, last, less);
+        --last;
+    }
+}
+template <typename I>
+void sort_heap(I first, I last) { sort_heap(first, last, karc_less_than()); }
+template <typename I, typename C>
+I is_heap_until(I first, I last, C less) {
+    long count = last - first;
+    for (long child = 1; child < count; child++) {
+        if (less(*(first + (child - 1) / 2), *(first + child))) { return first + child; }
+    }
+    return last;
+}
+template <typename I>
+I is_heap_until(I first, I last) { return is_heap_until(first, last, karc_less_than()); }
+template <typename I>
+bool is_heap(I first, I last) { return is_heap_until(first, last, karc_less_than()) == last; }
+
+// Introsort: quicksort on a median-of-three pivot, heapsort past a depth
+// limit, insertion sort for short ranges.
+template <typename I, typename C>
+void karc_introsort(I first, I last, C less, int depth) {
+    while (last - first > 16) {
+        if (depth == 0) {
+            make_heap(first, last, less);
+            sort_heap(first, last, less);
+            return;
+        }
+        depth--;
+        I middle = first + (last - first) / 2;
+        I back = last - 1;
+        if (less(*middle, *first)) { swap(*middle, *first); }
+        if (less(*back, *first)) { swap(*back, *first); }
+        if (less(*back, *middle)) { swap(*back, *middle); }
+        swap(*first, *middle);
+        I low = first + 1;
+        I high = last - 1;
+        for (;;) {
+            while (less(*low, *first)) { ++low; }
+            while (less(*first, *high)) { --high; }
+            if (!(low < high)) { break; }
+            swap(*low, *high);
+            ++low;
+            --high;
+        }
+        swap(*first, *high);
+        if (high - first < last - high) {
+            karc_introsort(first, high, less, depth);
+            first = high + 1;
+        } else {
+            karc_introsort(high + 1, last, less, depth);
+            last = high;
+        }
+    }
+    karc_insertion_sort(first, last, less);
+}
+template <typename I, typename C>
+void sort(I first, I last, C less) {
+    int depth = 0;
+    for (long n = last - first; n > 1; n = n / 2) { depth += 2; }
+    karc_introsort(first, last, less, depth);
+}
+template <typename I>
+void sort(I first, I last) { sort(first, last, karc_less_than()); }
+
+// Merges the sorted runs [first, middle) and [middle, last) in place,
+// stably, by rotating the smaller half into the larger.
+template <typename I, typename C>
+void inplace_merge(I first, I middle, I last, C less) {
+    long left = middle - first;
+    long right = last - middle;
+    if (left == 0 || right == 0) { return; }
+    if (left + right == 2) {
+        if (less(*middle, *first)) { swap(*first, *middle); }
+        return;
+    }
+    I cutLeft = first;
+    I cutRight = middle;
+    if (left > right) {
+        cutLeft = first + left / 2;
+        cutRight = middle;
+        long count = last - middle;
+        while (count > 0) {
+            long half = count / 2;
+            if (less(*(cutRight + half), *cutLeft)) {
+                cutRight = cutRight + half + 1;
+                count = count - half - 1;
+            } else {
+                count = half;
+            }
+        }
+    } else {
+        cutRight = middle + right / 2;
+        cutLeft = first;
+        long count = middle - first;
+        while (count > 0) {
+            long half = count / 2;
+            if (!less(*cutRight, *(cutLeft + half))) {
+                cutLeft = cutLeft + half + 1;
+                count = count - half - 1;
+            } else {
+                count = half;
+            }
+        }
+    }
+    I newMiddle = rotate(cutLeft, middle, cutRight);
+    inplace_merge(first, cutLeft, newMiddle, less);
+    inplace_merge(newMiddle, cutRight, last, less);
+}
+template <typename I>
+void inplace_merge(I first, I middle, I last) { inplace_merge(first, middle, last, karc_less_than()); }
+template <typename I, typename C>
+void stable_sort(I first, I last, C less) {
+    if (last - first < 16) {
+        karc_insertion_sort(first, last, less);
+        return;
+    }
+    I middle = first + (last - first) / 2;
+    stable_sort(first, middle, less);
+    stable_sort(middle, last, less);
+    inplace_merge(first, middle, last, less);
+}
+template <typename I>
+void stable_sort(I first, I last) { stable_sort(first, last, karc_less_than()); }
+template <typename I, typename P>
+I stable_partition(I first, I last, P predicate) {
+    long count = last - first;
+    if (count == 0) { return first; }
+    if (count == 1) {
+        if (predicate(*first)) { return last; }
+        return first;
+    }
+    I middle = first + count / 2;
+    I left = stable_partition(first, middle, predicate);
+    I right = stable_partition(middle, last, predicate);
+    return rotate(left, middle, right);
+}
+template <typename I, typename C>
+void partial_sort(I first, I middle, I last, C less) {
+    make_heap(first, middle, less);
+    for (I i = middle; i != last; ++i) {
+        if (less(*i, *first)) {
+            swap(*i, *first);
+            karc_sift_down(first, 0, middle - first, less);
+        }
+    }
+    sort_heap(first, middle, less);
+}
+template <typename I>
+void partial_sort(I first, I middle, I last) { partial_sort(first, middle, last, karc_less_than()); }
+template <typename I, typename C>
+void nth_element(I first, I nth, I last, C less) {
+    while (last - first > 3) {
+        I middle = first + (last - first) / 2;
+        swap(*first, *middle);
+        I store = first + 1;
+        for (I i = first + 1; i != last; ++i) {
+            if (less(*i, *first)) {
+                swap(*i, *store);
+                ++store;
+            }
+        }
+        I pivot = store - 1;
+        swap(*first, *pivot);
+        if (pivot == nth) { return; }
+        if (nth < pivot) { last = pivot; } else { first = pivot + 1; }
+    }
+    karc_insertion_sort(first, last, less);
+}
+template <typename I>
+void nth_element(I first, I nth, I last) { nth_element(first, nth, last, karc_less_than()); }
+template <typename I, typename C>
+I is_sorted_until(I first, I last, C less) {
+    if (first == last) { return last; }
+    I next = first;
+    for (++next; next != last; ++next) {
+        if (less(*next, *first)) { return next; }
+        first = next;
+    }
+    return last;
+}
+template <typename I>
+I is_sorted_until(I first, I last) { return is_sorted_until(first, last, karc_less_than()); }
+template <typename I, typename C>
+bool is_sorted(I first, I last, C less) { return is_sorted_until(first, last, less) == last; }
+template <typename I>
+bool is_sorted(I first, I last) { return is_sorted_until(first, last, karc_less_than()) == last; }
+
+template <typename I, typename V, typename C>
+I lower_bound(I first, I last, const V& value, C less) {
+    long count = last - first;
+    while (count > 0) {
+        long half = count / 2;
+        I middle = first + half;
+        if (less(*middle, value)) {
+            first = middle + 1;
+            count = count - half - 1;
+        } else {
+            count = half;
+        }
+    }
+    return first;
+}
+template <typename I, typename V>
+I lower_bound(I first, I last, const V& value) { return lower_bound(first, last, value, karc_less_than()); }
+template <typename I, typename V, typename C>
+I upper_bound(I first, I last, const V& value, C less) {
+    long count = last - first;
+    while (count > 0) {
+        long half = count / 2;
+        I middle = first + half;
+        if (!less(value, *middle)) {
+            first = middle + 1;
+            count = count - half - 1;
+        } else {
+            count = half;
+        }
+    }
+    return first;
+}
+template <typename I, typename V>
+I upper_bound(I first, I last, const V& value) { return upper_bound(first, last, value, karc_less_than()); }
+template <typename I, typename V>
+bool binary_search(I first, I last, const V& value) {
+    I at = lower_bound(first, last, value);
+    return at != last && !(value < *at);
+}
+template <typename I, typename V>
+pair<I, I> equal_range(I first, I last, const V& value) {
+    pair<I, I> result{lower_bound(first, last, value), upper_bound(first, last, value)};
+    return result;
+}
+
+template <typename I, typename J, typename O>
+O merge(I first, I last, J other, J otherEnd, O out) {
+    while (first != last && other != otherEnd) {
+        if (*other < *first) {
+            *out = *other;
+            ++other;
+        } else {
+            *out = *first;
+            ++first;
+        }
+        ++out;
+    }
+    out = copy(first, last, out);
+    return copy(other, otherEnd, out);
+}
+template <typename I, typename J>
+bool includes(I first, I last, J other, J otherEnd) {
+    while (other != otherEnd) {
+        if (first == last || *other < *first) { return false; }
+        if (!(*first < *other)) { ++other; }
+        ++first;
+    }
+    return true;
+}
+template <typename I, typename J, typename O>
+O set_union(I first, I last, J other, J otherEnd, O out) {
+    while (first != last && other != otherEnd) {
+        if (*other < *first) {
+            *out = *other;
+            ++other;
+        } else {
+            if (!(*first < *other)) { ++other; }
+            *out = *first;
+            ++first;
+        }
+        ++out;
+    }
+    out = copy(first, last, out);
+    return copy(other, otherEnd, out);
+}
+template <typename I, typename J, typename O>
+O set_intersection(I first, I last, J other, J otherEnd, O out) {
+    while (first != last && other != otherEnd) {
+        if (*first < *other) {
+            ++first;
+        } else if (*other < *first) {
+            ++other;
+        } else {
+            *out = *first;
+            ++out;
+            ++first;
+            ++other;
+        }
+    }
+    return out;
+}
+template <typename I, typename J, typename O>
+O set_difference(I first, I last, J other, J otherEnd, O out) {
+    while (first != last) {
+        if (other == otherEnd) { return copy(first, last, out); }
+        if (*first < *other) {
+            *out = *first;
+            ++out;
+            ++first;
+        } else {
+            if (!(*other < *first)) { ++first; }
+            ++other;
+        }
+    }
+    return out;
+}
+template <typename I, typename J, typename O>
+O set_symmetric_difference(I first, I last, J other, J otherEnd, O out) {
+    while (first != last) {
+        if (other == otherEnd) { return copy(first, last, out); }
+        if (*first < *other) {
+            *out = *first;
+            ++out;
+            ++first;
+        } else if (*other < *first) {
+            *out = *other;
+            ++out;
+            ++other;
+        } else {
+            ++first;
+            ++other;
+        }
+    }
+    return copy(other, otherEnd, out);
+}
+
+template <typename I, typename C>
+I min_element(I first, I last, C less) {
+    if (first == last) { return last; }
+    I best = first;
+    for (++first; first != last; ++first) {
+        if (less(*first, *best)) { best = first; }
+    }
+    return best;
+}
+template <typename I>
+I min_element(I first, I last) { return min_element(first, last, karc_less_than()); }
+template <typename I, typename C>
+I max_element(I first, I last, C less) {
+    if (first == last) { return last; }
+    I best = first;
+    for (++first; first != last; ++first) {
+        if (less(*best, *first)) { best = first; }
+    }
+    return best;
+}
+template <typename I>
+I max_element(I first, I last) { return max_element(first, last, karc_less_than()); }
+template <typename I>
+pair<I, I> minmax_element(I first, I last) {
+    pair<I, I> result{min_element(first, last), max_element(first, last)};
+    return result;
+}
+
+template <typename I, typename C>
+bool next_permutation(I first, I last, C less) {
+    if (first == last) { return false; }
+    I i = last;
+    --i;
+    if (i == first) { return false; }
+    for (;;) {
+        I after = i;
+        --i;
+        if (less(*i, *after)) {
+            I j = last;
+            --j;
+            while (!less(*i, *j)) { --j; }
+            swap(*i, *j);
+            reverse(after, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+    return false;
+}
+template <typename I>
+bool next_permutation(I first, I last) { return next_permutation(first, last, karc_less_than()); }
+template <typename I>
+bool prev_permutation(I first, I last) {
+    if (first == last) { return false; }
+    I i = last;
+    --i;
+    if (i == first) { return false; }
+    for (;;) {
+        I after = i;
+        --i;
+        if (*after < *i) {
+            I j = last;
+            --j;
+            while (!(*j < *i)) { --j; }
+            swap(*i, *j);
+            reverse(after, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+    return false;
+}
+template <typename I, typename J>
+bool is_permutation(I first, I last, J other) {
+    for (I i = first; i != last; ++i) {
+        long here = count(first, last, *i);
+        J otherEnd = other + (last - first);
+        if (here != count(other, otherEnd, *i)) { return false; }
+    }
+    return true;
+}
+
+template <typename I, typename O>
+O partial_sort_copy(I first, I last, O out, O outEnd) {
+    O end = out;
+    for (; first != last && end != outEnd; ++first) {
+        *end = *first;
+        ++end;
+    }
+    make_heap(out, end);
+    for (; first != last; ++first) {
+        if (*first < *out) {
+            pop_heap(out, end);
+            *(end - 1) = *first;
+            push_heap(out, end);
+        }
+    }
+    sort_heap(out, end);
+    return end;
+}
+template <typename I, typename J>
+strong_ordering lexicographical_compare_three_way(I first, I last, J other, J otherEnd) {
+    for (; first != last && other != otherEnd; ++first) {
+        if (*first < *other) { return strong_ordering::less; }
+        if (*other < *first) { return strong_ordering::greater; }
+        ++other;
+    }
+    if (first != last) { return strong_ordering::greater; }
+    if (other != otherEnd) { return strong_ordering::less; }
+    return strong_ordering::equal;
+}
+}
+
+#endif

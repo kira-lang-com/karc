@@ -1,0 +1,58 @@
+// <shared_mutex>: shared_mutex and shared_lock. One thread runs at a time
+// (see <thread>), so a lock only records that it is held.
+#ifndef KARC_STD_SHARED_MUTEX
+#define KARC_STD_SHARED_MUTEX
+
+#include <mutex>
+
+namespace std {
+
+class shared_mutex {
+public:
+    shared_mutex() : writers_(0), readers_(0) {}
+    void lock() { writers_++; }
+    bool try_lock() {
+        if (writers_ != 0 || readers_ != 0) { return false; }
+        writers_++;
+        return true;
+    }
+    void unlock() { writers_--; }
+    void lock_shared() { readers_++; }
+    bool try_lock_shared() {
+        if (writers_ != 0) { return false; }
+        readers_++;
+        return true;
+    }
+    void unlock_shared() { readers_--; }
+
+private:
+    int writers_;
+    int readers_;
+};
+typedef shared_mutex shared_timed_mutex;
+
+template <typename M>
+class shared_lock {
+public:
+    shared_lock(M& held) : held_(&held), owns_(true) { held_->lock_shared(); }
+    ~shared_lock() {
+        if (owns_) { held_->unlock_shared(); }
+    }
+    void lock() {
+        held_->lock_shared();
+        owns_ = true;
+    }
+    void unlock() {
+        held_->unlock_shared();
+        owns_ = false;
+    }
+    bool owns_lock() const { return owns_; }
+
+private:
+    M* held_;
+    bool owns_;
+};
+
+}
+
+#endif

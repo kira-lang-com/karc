@@ -1,0 +1,36 @@
+// <stack>: std::stack over a deque, or another container with back,
+// push_back and pop_back.
+#ifndef KARC_STD_STACK
+#define KARC_STD_STACK
+
+#include <cstddef>
+#include <deque>
+#include <utility>
+
+namespace std {
+
+template <typename T, typename S = deque<T>>
+class stack {
+public:
+    typedef T value_type;
+    typedef S container_type;
+    typedef size_t size_type;
+
+    stack() {}
+    explicit stack(const S& items) : items_(items) {}
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    T& top() { return items_.back(); }
+    void push(const T& value) { items_.push_back(value); }
+    template <typename... Args>
+    void emplace(Args&&... args) { items_.emplace_back(std::forward<Args>(args)...); }
+    void pop() { items_.pop_back(); }
+    void swap(stack& other) { items_.swap(other.items_); }
+
+private:
+    S items_;
+};
+
+}
+
+#endif

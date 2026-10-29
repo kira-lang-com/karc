@@ -1,0 +1,103 @@
+// <bitset>: std::bitset<N> over 64-bit words.
+#ifndef KARC_STD_BITSET
+#define KARC_STD_BITSET
+
+#include <cstddef>
+#include <string>
+#include <__ostream>
+
+namespace std {
+
+template <size_t N>
+class bitset {
+public:
+    bitset() { reset(); }
+    bitset(unsigned long value) {
+        reset();
+        words_[0] = value;
+        trim();
+    }
+    size_t size() const { return N; }
+    bool test(size_t position) const { return (words_[position / 64] >> (position % 64)) & 1; }
+    // A bit of a non-const bitset, assignable through.
+    class reference {
+    public:
+        reference(bitset* owner, size_t position) : owner_(owner), position_(position) {}
+        reference& operator=(bool value) {
+            owner_->set(position_, value);
+            return *this;
+        }
+        reference& operator=(const reference& other) {
+            owner_->set(position_, other.owner_->test(other.position_));
+            return *this;
+        }
+        operator bool() const { return owner_->test(position_); }
+        bool operator~() const { return !owner_->test(position_); }
+        reference& flip() {
+            owner_->flip(position_);
+            return *this;
+        }
+
+    private:
+        bitset* owner_;
+        size_t position_;
+    };
+    reference operator[](size_t position) { return reference(this, position); }
+    bool operator[](size_t position) const { return test(position); }
+    bitset& set(size_t position) {
+        words_[position / 64] = words_[position / 64] | ((unsigned long)1 << (position % 64));
+        return *this;
+    }
+    bitset& set(size_t position, bool value) {
+        if (value) { return set(position); }
+        return reset(position);
+    }
+    bitset& set() {
+        for (size_t i = 0; i < (N + 63) / 64; i++) { words_[i] = ~(unsigned long)0; }
+        trim();
+        return *this;
+    }
+    bitset& reset(size_t position) {
+        words_[position / 64] = words_[position / 64] & ~((unsigned long)1 << (position % 64));
+        return *this;
+    }
+    bitset& reset() {
+        for (size_t i = 0; i < (N + 63) / 64; i++) { words_[i] = 0; }
+        return *this;
+    }
+    bitset& flip(size_t position) {
+        words_[position / 64] = words_[position / 64] ^ ((unsigned long)1 << (position % 64));
+        return *this;
+    }
+    size_t count() const {
+        size_t total = 0;
+        for (size_t i = 0; i < N; i++) {
+            if (test(i)) { total++; }
+        }
+        return total;
+    }
+    bool any() const { return count() > 0; }
+    bool none() const { return count() == 0; }
+    bool all() const { return count() == N; }
+    unsigned long to_ulong() const { return words_[0]; }
+    string to_string() const {
+        string text;
+        for (size_t i = N; i > 0; i--) {
+            if (test(i - 1)) { text.push_back('1'); } else { text.push_back('0'); }
+        }
+        return text;
+    }
+
+private:
+    void trim() {
+        if (N % 64 != 0) { words_[(N - 1) / 64] = words_[(N - 1) / 64] & (((unsigned long)1 << (N % 64)) - 1); }
+    }
+    unsigned long words_[(N + 63) / 64];
+};
+
+template <size_t N>
+ostream& operator<<(ostream& out, const bitset<N>& bits) { return out << bits.to_string(); }
+
+}
+
+#endif

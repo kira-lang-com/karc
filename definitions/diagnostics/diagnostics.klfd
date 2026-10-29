@@ -1,0 +1,51 @@
+// karc's diagnostic codes. The kernel's diagnostic channel carries a number and
+// a span, so the text of each code lives in docs/diagnostics.md and the number
+// is named by the function that returns it.
+
+function diagLexError() -> Int { return 1001 }
+function diagDuplicateLocal() -> Int { return 1003 }
+function diagUnsupportedPointerOperation() -> Int { return 1010 }
+function diagCallsMain() -> Int { return 1018 }
+function diagUnknownName() -> Int { return 1021 }
+function diagUnsupportedExpression() -> Int { return 1022 }
+function diagBreakOutsideLoop() -> Int { return 1027 }
+function diagContinueOutsideLoop() -> Int { return 1028 }
+function diagMissingFinalReturn() -> Int { return 1029 }
+function diagDuplicateFunction() -> Int { return 1030 }
+function diagInvalidMainParameters() -> Int { return 1031 }
+function diagDuplicateGlobal() -> Int { return 1034 }
+
+function diagDirectiveSyntax() -> Int { return 1101 }
+function diagUnknownDirective() -> Int { return 1102 }
+function diagUnbalancedConditional() -> Int { return 1103 }
+function diagMacroArguments() -> Int { return 1104 }
+function diagMacroOperator() -> Int { return 1105 }
+function diagIncludeUnsupported() -> Int { return 1106 }
+function diagUserError() -> Int { return 1107 }
+function diagMissingMain() -> Int { return 1033 }
+function diagBuiltinArguments() -> Int { return 1035 }
+function diagTemplateInstance() -> Int { return 1036 }
+function diagDeletedFunction() -> Int { return 1037 }
+function diagUndefinedLabel() -> Int { return 1038 }
+function diagDuplicateLabel() -> Int { return 1039 }
+function diagCaseOutsideSwitch() -> Int { return 1040 }
+function diagParseEnd(kind: TokenKind) -> Int {
+    if kind == .RBrace { return 1201 }
+    if kind == .Semicolon { return 1202 }
+    if kind == .RParen { return 1203 }
+    if kind == .RBracket { return 1204 }
+    if kind == .Ident { return 1205 }
+    if kind == .Gt { return 1206 }
+    if kind == .LParen { return 1207 }
+    if kind == .Colon { return 1211 }
+    return 1200
+}
+function diagParseDetail(error: String) -> Int {
+    match error {
+        "Expected an assignment or a call statement" -> return 1208
+        "Expected an integer, name, call or parenthesized expression" -> return 1209
+        "Call target must be a name" -> return 1210
+        "Expected a type" -> return 1212
+        else -> return 1002
+    }
+}

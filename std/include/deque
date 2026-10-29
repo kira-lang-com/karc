@@ -1,0 +1,253 @@
+// <deque>: std::deque, a ring buffer: pushing and popping at either end is
+// amortized constant time. Iterators hold the deque and a position, so
+// they are random access. Storage comes from the Allocator parameter.
+#ifndef KARC_STD_DEQUE
+#define KARC_STD_DEQUE
+
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <exception>
+#include <utility>
+#include <initializer_list>
+#include <iterator>
+#include <__allocator>
+
+namespace std {
+
+template <typename T, typename Allocator>
+class deque;
+
+template <typename T, typename Allocator>
+class deque_iterator {
+public:
+    deque_iterator() : owner_(0), index_(0) {}
+    deque_iterator(deque<T, Allocator>* owner, long index) : owner_(owner), index_(index) {}
+    T& operator*() const { return (*owner_)[index_]; }
+    T* operator->() const { return &(*owner_)[index_]; }
+    T& operator[](long offset) const { return (*owner_)[index_ + offset]; }
+    deque_iterator& operator++() {
+        index_++;
+        return *this;
+    }
+    deque_iterator operator++(int) {
+        deque_iterator old(owner_, index_);
+        index_++;
+        return old;
+    }
+    deque_iterator& operator--() {
+        index_--;
+        return *this;
+    }
+    deque_iterator operator--(int) {
+        deque_iterator old(owner_, index_);
+        index_--;
+        return old;
+    }
+    deque_iterator& operator+=(long count) {
+        index_ += count;
+        return *this;
+    }
+    deque_iterator& operator-=(long count) {
+        index_ -= count;
+        return *this;
+    }
+    deque_iterator operator+(long count) const { return deque_iterator(owner_, index_ + count); }
+    deque_iterator operator-(long count) const { return deque_iterator(owner_, index_ - count); }
+    long operator-(const deque_iterator& other) const { return index_ - other.index_; }
+    bool operator==(const deque_iterator& other) const { return index_ == other.index_; }
+    bool operator!=(const deque_iterator& other) const { return index_ != other.index_; }
+    bool operator<(const deque_iterator& other) const { return index_ < other.index_; }
+    bool operator>(const deque_iterator& other) const { return index_ > other.index_; }
+    bool operator<=(const deque_iterator& other) const { return index_ <= other.index_; }
+    bool operator>=(const deque_iterator& other) const { return index_ >= other.index_; }
+    deque<T, Allocator>* owner_;
+    long index_;
+};
+
+template <typename T, typename Allocator = allocator<T>>
+class deque {
+public:
+    typedef Allocator allocator_type;
+    typedef T value_type;
+    typedef size_t size_type;
+    typedef T& reference;
+    typedef deque_iterator<T, Allocator> iterator;
+    typedef deque_iterator<T, Allocator> const_iterator;
+
+    deque() : items_(0), head_(0), size_(0), room_(0) {}
+    explicit deque(const Allocator& alloc) : alloc_(alloc), items_(0), head_(0), size_(0), room_(0) {}
+    deque(size_t count) : items_(0), head_(0), size_(0), room_(0) { resize(count); }
+    deque(size_t count, const T& value) : items_(0), head_(0), size_(0), room_(0) {
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+    }
+    deque(initializer_list<T> list) : items_(0), head_(0), size_(0), room_(0) {
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+    }
+    template <typename I>
+    deque(I first, I last) : items_(0), head_(0), size_(0), room_(0) {
+        for (; first != last; ++first) { push_back(*first); }
+    }
+    deque(const deque& other) : alloc_(other.alloc_), items_(0), head_(0), size_(0), room_(0) {
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.slot(i)); }
+    }
+    deque(deque&& other) : items_(0), head_(0), size_(0), room_(0) { swap(other); }
+    ~deque() {
+        clear();
+        if (items_ != 0) { alloc_.deallocate(items_, room_); }
+    }
+    Allocator get_allocator() const { return alloc_; }
+    deque& operator=(const deque& other) {
+        if (this == &other) { return *this; }
+        clear();
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.slot(i)); }
+        return *this;
+    }
+    deque& operator=(deque&& other) {
+        swap(other);
+        return *this;
+    }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    size_t max_size() const { return 1152921504606846975ul / sizeof(T); }
+    T& operator[](size_t index) const { return items_[(head_ + index) % room_]; }
+    T& at(size_t index) const {
+        if (index >= size_) { karc_throw_out_of_range("deque::at"); }
+        return items_[(head_ + index) % room_];
+    }
+    T& front() const { return items_[head_]; }
+    T& back() const { return items_[(head_ + size_ - 1) % room_]; }
+    deque_iterator<T, Allocator> begin() const { return deque_iterator<T, Allocator>((deque*)this, 0); }
+    deque_iterator<T, Allocator> end() const { return deque_iterator<T, Allocator>((deque*)this, (long)size_); }
+    deque_iterator<T, Allocator> cbegin() const { return begin(); }
+    deque_iterator<T, Allocator> cend() const { return end(); }
+    reverse_iterator<deque_iterator<T, Allocator>> rbegin() const { return reverse_iterator<deque_iterator<T, Allocator>>(end()); }
+    reverse_iterator<deque_iterator<T, Allocator>> rend() const { return reverse_iterator<deque_iterator<T, Allocator>>(begin()); }
+
+    void push_back(const T& value) {
+        if (size_ == room_) { grow(); }
+        new (&items_[(head_ + size_) % room_]) T(value);
+        size_++;
+    }
+    void push_front(const T& value) {
+        if (size_ == room_) { grow(); }
+        head_ = (head_ + room_ - 1) % room_;
+        new (&items_[head_]) T(value);
+        size_++;
+    }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        if (size_ == room_) { grow(); }
+        new (&items_[(head_ + size_) % room_]) T(std::forward<Args>(args)...);
+        size_++;
+        return back();
+    }
+    template <typename... Args>
+    T& emplace_front(Args&&... args) {
+        if (size_ == room_) { grow(); }
+        head_ = (head_ + room_ - 1) % room_;
+        new (&items_[head_]) T(std::forward<Args>(args)...);
+        size_++;
+        return front();
+    }
+    void pop_back() {
+        if (size_ == 0) { return; }
+        back().~T();
+        size_--;
+    }
+    void pop_front() {
+        if (size_ == 0) { return; }
+        items_[head_].~T();
+        head_ = (head_ + 1) % room_;
+        size_--;
+    }
+    // Destroys the elements first to last, as libstdc++ does.
+    void clear() {
+        for (size_t i = 0; i < size_; i++) { slot(i).~T(); }
+        size_ = 0;
+        head_ = 0;
+    }
+    void resize(size_t count) {
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) { emplace_back(); }
+    }
+    void resize(size_t count, const T& value) {
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) { push_back(value); }
+    }
+    deque_iterator<T, Allocator> insert(deque_iterator<T, Allocator> position, const T& value) {
+        long index = position.index_;
+        push_back(value);
+        for (long i = (long)size_ - 1; i > index; i--) { std::swap(slot(i), slot(i - 1)); }
+        return deque_iterator<T, Allocator>(this, index);
+    }
+    deque_iterator<T, Allocator> erase(deque_iterator<T, Allocator> position) { return erase(position, position + 1); }
+    deque_iterator<T, Allocator> erase(deque_iterator<T, Allocator> first, deque_iterator<T, Allocator> last) {
+        long count = last.index_ - first.index_;
+        if (count == 0) { return first; }
+        for (long i = first.index_; i + count < (long)size_; i++) { slot(i) = slot(i + count); }
+        for (long i = 0; i < count; i++) { pop_back(); }
+        return deque_iterator<T, Allocator>(this, first.index_);
+    }
+    void swap(deque& other) {
+        Allocator alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+        T* items = items_;
+        items_ = other.items_;
+        other.items_ = items;
+        size_t head = head_;
+        head_ = other.head_;
+        other.head_ = head;
+        size_t size = size_;
+        size_ = other.size_;
+        other.size_ = size;
+        size_t room = room_;
+        room_ = other.room_;
+        other.room_ = room;
+    }
+
+    bool operator==(const deque& other) const {
+        if (size_ != other.size_) { return false; }
+        for (size_t i = 0; i < size_; i++) {
+            if (!(slot(i) == other.slot(i))) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const deque& other) const { return !(*this == other); }
+    bool operator<(const deque& other) const {
+        for (size_t i = 0; i < size_ && i < other.size_; i++) {
+            if (slot(i) < other.slot(i)) { return true; }
+            if (other.slot(i) < slot(i)) { return false; }
+        }
+        return size_ < other.size_;
+    }
+
+private:
+    T& slot(size_t index) const { return items_[(head_ + index) % room_]; }
+    // Doubles the room, unrolling the ring so the front is at slot 0.
+    // Elements move bitwise, as in vector.
+    void grow() {
+        size_t wanted = room_ * 2;
+        if (wanted < 8) { wanted = 8; }
+        T* grown = alloc_.allocate(wanted);
+        memset(grown, 0, wanted * sizeof(T));
+        for (size_t i = 0; i < size_; i++) { memcpy(&grown[i], &items_[(head_ + i) % room_], sizeof(T)); }
+        if (items_ != 0) { alloc_.deallocate(items_, room_); }
+        items_ = grown;
+        head_ = 0;
+        room_ = wanted;
+    }
+
+    Allocator alloc_;
+    T* items_;
+    size_t head_;
+    size_t size_;
+    size_t room_;
+};
+
+}
+
+#endif

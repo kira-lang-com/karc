@@ -1,0 +1,48 @@
+// <codecvt>: the UTF-8 conversion facets, and std::wstring_convert in
+// <locale> style, converting between UTF-8 and wide strings.
+#ifndef KARC_STD_CODECVT
+#define KARC_STD_CODECVT
+
+#include <string>
+#include <cwchar>
+
+namespace std {
+
+template <typename T>
+class codecvt_utf8 {
+public:
+    int unused;
+};
+template <typename T>
+class codecvt_utf8_utf16 {
+public:
+    int unused;
+};
+
+template <typename Codecvt, typename Wide = wchar_t>
+class wstring_convert {
+public:
+    wstring_convert() {}
+    wstring from_bytes(const string& text) {
+        size_t length = mbstowcs(0, text.c_str(), 0);
+        wstring result;
+        result.resize(length);
+        mbstowcs(&result[0], text.c_str(), length + 1);
+        return result;
+    }
+    wstring from_bytes(const char* text) { return from_bytes(string(text)); }
+    string to_bytes(const wstring& text) {
+        size_t length = wcstombs(0, text.c_str(), 0);
+        string result;
+        result.resize(length);
+        wcstombs(&result[0], text.c_str(), length + 1);
+        return result;
+    }
+
+private:
+    int unused_;
+};
+
+}
+
+#endif

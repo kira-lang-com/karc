@@ -1,0 +1,28 @@
+// Bundled ABI headers select layouts from the compilation target, rather
+// than the machine running the compiler.
+function defineTargetMacro(state: borrow mut Preprocessor, name: String) {
+    let value = Token { space = false, spelling = "1", kind = .Number, text = "", number = 1, start = 0, end = 0, line = false }
+    defineMacro(state, Macro { name = name, isFunction = false, parameters = [], body = [value], live = true })
+}
+function defineTargetMacros(state: borrow mut Preprocessor, target: String) {
+    defineTargetMacro(state, "__KARC__")
+    match target {
+        "aarch64-unknown-linux-gnu" -> {
+            defineTargetMacro(state, "__KARC_TARGET_AARCH64__")
+            defineTargetMacro(state, "__KARC_TARGET_LINUX_GNU__")
+        }
+        "x86_64-unknown-linux-gnu" -> {
+            defineTargetMacro(state, "__KARC_TARGET_X86_64__")
+            defineTargetMacro(state, "__KARC_TARGET_LINUX_GNU__")
+        }
+        "aarch64-apple-darwin" -> {
+            defineTargetMacro(state, "__KARC_TARGET_AARCH64__")
+            defineTargetMacro(state, "__KARC_TARGET_DARWIN__")
+        }
+        "x86_64-apple-darwin" -> {
+            defineTargetMacro(state, "__KARC_TARGET_X86_64__")
+            defineTargetMacro(state, "__KARC_TARGET_DARWIN__")
+        }
+        else -> {}
+    }
+}

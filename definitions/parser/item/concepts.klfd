@@ -1,0 +1,263 @@
+// C++20 constraints, rewritten away before parsing. A concept becomes a
+// bool variable template in which each requires-expression is taken as
+// true; a requires-clause is dropped; a constrained template parameter
+// (`std::integral T`) becomes `typename T`; `Concept auto` becomes `auto`.
+// Constraints so never reject a candidate: overloads told apart only by
+// their constraints are ambiguous in KArc. A function parameter declared
+// `auto` makes the function a template with one more type parameter.
+
+function rewriteConstraints(tokens: [Token]) -> [Token] {
+    var concepts: [String] = []
+    var out: [Token] = []
+    // The angle depth each open template parameter list began at.
+    var lists: [Int] = []
+    var angle = 0
+    var paramStart = false
+    // For each open parenthesis: whether it holds function parameters.
+    var parens: [Bool] = []
+    var autos = 0
+    var i = 0
+    while i < tokens.count {
+        let t = tokens[i]
+        if t.kind == .Ident && t.text == "template" && i + 1 < tokens.count && tokens[i + 1].kind == .Lt {
+            out.append(t)
+            out.append(tokens[i + 1])
+            angle += 1
+            lists.append(angle)
+            paramStart = true
+            i += 2
+            continue
+        }
+        if t.kind == .Ident && t.text == "concept" && out.count > 0 && closesList(out[out.count - 1]) {
+            out.append(renamed(t, .KwInline, "inline"))
+            out.append(renamed(t, .Ident, "constexpr"))
+            out.append(renamed(t, .KwBool, "bool"))
+            if i + 1 < tokens.count { concepts.append(tokens[i + 1].text) }
+            i += 1
+            continue
+        }
+        if t.kind == .Ident && t.text == "requires" {
+            if out.count > 0 && startsClause(out[out.count - 1]) {
+                i = skipConstraint(tokens, i + 1)
+            } else {
+                out.append(renamed(t, .Ident, "true"))
+                i = skipRequiresExpression(tokens, i)
+            }
+            continue
+        }
+        let reference = conceptReference(tokens, i, concepts)
+        if reference > i && reference < tokens.count {
+            let next = tokens[reference]
+            if next.kind == .Ident && next.text == "auto" {
+                i = reference
+                continue
+            }
+            if paramStart && (next.kind == .Ident || next.kind == .Ellipsis) {
+                out.append(renamed(t, .Ident, "typename"))
+                paramStart = false
+                i = reference
+                continue
+            }
+        }
+        if t.kind == .Ident && t.text == "auto" && autoParameter(out, parens) {
+            let name = joinText(["__karc_auto_", decimalText(autos)])
+            autos += 1
+            out = withTemplateParameter(out, name)
+            out.append(renamed(t, .Ident, name))
+            i += 1
+            continue
+        }
+        if t.kind == .LParen { parens.append(out.count > 0 && declaresFunction(out[out.count - 1])) }
+        if t.kind == .RParen && parens.count > 0 { parens = withoutLastFlag(parens) }
+        paramStart = false
+        if lists.count > 0 {
+            if t.kind == .Lt { angle += 1 }
+            if t.kind == .Comma && angle == lists[lists.count - 1] { paramStart = true }
+            var closes = 0
+            if t.kind == .Gt { closes = 1 }
+            if t.kind == .Shr { closes = 2 }
+            while closes > 0 && lists.count > 0 {
+                if angle == lists[lists.count - 1] { lists = withoutLast(lists) }
+                angle -= 1
+                closes -= 1
+            }
+        }
+        out.append(t)
+        i += 1
+    }
+    return out
+}
+// Whether a `(` after `t` opens a function's parameters: after a name,
+// not a keyword that takes parentheses. A lambda's follows `]`.
+function declaresFunction(t: Token) -> Bool {
+    if t.kind != .Ident { return false }
+    match t.text {
+        "decltype", "noexcept", "requires", "alignof", "typeid", "static_assert", "alignas", "catch" -> return false
+        else -> return true
+    }
+}
+// Whether an `auto` next begins a parameter of the innermost parentheses.
+function autoParameter(out: [Token], parens: [Bool]) -> Bool {
+    if parens.count == 0 || !parens[parens.count - 1] || out.count == 0 { return false }
+    var last = out.count - 1
+    if out[last].kind == .KwConst && last > 0 { last -= 1 }
+    return out[last].kind == .LParen || out[last].kind == .Comma
+}
+// `out`, whose last open parenthesis holds a function's parameters, with
+// type parameter `name` added to the function's template header, which is
+// made when there is none.
+function withTemplateParameter(out: [Token], name: String) -> [Token] {
+    var open = out.count - 1
+    var depth = 0
+    while open >= 0 {
+        if out[open].kind == .RParen { depth += 1 }
+        if out[open].kind == .LParen {
+            if depth == 0 { break }
+            depth -= 1
+        }
+        open -= 1
+    }
+    let site = out[open]
+    var at = open - 2
+    var angle = 0
+    while at >= 0 {
+        let k = out[at].kind
+        if k == .Gt { angle += 1 }
+        if k == .Shr { angle += 2 }
+        if k == .Lt {
+            angle -= 1
+            if angle == 0 && at > 0 && out[at - 1].kind == .Ident && out[at - 1].text == "template" {
+                var added = [renamed(site, .Ident, "typename"), renamed(site, .Ident, name)]
+                if out[at + 1].kind != .Gt { added.append(renamed(site, .Comma, ",")) }
+                return spliced(out, at + 1, added)
+            }
+        }
+        if angle == 0 && (k == .Semicolon || k == .LBrace || k == .RBrace) { break }
+        if angle == 0 && k == .Colon && at > 0 && out[at - 1].kind == .Ident &&
+            (out[at - 1].text == "public" || out[at - 1].text == "private" || out[at - 1].text == "protected") { break }
+        at -= 1
+    }
+    let header = [renamed(site, .Ident, "template"), renamed(site, .Lt, "<"), renamed(site, .Ident, "typename"), renamed(site, .Ident, name), renamed(site, .Gt, ">")]
+    return spliced(out, at + 1, header)
+}
+function spliced(tokens: [Token], at: Int, added: [Token]) -> [Token] {
+    var result: [Token] = []
+    for i in 0..at { result.append(tokens[i]) }
+    for t in added { result.append(t) }
+    for i in at..tokens.count { result.append(tokens[i]) }
+    return result
+}
+function withoutLastFlag(items: [Bool]) -> [Bool] {
+    var kept: [Bool] = []
+    for i in 0..(items.count - 1) { kept.append(items[i]) }
+    return kept
+}
+function withoutLast(items: [Int]) -> [Int] {
+    var kept: [Int] = []
+    for i in 0..(items.count - 1) { kept.append(items[i]) }
+    return kept
+}
+function renamed(t: Token, kind: TokenKind, text: String) -> Token {
+    return Token { space = false, spelling = "", kind = kind, text = text, number = 0, start = t.start, end = t.end, line = t.line }
+}
+function closesList(t: Token) -> Bool {
+    return t.kind == .Gt || t.kind == .Shr
+}
+// Whether a `requires` after `t` begins a clause: after a template
+// parameter list or a function declarator, not inside an expression.
+function startsClause(t: Token) -> Bool {
+    if closesList(t) || t.kind == .RParen || t.kind == .KwConst { return true }
+    if t.kind != .Ident { return false }
+    match t.text {
+        "noexcept", "override", "final" -> return true
+        else -> return false
+    }
+}
+// The index after a concept's name (qualified, with any template
+// arguments) starting at `start`, or -1 when no concept is named there.
+function conceptReference(tokens: [Token], start: Int, concepts: [String]) -> Int {
+    var i = start
+    var last = ""
+    while i < tokens.count && tokens[i].kind == .Ident {
+        last = tokens[i].text
+        i += 1
+        if i + 1 < tokens.count && tokens[i].kind == .Colon && tokens[i + 1].kind == .Colon {
+            i += 2
+        } else {
+            break
+        }
+    }
+    if last == "" || !containsText(concepts, last) { return -1 }
+    if i < tokens.count && tokens[i].kind == .Lt { i = skipAngles(tokens, i) }
+    return i
+}
+function containsText(items: [String], text: String) -> Bool {
+    for item in items {
+        if item == text { return true }
+    }
+    return false
+}
+// A constraint: primaries joined by && and ||.
+function skipConstraint(tokens: [Token], start: Int) -> Int {
+    var i = skipConstraintPrimary(tokens, start)
+    while i < tokens.count && (tokens[i].kind == .AndAnd || tokens[i].kind == .OrOr) {
+        i = skipConstraintPrimary(tokens, i + 1)
+    }
+    return i
+}
+function skipConstraintPrimary(tokens: [Token], start: Int) -> Int {
+    var i = start
+    while i < tokens.count && tokens[i].kind == .Bang { i += 1 }
+    if i >= tokens.count { return i }
+    if tokens[i].kind == .LParen { return skipBalanced(tokens, i, .LParen, .RParen) }
+    if tokens[i].kind == .Ident && tokens[i].text == "requires" { return skipRequiresExpression(tokens, i) }
+    while i < tokens.count && tokens[i].kind == .Ident {
+        i += 1
+        if i < tokens.count && tokens[i].kind == .Lt { i = skipAngles(tokens, i) }
+        if i + 1 < tokens.count && tokens[i].kind == .Colon && tokens[i + 1].kind == .Colon {
+            i += 2
+        } else {
+            break
+        }
+    }
+    return i
+}
+// `requires (params) { requirements }`, the parameters optional.
+function skipRequiresExpression(tokens: [Token], start: Int) -> Int {
+    var i = start + 1
+    if i < tokens.count && tokens[i].kind == .LParen { i = skipBalanced(tokens, i, .LParen, .RParen) }
+    if i < tokens.count && tokens[i].kind == .LBrace { i = skipBalanced(tokens, i, .LBrace, .RBrace) }
+    return i
+}
+function skipBalanced(tokens: [Token], start: Int, open: TokenKind, close: TokenKind) -> Int {
+    var depth = 0
+    var i = start
+    while i < tokens.count {
+        if tokens[i].kind == open { depth += 1 }
+        if tokens[i].kind == close {
+            depth -= 1
+            if depth == 0 { return i + 1 }
+        }
+        i += 1
+    }
+    return i
+}
+// Template arguments from the `<` at `start`, parentheses nesting.
+function skipAngles(tokens: [Token], start: Int) -> Int {
+    var depth = 0
+    var parens = 0
+    var i = start
+    while i < tokens.count {
+        let kind = tokens[i].kind
+        if kind == .LParen { parens += 1 }
+        if kind == .RParen { parens -= 1 }
+        if parens == 0 {
+            if kind == .Lt { depth += 1 }
+            if kind == .Gt { depth -= 1 }
+            if kind == .Shr { depth -= 2 }
+            if depth <= 0 { return i + 1 }
+        }
+        i += 1
+    }
+    return i
+}

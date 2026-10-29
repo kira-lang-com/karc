@@ -1,0 +1,110 @@
+// A C function whose address is taken where a KArc function pointer is
+// wanted: KIR does not convert between the two ABIs, so the pointer is to an
+// adapter, a KArc function calling the C one. Adapters are declared where
+// they are first wanted and given bodies after the module's functions.
+
+// The function reference `callee` gives as a value: its own, or its
+// adapter's when it is a C function.
+function functionReference(state: borrow mut Lowerer, callee: Int) -> KirValue {
+    for adapter in state.adapters {
+        if adapter.callee == callee { return kFuncRef(state, adapter.handle) }
+    }
+    return kFuncRef(state, state.functionSlots[callee].handle)
+}
+// Before any body: an adapter for each C function a name expression takes
+// the address of (declaring one inside a call would disturb its arguments).
+function declareAdapters(state: borrow mut Lowerer) {
+    var named: [Int] = []
+    var spans: [Span] = []
+    for e in state.tree.expressions {
+        match e.kind {
+            Name(namedExpr) -> {
+                if namedExpr.valueUse {
+                    var name = namedExpr.name
+                    if utf8Count(name) > 2 && utf8Byte(name, 0) == 58 && utf8Byte(name, 1) == 58 { name = utf8Slice(name, 2, utf8Count(name)) }
+                    let callee = functionSlot(state, name)
+                    if callee >= 0 {
+                        named.append(callee)
+                        spans.append(e.nameSpan)
+                    }
+                }
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Call -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+    }
+    for i in 0..named.count {
+        if !adapted(state, named[i]) && isForeignSlot(state, named[i]) { declareAdapter(state, named[i], spans[i]) }
+    }
+}
+function adapted(state: Lowerer, callee: Int) -> Bool {
+    for adapter in state.adapters {
+        if adapter.callee == callee { return true }
+    }
+    return false
+}
+function declareAdapter(state: borrow mut Lowerer, callee: Int, span: Span) {
+    let name = state.functionSlots[callee].name
+    let signature = kSignatureNamed(state, span, joinText([name, "__karc_adapter"]), state.functionSlots[callee].result, sourceSuffix(name))
+    for parameter in state.functionSlots[callee].parameters { kSignatureParameter(state, signature, parameter) }
+    let handle = kDeclareFunction(signature)
+    state.adapters.append(AdapterEntry { callee = callee, handle = handle })
+}
+// Whether declared function `callee` has no definition in the unit, so it
+// is a C symbol.
+function isForeignSlot(state: borrow mut Lowerer, callee: Int) -> Bool {
+    let name = state.functionSlots[callee].name
+    var cut = utf8Count(name)
+    for i in 0..utf8Count(name) {
+        if utf8Byte(name, i) == 35 && cut == utf8Count(name) { cut = i }
+    }
+    for i in functionsNamed(state, unqualifiedName(utf8Slice(name, 0, cut))) {
+        if functionSlotForFunction(state, i) == callee {
+            if !state.tree.functions[i].isProto { return false }
+            // Defined in the unit, perhaps under another key (a `static`
+            // one's includes where it is declared).
+            let key = functionKey(state.tree.functions[i])
+            for j in functionsNamed(state, unqualifiedName(utf8Slice(name, 0, cut))) {
+                if !state.tree.functions[j].isProto && functionKey(state.tree.functions[j]) == key { return false }
+            }
+            return true
+        }
+    }
+    return false
+}
+// The adapters' bodies: pass every parameter on and return the result.
+function emitAdapters(state: borrow mut Lowerer) {
+    for adapter in state.adapters {
+        let callee = adapter.callee
+        let handle = adapter.handle
+        kOpenBody(handle)
+        resetFunctionState(state, 0, handle)
+        let parameters = state.functionSlots[callee].parameters
+        for p in 0..parameters.count { kArgument(state, kParameter(handle, p)) }
+        let result = state.functionSlots[callee].result
+        if result == "unit" {
+            kCallVoid(state, state.functionSlots[callee].handle)
+            kReturnVoid(state)
+        } else {
+            kReturn(state, kCall(state, state.functionSlots[callee].handle, result))
+        }
+    }
+}

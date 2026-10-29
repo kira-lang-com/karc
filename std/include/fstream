@@ -1,0 +1,130 @@
+// <fstream>: file streams, the standard streams' classes opened on a path.
+#ifndef KARC_STD_FSTREAM
+#define KARC_STD_FSTREAM
+
+#include <iostream>
+#include <string>
+
+namespace std {
+
+class ofstream : public ostream {
+public:
+    ofstream() : ostream(-1) {}
+    ofstream(const char* path, int mode = ios_base::out) : ostream(-1) { open(path, mode); }
+    ofstream(const string& path, int mode = ios_base::out) : ostream(-1) { open(path.c_str(), mode); }
+    // A filesystem::path, or anything else with c_str().
+    template <typename P, typename = enable_if_t<is_class_v<P>>>
+    explicit ofstream(const P& path, int mode = ios_base::out) : ostream(-1) { open(path.c_str(), mode); }
+    ~ofstream() { close(); }
+    void open(const char* path, int mode = ios_base::out) {
+        close();
+        int flags = (mode & ios_base::app) ? 1089 : 577;
+        descriptor_ = ::open(path, flags, 420);
+        state_ = descriptor_ < 0 ? ios_base::failbit : 0;
+    }
+    void open(const string& path, int mode = ios_base::out) { open(path.c_str(), mode); }
+    bool is_open() const { return descriptor_ >= 0; }
+    void close() {
+        if (descriptor_ >= 0) { ::close(descriptor_); }
+        descriptor_ = -1;
+    }
+};
+
+class ifstream : public istream {
+public:
+    ifstream() : istream(-1) {}
+    ifstream(const char* path, int mode = ios_base::in) : istream(-1) { open(path, mode); }
+    ifstream(const string& path, int mode = ios_base::in) : istream(-1) { open(path.c_str(), mode); }
+    // A filesystem::path, or anything else with c_str().
+    template <typename P, typename = enable_if_t<is_class_v<P>>>
+    explicit ifstream(const P& path, int mode = ios_base::in) : istream(-1) { open(path.c_str(), mode); }
+    ~ifstream() { close(); }
+    void open(const char* path, int mode = ios_base::in) {
+        close();
+        descriptor_ = ::open(path, 0, 0);
+        buffered_ = 0;
+        at_ = 0;
+        pending_ = -2;
+        state_ = descriptor_ < 0 ? ios_base::failbit : 0;
+    }
+    void open(const string& path, int mode = ios_base::in) { open(path.c_str(), mode); }
+    bool is_open() const { return descriptor_ >= 0; }
+    void close() {
+        if (descriptor_ >= 0) { ::close(descriptor_); }
+        descriptor_ = -1;
+    }
+};
+
+// Reading and writing one file. Writes go straight to the file, reads come
+// from where the read position is; seekg and seekp move them.
+class fstream : public ostream {
+public:
+    fstream() : ostream(-1) {}
+    fstream(const char* path, int mode = ios_base::in | ios_base::out) : ostream(-1) { open(path, mode); }
+    fstream(const string& path, int mode = ios_base::in | ios_base::out) : ostream(-1) { open(path.c_str(), mode); }
+    template <typename P, typename = enable_if_t<is_class_v<P>>>
+    explicit fstream(const P& path, int mode = ios_base::in | ios_base::out) : ostream(-1) { open(path.c_str(), mode); }
+    ~fstream() { close(); }
+    void open(const char* path, int mode = ios_base::in | ios_base::out) {
+        close();
+        // O_RDONLY, O_WRONLY or O_RDWR, with O_CREAT, O_TRUNC and O_APPEND.
+        int flags = 0;
+        bool reads = (mode & ios_base::in) != 0;
+        bool writes = (mode & (ios_base::out | ios_base::app | ios_base::trunc)) != 0;
+        if (reads && writes) { flags = 2; } else if (writes) { flags = 1; }
+        if (writes && (!reads || (mode & (ios_base::trunc | ios_base::app)) != 0)) { flags = flags | 64; }
+        if ((mode & ios_base::trunc) != 0 || (writes && !reads && (mode & ios_base::app) == 0)) { flags = flags | 512; }
+        if ((mode & ios_base::app) != 0) { flags = flags | 1024; }
+        descriptor_ = ::open(path, flags, 420);
+        state_ = descriptor_ < 0 ? ios_base::failbit : 0;
+        reader_.karc_share(descriptor_);
+        if ((mode & ios_base::ate) != 0) { seekp(0, ios_base::end); }
+    }
+    void open(const string& path, int mode = ios_base::in | ios_base::out) { open(path.c_str(), mode); }
+    bool is_open() const { return descriptor_ >= 0; }
+    void close() {
+        if (descriptor_ >= 0) { ::close(descriptor_); }
+        descriptor_ = -1;
+        reader_.karc_share(-1);
+    }
+    template <typename T>
+    fstream& operator>>(T& value) {
+        reader_ >> value;
+        return *this;
+    }
+    int get() { return reader_.get(); }
+    int peek() { return reader_.peek(); }
+    fstream& read(char* out, long count) {
+        reader_.read(out, count);
+        return *this;
+    }
+    long gcount() const { return reader_.gcount(); }
+    bool readLine(string& line, char delimiter = '\n') { return reader_.readLine(line, delimiter); }
+    fstream& seekg(long position) {
+        reader_.seekg(position);
+        return *this;
+    }
+    fstream& seekg(long offset, int direction) {
+        reader_.seekg(offset, direction);
+        return *this;
+    }
+    long tellg() { return reader_.tellg(); }
+    bool eof() const { return reader_.eof(); }
+    explicit operator bool() const { return !reader_.fail() && !fail(); }
+    bool operator!() const { return reader_.fail() || fail(); }
+    void clear() {
+        reader_.clear();
+        state_ = 0;
+    }
+
+private:
+    istream reader_;
+};
+inline fstream& getline(fstream& input, string& line, char delimiter = '\n') {
+    input.readLine(line, delimiter);
+    return input;
+}
+
+}
+
+#endif

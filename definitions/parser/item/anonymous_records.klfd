@@ -1,0 +1,7 @@
+function parseAnonymousRecord(p: borrow mut Parser, keyword: Token) -> String {
+    let name = joinText(["__karc_record_", decimalText(p.tree.structs.count)])
+    p.anonymousDepth = p.anonymousDepth + 1
+    parseStructDefinition(p, name, tokenSpan(keyword), keyword.start)
+    p.anonymousDepth = p.anonymousDepth - 1
+    return name
+}

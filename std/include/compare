@@ -1,0 +1,50 @@
+// <compare>: the comparison categories of `<=>`. On built-in types `<=>`
+// yields an int, negative, zero or positive, which each category converts
+// from; a category compares with the literal 0 as C++ specifies.
+#ifndef KARC_STD_COMPARE
+#define KARC_STD_COMPARE
+
+namespace std {
+
+class karc_ordering {
+public:
+    karc_ordering() : value_(0) {}
+    karc_ordering(int value) : value_(value < 0 ? -1 : (value > 0 ? 1 : 0)) {}
+    bool operator==(int zero) const { return value_ == 0; }
+    bool operator!=(int zero) const { return value_ != 0; }
+    bool operator<(int zero) const { return value_ < 0; }
+    bool operator>(int zero) const { return value_ > 0; }
+    bool operator<=(int zero) const { return value_ <= 0; }
+    bool operator>=(int zero) const { return value_ >= 0; }
+    bool operator==(const karc_ordering& other) const { return value_ == other.value_; }
+    bool operator!=(const karc_ordering& other) const { return value_ != other.value_; }
+    int value_;
+};
+
+class strong_ordering : public karc_ordering {
+public:
+    strong_ordering() : karc_ordering(0) {}
+    strong_ordering(int value) : karc_ordering(value) {}
+    static strong_ordering less;
+    static strong_ordering equal;
+    static strong_ordering equivalent;
+    static strong_ordering greater;
+};
+inline strong_ordering strong_ordering::less = strong_ordering(-1);
+inline strong_ordering strong_ordering::equal = strong_ordering(0);
+inline strong_ordering strong_ordering::equivalent = strong_ordering(0);
+inline strong_ordering strong_ordering::greater = strong_ordering(1);
+
+typedef strong_ordering weak_ordering;
+typedef strong_ordering partial_ordering;
+
+inline bool is_eq(karc_ordering order) { return order.value_ == 0; }
+inline bool is_neq(karc_ordering order) { return order.value_ != 0; }
+inline bool is_lt(karc_ordering order) { return order.value_ < 0; }
+inline bool is_gt(karc_ordering order) { return order.value_ > 0; }
+inline bool is_lteq(karc_ordering order) { return order.value_ <= 0; }
+inline bool is_gteq(karc_ordering order) { return order.value_ >= 0; }
+
+}
+
+#endif

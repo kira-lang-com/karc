@@ -1,0 +1,55 @@
+// Literal suffixes: the integer ones that set a literal's type, and the
+// user-defined ones that make a literal a call.
+
+// What an integer suffix says of the literal's type: "u" unsigned, "l"
+// 64-bit, "ul" both, "" neither.
+function integerSuffixKind(suffix: String) -> String {
+    var isUnsigned = false
+    var isLong = false
+    for i in 0..utf8Count(suffix) {
+        let c = utf8Byte(suffix, i)
+        if c == 117 || c == 85 { isUnsigned = true }
+        if c == 108 || c == 76 { isLong = true }
+    }
+    if isUnsigned && isLong { return "ul" }
+    if isUnsigned { return "u" }
+    if isLong { return "l" }
+    return ""
+}
+function standardNumberSuffix(suffix: String, isFloat: Bool) -> Bool {
+    if isFloat {
+        match suffix {
+            "f", "F", "l", "L" -> return true
+            else -> return false
+        }
+    }
+    match suffix {
+        "l", "L", "ll", "LL" -> return true
+        else -> return unsignedIntegerSuffix(suffix)
+    }
+}
+// A user-defined literal: `100ms` is the call `karc_udl_ms(100)` and
+// `"text"s` the call `karc_udl_s("text", 4)`, which `operator""ms`
+// and `operator""s` declare.
+function literalOperatorName(suffix: String) -> String {
+    return joinText(["karc_udl_", suffix])
+}
+function literalCall(literal: Token, suffix: String, end: Int) -> [Token] {
+    var call: [Token] = [token(.Ident, literalOperatorName(suffix), 0, literal.start, end, literal.line), token(.LParen, "(", 0, literal.start, literal.start, false), literal]
+    if literal.kind == .Str {
+        call.append(token(.Comma, ",", 0, literal.end, literal.end, false))
+        call.append(token(.Number, "", decodedLength(literal.text), literal.end, literal.end, false))
+    }
+    call.append(token(.RParen, ")", 0, end, end, false))
+    return call
+}
+// The byte count of a string literal's raw text once escapes are decoded.
+function decodedLength(raw: String) -> Int {
+    var count = 0
+    var i = 0
+    while i < utf8Count(raw) {
+        if utf8Byte(raw, i) == 92 { i = i + 1 + escapeLength(raw, i + 1) } else { i = i + 1 }
+        count = count + 1
+    }
+    return count
+}

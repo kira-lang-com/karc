@@ -1,0 +1,49 @@
+// Expression node builders. Unused child slots use `noExpr` and unused text is "".
+function eNumber(p: borrow mut Parser, value: Int, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .NumberLit(NumberExpression { value = value, suffix = "" }), span = span, nameSpan = span })
+}
+function eFloat(p: borrow mut Parser, value: String, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .FloatLit(value), span = span, nameSpan = span })
+}
+function eStr(p: borrow mut Parser, index: Int, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .StringLit(StringExpression { index = index, prefix = "" }), span = span, nameSpan = span })
+}
+function eName(p: borrow mut Parser, text: String, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Name(NameExpression { name = text, explicitArguments = 0, valueUse = true }), span = span, nameSpan = span })
+}
+function eUnary(p: borrow mut Parser, kind: UnaryKind, operand: ExprId, span: Span) -> ExprId {
+    match kind {
+        Neg -> return addExpr(p, Expr { kind = .Neg(operand), span = span, nameSpan = span })
+        Positive -> return addExpr(p, Expr { kind = .Positive(operand), span = span, nameSpan = span })
+        Not -> return addExpr(p, Expr { kind = .Not(operand), span = span, nameSpan = span })
+        BitNot -> return addExpr(p, Expr { kind = .BitNot(operand), span = span, nameSpan = span })
+        AddrOf -> return addExpr(p, Expr { kind = .AddrOf(operand), span = span, nameSpan = span })
+        Deref -> return addExpr(p, Expr { kind = .Deref(operand), span = span, nameSpan = span })
+        Sizeof -> return addExpr(p, Expr { kind = .Sizeof(operand), span = span, nameSpan = span })
+    }
+}
+function eStep(p: borrow mut Parser, kind: StepKind, op: String, operand: ExprId, span: Span) -> ExprId {
+    let step = StepExpression { operand = operand, op = op }
+    match kind {
+        PreStep -> return addExpr(p, Expr { kind = .PreStep(step), span = span, nameSpan = span })
+        PostStep -> return addExpr(p, Expr { kind = .PostStep(step), span = span, nameSpan = span })
+    }
+}
+function eCast(p: borrow mut Parser, ty: String, operand: ExprId, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Cast(CastExpression { ty = ty, operand = operand }), span = span, nameSpan = span })
+}
+function eCall(p: borrow mut Parser, name: String, args: [ExprId], span: Span, nameSpan: Span, receiver: ExprId) -> ExprId {
+    return addExpr(p, Expr { kind = .Call(CallExpression { receiver = receiver, name = name, arguments = args, explicitArguments = 0, awaitTransform = false }), span = span, nameSpan = nameSpan })
+}
+function eField(p: borrow mut Parser, base: ExprId, name: String, span: Span, nameSpan: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Field(FieldExpression { base = base, name = name }), span = span, nameSpan = nameSpan })
+}
+function eIndex(p: borrow mut Parser, base: ExprId, index: ExprId, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Index(IndexExpression { base = base, index = index }), span = span, nameSpan = span })
+}
+function eBinary(p: borrow mut Parser, op: String, left: ExprId, right: ExprId, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Binary(BinaryExpression { left = left, right = right, op = op }), span = span, nameSpan = span })
+}
+function eTernary(p: borrow mut Parser, cond: ExprId, then: ExprId, els: ExprId, span: Span) -> ExprId {
+    return addExpr(p, Expr { kind = .Ternary(TernaryExpression { condition = cond, thenValue = then, elseValue = els }), span = span, nameSpan = span })
+}

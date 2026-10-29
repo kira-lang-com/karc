@@ -1,0 +1,57 @@
+// <array>: std::array, a fixed-size array with container members.
+#ifndef KARC_STD_ARRAY
+#define KARC_STD_ARRAY
+
+#include <cstddef>
+#include <exception>
+#include <utility>
+#include <iterator>
+
+namespace std {
+
+template <typename T, size_t N>
+struct array {
+    T elements_[N];
+
+    T& operator[](size_t index) { return elements_[index]; }
+    T& at(size_t index) {
+        if (index >= N) { karc_throw_out_of_range("array::at"); }
+        return elements_[index];
+    }
+    T& front() { return elements_[0]; }
+    T& back() { return elements_[N - 1]; }
+    T* data() { return elements_; }
+    T* begin() { return elements_; }
+    T* end() { return elements_ + N; }
+    size_t size() const { return N; }
+    bool empty() const { return N == 0; }
+    const T* cbegin() const { return elements_; }
+    const T* cend() const { return elements_ + N; }
+    reverse_iterator<T*> rbegin() { return reverse_iterator<T*>(elements_ + N); }
+    reverse_iterator<T*> rend() { return reverse_iterator<T*>(elements_); }
+    size_t max_size() const { return N; }
+    void fill(const T& value) {
+        for (size_t i = 0; i < N; i++) { elements_[i] = value; }
+    }
+    void swap(array& other) {
+        for (size_t i = 0; i < N; i++) { std::swap(elements_[i], other.elements_[i]); }
+    }
+    bool operator==(const array& other) const {
+        for (size_t i = 0; i < N; i++) {
+            if (!(elements_[i] == other.elements_[i])) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const array& other) const { return !(*this == other); }
+    bool operator<(const array& other) const {
+        for (size_t i = 0; i < N; i++) {
+            if (elements_[i] < other.elements_[i]) { return true; }
+            if (other.elements_[i] < elements_[i]) { return false; }
+        }
+        return false;
+    }
+};
+
+}
+
+#endif

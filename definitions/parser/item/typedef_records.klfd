@@ -1,0 +1,40 @@
+function typedefRecordAhead(p: borrow Parser) -> Bool {
+    if peekKind(p) != .KwStruct { return false }
+    if peek2Kind(p) == .LBrace { return true }
+    return peek2Kind(p) == .Ident && p.position + 2 < p.tokens.count && p.tokens[p.position + 2].kind == .LBrace
+}
+
+function parseTypedefRecord(p: borrow mut Parser) {
+    let keyword = consume(p)
+    let anonymous = peekKind(p) == .LBrace
+    var name = joinText(["__karc_typedef_", decimalText(p.tree.structs.count)])
+    var nameSpan = tokenSpan(keyword)
+    if !anonymous {
+        let named = consume(p)
+        name = declaredName(p, named.text)
+        nameSpan = tokenSpan(named)
+    }
+    if anonymous { p.anonymousDepth = p.anonymousDepth + 1 }
+    parseStructDefinition(p, name, nameSpan, keyword.start)
+    if anonymous { p.anonymousDepth = p.anonymousDepth - 1 }
+    var more = true
+    while more && p.error == "" {
+        var aliased = joinText(["%", name])
+        while peekKind(p) == .Star {
+            consume(p)
+            skipQualifiers(p)
+            aliased = joinText(["*[0 x ", aliased, "]"])
+        }
+        let aliasName = expect(p, .Ident).text
+        if peekKind(p) == .LBracket {
+            consume(p)
+            let bound = constantExpression(p, expression(p, 0))
+            expect(p, .RBracket)
+            aliased = joinText(["[", decimalText(bound), " x ", aliased, "]"])
+        }
+        addTypedef(p.tree, declaredName(p, aliasName), aliased)
+        more = peekKind(p) == .Comma
+        if more { consume(p) }
+    }
+    expect(p, .Semicolon)
+}

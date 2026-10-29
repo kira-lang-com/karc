@@ -1,0 +1,483 @@
+// <string>: std::string, a growable byte string that owns its text_ and
+// keeps it NUL-terminated.
+#ifndef KARC_STD_STRING
+#define KARC_STD_STRING
+
+#include <cstddef>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include <exception>
+#include <initializer_list>
+#include <iterator>
+
+namespace std {
+
+class string {
+public:
+    typedef char* iterator;
+    typedef const char* const_iterator;
+    typedef char value_type;
+    typedef size_t size_type;
+    static const size_t npos = -1;
+
+    string() : text_(0), size_(0), room_(0) { reserve(15); }
+    string(const char* text) : text_(0), size_(0), room_(0) { assign(text, strlen(text)); }
+    string(const char* text, size_t count) : text_(0), size_(0), room_(0) { assign(text, count); }
+    string(size_t count, char c) : text_(0), size_(0), room_(0) { assign(count, c); }
+    string(const string& other) : text_(0), size_(0), room_(0) { assign(other.text_, other.size_); }
+    string(const string& other, size_t position, size_t count = npos) : text_(0), size_(0), room_(0) {
+        string part = other.substr(position, count);
+        assign(part.text_, part.size_);
+    }
+    string(initializer_list<char> list) : text_(0), size_(0), room_(0) { assign(list.begin(), list.size()); }
+    template <typename I>
+    string(I first, I last) : text_(0), size_(0), room_(0) {
+        reserve(15);
+        for (; first != last; ++first) { push_back(*first); }
+    }
+    ~string() { free(text_); }
+
+    string& operator=(const string& other) {
+        if (this != &other) { assign(other.text_, other.size_); }
+        return *this;
+    }
+    string& operator=(const char* text) { return assign(text, strlen(text)); }
+    string& operator=(char c) { return assign(1, c); }
+    string& operator+=(const string& other) { return append(other.text_, other.size_); }
+    string& operator+=(const char* text) { return append(text, strlen(text)); }
+    string& operator+=(char c) {
+        push_back(c);
+        return *this;
+    }
+    string& assign(const string& other) {
+        if (this != &other) { assign(other.text_, other.size_); }
+        return *this;
+    }
+    string& assign(const char* text) { return assign(text, strlen(text)); }
+    string& assign(const char* text, size_t count) {
+        char* copy = (char*)malloc(count + 1);
+        memcpy(copy, text, count);
+        copy[count] = 0;
+        free(text_);
+        text_ = copy;
+        size_ = count;
+        room_ = count;
+        return *this;
+    }
+    string& assign(const string& other, size_t position, size_t count = npos) { return assign(other.substr(position, count)); }
+    string& assign(initializer_list<char> list) { return assign(list.begin(), list.size()); }
+    template <typename I>
+    string& assign(I first, I last) {
+        string made(first, last);
+        return assign(made.text_, made.size_);
+    }
+    string& assign(size_t count, char c) {
+        clear();
+        reserve(count);
+        for (size_t i = 0; i < count; i++) { text_[i] = c; }
+        size_ = count;
+        text_[size_] = 0;
+        return *this;
+    }
+
+    char& operator[](size_t index) { return text_[index]; }
+    char& at(size_t index) {
+        if (index >= size_) { karc_throw_out_of_range("string::at"); }
+        return text_[index];
+    }
+    char& front() { return text_[0]; }
+    char& back() { return text_[size_ - 1]; }
+    const char* c_str() const { return text_; }
+    const char* data() const { return text_; }
+    char* begin() { return text_; }
+    char* end() { return text_ + size_; }
+    const char* cbegin() const { return text_; }
+    const char* cend() const { return text_ + size_; }
+    reverse_iterator<char*> rbegin() { return reverse_iterator<char*>(text_ + size_); }
+    reverse_iterator<char*> rend() { return reverse_iterator<char*>(text_); }
+
+    size_t size() const { return size_; }
+    size_t length() const { return size_; }
+    size_t capacity() const { return room_; }
+    size_t max_size() const { return 4611686018427387903ul; }
+    bool empty() const { return size_ == 0; }
+
+    void reserve(size_t wanted) {
+        if (text_ != 0 && wanted <= room_) { return; }
+        char* grown = (char*)malloc(wanted + 1);
+        if (text_ != 0) {
+            memcpy(grown, text_, size_ + 1);
+            free(text_);
+        } else {
+            grown[0] = 0;
+        }
+        text_ = grown;
+        room_ = wanted;
+    }
+    void shrink_to_fit() {}
+    void clear() {
+        if (text_ == 0) { reserve(15); }
+        size_ = 0;
+        text_[0] = 0;
+    }
+    void resize(size_t count) { resize(count, 0); }
+    void resize(size_t count, char c) {
+        reserve(count);
+        for (size_t i = size_; i < count; i++) { text_[i] = c; }
+        size_ = count;
+        text_[size_] = 0;
+    }
+    void push_back(char c) {
+        if (size_ + 1 > room_) { reserve(room_ * 2 + 1); }
+        text_[size_] = c;
+        size_++;
+        text_[size_] = 0;
+    }
+    void pop_back() {
+        if (size_ > 0) {
+            size_--;
+            text_[size_] = 0;
+        }
+    }
+    string& append(const string& other) { return append(other.text_, other.size_); }
+    string& append(const string& other, size_t position, size_t count = npos) { return append(other.substr(position, count)); }
+    string& append(const char* text) { return append(text, strlen(text)); }
+    string& append(const char* text, size_t count) {
+        if (size_ + count > room_) {
+            size_t wanted = room_ * 2;
+            if (wanted < size_ + count) { wanted = size_ + count; }
+            reserve(wanted);
+        }
+        memmove(text_ + size_, text, count);
+        size_ = size_ + count;
+        text_[size_] = 0;
+        return *this;
+    }
+    string& append(initializer_list<char> list) { return append(list.begin(), list.size()); }
+    string& append(size_t count, char c) {
+        for (size_t i = 0; i < count; i++) { push_back(c); }
+        return *this;
+    }
+    template <typename I>
+    string& append(I first, I last) {
+        for (; first != last; ++first) { push_back(*first); }
+        return *this;
+    }
+    string& insert(size_t position, const string& other) { return insert(position, other.text_, other.size_); }
+    string& insert(size_t position, const char* text) { return insert(position, text, strlen(text)); }
+    string& insert(size_t position, const char* text, size_t count) {
+        if (position > size_) { position = size_; }
+        string tail(text_ + position, size_ - position);
+        string middle(text, count);
+        resize(position);
+        append(middle);
+        append(tail);
+        return *this;
+    }
+    string& insert(size_t position, size_t count, char c) { return insert(position, string(count, c)); }
+    string& insert(size_t position, const string& other, size_t from, size_t count = npos) { return insert(position, other.substr(from, count)); }
+    char* insert(char* position, size_t count, char c) {
+        size_t index = position - text_;
+        insert(index, count, c);
+        return text_ + index;
+    }
+    template <typename I>
+    char* insert(char* position, I first, I last) {
+        size_t index = position - text_;
+        insert(index, string(first, last));
+        return text_ + index;
+    }
+    char* insert(char* position, initializer_list<char> list) {
+        size_t index = position - text_;
+        insert(index, list.begin(), list.size());
+        return text_ + index;
+    }
+    char* insert(char* position, char c) {
+        size_t index = position - text_;
+        insert(index, 1, c);
+        return text_ + index;
+    }
+    string& erase(size_t position = 0, size_t count = npos) {
+        if (position >= size_) { return *this; }
+        if (count == npos || position + count > size_) { count = size_ - position; }
+        memmove(text_ + position, text_ + position + count, size_ - position - count + 1);
+        size_ = size_ - count;
+        return *this;
+    }
+    char* erase(char* position) {
+        size_t index = position - text_;
+        erase(index, 1);
+        return text_ + index;
+    }
+    char* erase(char* first, char* last) {
+        size_t index = first - text_;
+        erase(index, last - first);
+        return text_ + index;
+    }
+    string& replace(size_t position, size_t count, const string& other) { return replace(position, count, other.text_, other.size_); }
+    string& replace(size_t position, size_t count, const char* text) { return replace(position, count, text, strlen(text)); }
+    string& replace(size_t position, size_t count, const char* text, size_t length) {
+        if (position > size_) { position = size_; }
+        if (count == npos || position + count > size_) { count = size_ - position; }
+        string tail(text_ + position + count, size_ - position - count);
+        string middle(text, length);
+        resize(position);
+        append(middle);
+        append(tail);
+        return *this;
+    }
+    string& replace(size_t position, size_t count, size_t times, char c) { return replace(position, count, string(times, c)); }
+    string& replace(size_t position, size_t count, const string& other, size_t from, size_t length = npos) {
+        return replace(position, count, other.substr(from, length));
+    }
+    string& replace(char* first, char* last, const string& other) { return replace(first - text_, last - first, other); }
+    string& replace(char* first, char* last, const char* text) { return replace(first - text_, last - first, text); }
+    string& replace(char* first, char* last, const char* text, size_t length) { return replace(first - text_, last - first, text, length); }
+    string& replace(char* first, char* last, size_t times, char c) { return replace(first - text_, last - first, times, c); }
+    string& replace(char* first, char* last, initializer_list<char> list) { return replace(first - text_, last - first, list.begin(), list.size()); }
+    template <typename I>
+    string& replace(char* first, char* last, I from, I to) { return replace(first - text_, last - first, string(from, to)); }
+    void swap(string& other) {
+        char* text = text_;
+        size_t size = size_;
+        size_t room = room_;
+        text_ = other.text_;
+        size_ = other.size_;
+        room_ = other.room_;
+        other.text_ = text;
+        other.size_ = size;
+        other.room_ = room;
+    }
+    size_t copy(char* out, size_t count, size_t position = 0) const {
+        if (position > size_) { return 0; }
+        if (position + count > size_) { count = size_ - position; }
+        memcpy(out, text_ + position, count);
+        return count;
+    }
+
+    string substr(size_t position = 0, size_t count = npos) const {
+        if (position > size_) { position = size_; }
+        if (count == npos || position + count > size_) { count = size_ - position; }
+        return string(text_ + position, count);
+    }
+
+    size_t find(const string& needle, size_t from = 0) const { return find(needle.text_, from, needle.size_); }
+    size_t find(const char* needle, size_t from = 0) const { return find(needle, from, strlen(needle)); }
+    size_t find(const char* needle, size_t from, size_t count) const {
+        if (count == 0) {
+            if (from <= size_) { return from; }
+            return npos;
+        }
+        for (size_t i = from; i + count <= size_; i++) {
+            if (memcmp(text_ + i, needle, count) == 0) { return i; }
+        }
+        return npos;
+    }
+    size_t find(char c, size_t from = 0) const {
+        for (size_t i = from; i < size_; i++) {
+            if (text_[i] == c) { return i; }
+        }
+        return npos;
+    }
+    size_t rfind(const string& needle, size_t from = npos) const { return rfind(needle.text_, from, needle.size_); }
+    size_t rfind(const char* needle, size_t from = npos) const { return rfind(needle, from, strlen(needle)); }
+    size_t rfind(const char* needle, size_t from, size_t count) const {
+        if (count > size_) { return npos; }
+        size_t i = size_ - count;
+        if (from < i) { i = from; }
+        while (true) {
+            if (memcmp(text_ + i, needle, count) == 0) { return i; }
+            if (i == 0) { return npos; }
+            i--;
+        }
+        return npos;
+    }
+    size_t rfind(char c, size_t from = npos) const {
+        size_t i = size_;
+        if (from < size_) { i = from + 1; }
+        while (i > 0) {
+            i--;
+            if (text_[i] == c) { return i; }
+        }
+        return npos;
+    }
+    size_t find_first_of(const string& set, size_t from = 0) const { return scanForward(set.text_, set.size_, from, true); }
+    size_t find_first_of(const char* set, size_t from = 0) const { return scanForward(set, strlen(set), from, true); }
+    size_t find_first_of(char c, size_t from = 0) const { return find(c, from); }
+    size_t find_first_not_of(const string& set, size_t from = 0) const { return scanForward(set.text_, set.size_, from, false); }
+    size_t find_first_not_of(const char* set, size_t from = 0) const { return scanForward(set, strlen(set), from, false); }
+    size_t find_first_not_of(char c, size_t from = 0) const { return scanForward(&c, 1, from, false); }
+    size_t find_last_of(const string& set, size_t from = npos) const { return scanBackward(set.text_, set.size_, from, true); }
+    size_t find_last_of(const char* set, size_t from = npos) const { return scanBackward(set, strlen(set), from, true); }
+    size_t find_last_of(char c, size_t from = npos) const { return rfind(c, from); }
+    size_t find_last_not_of(const string& set, size_t from = npos) const { return scanBackward(set.text_, set.size_, from, false); }
+    size_t find_last_not_of(const char* set, size_t from = npos) const { return scanBackward(set, strlen(set), from, false); }
+    size_t find_last_not_of(char c, size_t from = npos) const { return scanBackward(&c, 1, from, false); }
+
+    bool starts_with(const string& prefix) const { return prefix.size_ <= size_ && memcmp(text_, prefix.text_, prefix.size_) == 0; }
+    bool starts_with(const char* prefix) const { return starts_with(string(prefix)); }
+    bool starts_with(char c) const { return size_ > 0 && text_[0] == c; }
+    bool ends_with(const string& suffix) const { return suffix.size_ <= size_ && memcmp(text_ + size_ - suffix.size_, suffix.text_, suffix.size_) == 0; }
+    bool ends_with(const char* suffix) const { return ends_with(string(suffix)); }
+    bool ends_with(char c) const { return size_ > 0 && text_[size_ - 1] == c; }
+    bool contains(const string& needle) const { return find(needle, 0) != npos; }
+    bool contains(const char* needle) const { return find(needle, 0) != npos; }
+    bool contains(char c) const { return find(c, 0) != npos; }
+
+    int compare(const string& other) const { return compareBytes(other.text_, other.size_); }
+    int compare(const char* text) const { return compareBytes(text, strlen(text)); }
+    int compare(size_t position, size_t count, const string& other) const { return substr(position, count).compare(other); }
+    int compare(size_t position, size_t count, const string& other, size_t from, size_t length = npos) const {
+        return substr(position, count).compare(other.substr(from, length));
+    }
+    int compare(size_t position, size_t count, const char* text) const { return substr(position, count).compare(text); }
+    int compare(size_t position, size_t count, const char* text, size_t length) const { return substr(position, count).compareBytes(text, length); }
+    bool operator==(const string& other) const { return size_ == other.size_ && memcmp(text_, other.text_, size_) == 0; }
+    bool operator==(const char* text) const { return compare(text) == 0; }
+    bool operator!=(const string& other) const { return !(size_ == other.size_ && memcmp(text_, other.text_, size_) == 0); }
+    bool operator!=(const char* text) const { return compare(text) != 0; }
+    bool operator<(const string& other) const { return compare(other) < 0; }
+    bool operator>(const string& other) const { return compare(other) > 0; }
+    bool operator<=(const string& other) const { return compare(other) <= 0; }
+    bool operator>=(const string& other) const { return compare(other) >= 0; }
+
+private:
+    int compareBytes(const char* text, size_t count) const {
+        size_t common = size_;
+        if (count < common) { common = count; }
+        int order = memcmp(text_, text, common);
+        if (order != 0) { return order; }
+        if (size_ < count) { return -1; }
+        if (size_ > count) { return 1; }
+        return 0;
+    }
+    bool inSet(char c, const char* set, size_t count) const {
+        for (size_t i = 0; i < count; i++) {
+            if (set[i] == c) { return true; }
+        }
+        return false;
+    }
+    size_t scanForward(const char* set, size_t count, size_t from, bool member) const {
+        for (size_t i = from; i < size_; i++) {
+            if (inSet(text_[i], set, count) == member) { return i; }
+        }
+        return npos;
+    }
+    size_t scanBackward(const char* set, size_t count, size_t from, bool member) const {
+        size_t i = size_;
+        if (from < size_) { i = from + 1; }
+        while (i > 0) {
+            i--;
+            if (inSet(text_[i], set, count) == member) { return i; }
+        }
+        return npos;
+    }
+
+    char* text_;
+    size_t size_;
+    size_t room_;
+};
+
+inline string operator+(const string& a, const string& b) {
+    string result(a);
+    result += b;
+    return result;
+}
+
+inline string operator+(const string& a, const char* b) {
+    string result(a);
+    result += b;
+    return result;
+}
+
+inline string operator+(const char* a, const string& b) {
+    string result(a);
+    result += b;
+    return result;
+}
+
+inline string operator+(const string& a, char b) {
+    string result(a);
+    result.push_back(b);
+    return result;
+}
+
+inline string to_string(long value) {
+    char digits[24];
+    snprintf(digits, 24, "%ld", value);
+    return string(digits);
+}
+
+inline string to_string(unsigned long value) {
+    char digits[24];
+    snprintf(digits, 24, "%lu", value);
+    return string(digits);
+}
+
+inline string to_string(int value) {
+    char digits[24];
+    snprintf(digits, 24, "%d", value);
+    return string(digits);
+}
+
+inline string to_string(double value) {
+    char digits[64];
+    snprintf(digits, 64, "%f", value);
+    return string(digits);
+}
+
+inline string operator+(char a, const string& b) {
+    string result(1, a);
+    result += b;
+    return result;
+}
+inline bool operator==(const char* a, const string& b) { return b == a; }
+inline bool operator!=(const char* a, const string& b) { return b != a; }
+inline bool operator<(const string& a, const char* b) { return a.compare(b) < 0; }
+inline bool operator<(const char* a, const string& b) { return b.compare(a) > 0; }
+inline void swap(string& a, string& b) { a.swap(b); }
+
+inline string to_string(unsigned value) {
+    char digits[24];
+    snprintf(digits, 24, "%u", value);
+    return string(digits);
+}
+
+// The numeric conversions store the length they read in *end when it is not
+// null.
+inline long stol(const string& text, size_t* end = 0, int base = 10) {
+    char* stop = 0;
+    long value = strtol(text.c_str(), &stop, base);
+    if (stop == text.c_str()) { karc_throw_invalid_argument("stol"); }
+    if (end != 0) { *end = stop - text.c_str(); }
+    return value;
+}
+inline int stoi(const string& text, size_t* end = 0, int base = 10) { return (int)stol(text, end, base); }
+inline long long stoll(const string& text, size_t* end = 0, int base = 10) { return stol(text, end, base); }
+inline unsigned long stoul(const string& text, size_t* end = 0, int base = 10) {
+    char* stop = 0;
+    unsigned long value = strtoul(text.c_str(), &stop, base);
+    if (stop == text.c_str()) { karc_throw_invalid_argument("stoul"); }
+    if (end != 0) { *end = stop - text.c_str(); }
+    return value;
+}
+inline unsigned long long stoull(const string& text, size_t* end = 0, int base = 10) { return stoul(text, end, base); }
+inline double stod(const string& text, size_t* end = 0) {
+    char* stop = 0;
+    double value = strtod(text.c_str(), &stop);
+    if (stop == text.c_str()) { karc_throw_invalid_argument("stod"); }
+    if (end != 0) { *end = stop - text.c_str(); }
+    return value;
+}
+inline float stof(const string& text, size_t* end = 0) { return stod(text, end); }
+inline long double stold(const string& text, size_t* end = 0) { return stod(text, end); }
+
+}
+
+#include <__wide_string>
+
+// The `s` literal, at global scope like KArc's other literal operators.
+inline std::string operator""s(const char* text, size_t length) { return std::string(text, length); }
+
+#endif

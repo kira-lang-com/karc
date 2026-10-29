@@ -1,0 +1,31 @@
+// <latch>: waiting runs other threads' queued tasks until the count is zero.
+#ifndef KARC_STD_LATCH
+#define KARC_STD_LATCH
+
+#include <exception>
+#include <__thread_tasks>
+
+namespace std {
+
+class latch {
+public:
+    latch(long expected) : count_(expected) {}
+    void count_down(long update = 1) { count_ -= update; }
+    bool try_wait() const { return count_ == 0; }
+    void wait() {
+        while (count_ > 0) {
+            if (!karc_task_run_one()) { terminate(); }
+        }
+    }
+    void arrive_and_wait(long update = 1) {
+        count_down(update);
+        wait();
+    }
+
+private:
+    long count_;
+};
+
+}
+
+#endif

@@ -1,0 +1,130 @@
+// <execution>: the execution policies and the algorithm overloads that
+// take one. KArc runs every policy sequentially, which each policy allows.
+#ifndef KARC_STD_EXECUTION
+#define KARC_STD_EXECUTION
+
+#include <algorithm>
+#include <numeric>
+#include <type_traits>
+
+namespace std {
+
+namespace execution {
+
+// One class for all four policies, so one overload per algorithm serves
+// each of them.
+class karc_policy {
+public:
+    int kind;
+};
+typedef karc_policy sequenced_policy;
+typedef karc_policy parallel_policy;
+typedef karc_policy parallel_unsequenced_policy;
+typedef karc_policy unsequenced_policy;
+static const karc_policy seq = {0};
+static const karc_policy par = {1};
+static const karc_policy par_unseq = {2};
+static const karc_policy unseq = {3};
+
+}
+
+template <typename T>
+struct is_execution_policy { static const bool value = false; };
+template <>
+struct is_execution_policy<execution::karc_policy> { static const bool value = true; };
+template <typename T> inline constexpr bool is_execution_policy_v = is_execution_policy<T>::value;
+
+template <typename I, typename P>
+bool all_of(const execution::karc_policy& policy, I first, I last, P predicate) { return all_of(first, last, predicate); }
+template <typename I, typename P>
+bool any_of(const execution::karc_policy& policy, I first, I last, P predicate) { return any_of(first, last, predicate); }
+template <typename I, typename P>
+bool none_of(const execution::karc_policy& policy, I first, I last, P predicate) { return none_of(first, last, predicate); }
+template <typename I, typename F>
+void for_each(const execution::karc_policy& policy, I first, I last, F action) { for_each(first, last, action); }
+template <typename I, typename N, typename F>
+I for_each_n(const execution::karc_policy& policy, I first, N count, F action) { return for_each_n(first, count, action); }
+template <typename I, typename V>
+long count(const execution::karc_policy& policy, I first, I last, const V& value) { return count(first, last, value); }
+template <typename I, typename P>
+long count_if(const execution::karc_policy& policy, I first, I last, P predicate) { return count_if(first, last, predicate); }
+template <typename I, typename V>
+I find(const execution::karc_policy& policy, I first, I last, const V& value) { return find(first, last, value); }
+template <typename I, typename P>
+I find_if(const execution::karc_policy& policy, I first, I last, P predicate) { return find_if(first, last, predicate); }
+template <typename I, typename P>
+I find_if_not(const execution::karc_policy& policy, I first, I last, P predicate) { return find_if_not(first, last, predicate); }
+template <typename I>
+I adjacent_find(const execution::karc_policy& policy, I first, I last) { return adjacent_find(first, last); }
+template <typename I, typename J>
+I search(const execution::karc_policy& policy, I first, I last, J pattern, J patternEnd) { return search(first, last, pattern, patternEnd); }
+template <typename I, typename J>
+bool equal(const execution::karc_policy& policy, I first, I last, J other) { return equal(first, last, other); }
+template <typename I, typename J>
+bool equal(const execution::karc_policy& policy, I first, I last, J other, J otherEnd) { return equal(first, last, other, otherEnd); }
+template <typename I, typename O>
+O copy(const execution::karc_policy& policy, I first, I last, O out) { return copy(first, last, out); }
+template <typename I, typename O, typename P>
+O copy_if(const execution::karc_policy& policy, I first, I last, O out, P predicate) { return copy_if(first, last, out, predicate); }
+template <typename I, typename N, typename O>
+O copy_n(const execution::karc_policy& policy, I first, N count, O out) { return copy_n(first, count, out); }
+template <typename I, typename O>
+O move(const execution::karc_policy& policy, I first, I last, O out) { return move(first, last, out); }
+template <typename I, typename V>
+void fill(const execution::karc_policy& policy, I first, I last, const V& value) { fill(first, last, value); }
+template <typename I, typename N, typename V>
+I fill_n(const execution::karc_policy& policy, I first, N count, const V& value) { return fill_n(first, count, value); }
+template <typename I, typename O, typename F>
+O transform(const execution::karc_policy& policy, I first, I last, O out, F operation) { return transform(first, last, out, operation); }
+template <typename I, typename J, typename O, typename F>
+O transform(const execution::karc_policy& policy, I first, I last, J other, O out, F operation) { return transform(first, last, other, out, operation); }
+template <typename I, typename G>
+void generate(const execution::karc_policy& policy, I first, I last, G generator) { generate(first, last, generator); }
+template <typename I, typename V>
+void replace(const execution::karc_policy& policy, I first, I last, const V& old, const V& replacement) { replace(first, last, old, replacement); }
+template <typename I, typename P, typename V>
+void replace_if(const execution::karc_policy& policy, I first, I last, P predicate, const V& replacement) { replace_if(first, last, predicate, replacement); }
+template <typename I, typename V>
+I remove(const execution::karc_policy& policy, I first, I last, const V& value) { return remove(first, last, value); }
+template <typename I, typename P>
+I remove_if(const execution::karc_policy& policy, I first, I last, P predicate) { return remove_if(first, last, predicate); }
+template <typename I>
+I unique(const execution::karc_policy& policy, I first, I last) { return unique(first, last); }
+template <typename I>
+void reverse(const execution::karc_policy& policy, I first, I last) { reverse(first, last); }
+template <typename I, typename P>
+I partition(const execution::karc_policy& policy, I first, I last, P predicate) { return partition(first, last, predicate); }
+template <typename I>
+void sort(const execution::karc_policy& policy, I first, I last) { sort(first, last); }
+template <typename I, typename C>
+void sort(const execution::karc_policy& policy, I first, I last, C less) { sort(first, last, less); }
+template <typename I>
+void stable_sort(const execution::karc_policy& policy, I first, I last) { stable_sort(first, last); }
+template <typename I, typename C>
+void stable_sort(const execution::karc_policy& policy, I first, I last, C less) { stable_sort(first, last, less); }
+template <typename I>
+void partial_sort(const execution::karc_policy& policy, I first, I middle, I last) { partial_sort(first, middle, last); }
+template <typename I>
+void nth_element(const execution::karc_policy& policy, I first, I nth, I last) { nth_element(first, nth, last); }
+template <typename I>
+bool is_sorted(const execution::karc_policy& policy, I first, I last) { return is_sorted(first, last); }
+template <typename I>
+I min_element(const execution::karc_policy& policy, I first, I last) { return min_element(first, last); }
+template <typename I>
+I max_element(const execution::karc_policy& policy, I first, I last) { return max_element(first, last); }
+template <typename I, typename J, typename O>
+O merge(const execution::karc_policy& policy, I first, I last, J other, J otherEnd, O out) { return merge(first, last, other, otherEnd, out); }
+template <typename I, typename V>
+V reduce(const execution::karc_policy& policy, I first, I last, V initial) { return reduce(first, last, initial); }
+template <typename I, typename V, typename F>
+V reduce(const execution::karc_policy& policy, I first, I last, V initial, F combine) { return reduce(first, last, initial, combine); }
+template <typename I, typename V, typename F, typename G>
+V transform_reduce(const execution::karc_policy& policy, I first, I last, V initial, F combine, G transform) { return transform_reduce(first, last, initial, combine, transform); }
+template <typename I, typename O>
+O inclusive_scan(const execution::karc_policy& policy, I first, I last, O out) { return inclusive_scan(first, last, out); }
+template <typename I, typename O, typename V>
+O exclusive_scan(const execution::karc_policy& policy, I first, I last, O out, V initial) { return exclusive_scan(first, last, out, initial); }
+
+}
+
+#endif

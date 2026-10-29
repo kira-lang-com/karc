@@ -1,0 +1,254 @@
+// Template specializations. `template <> struct X<int> {...}` and the
+// partial `template <typename T> struct X<T*> {...}` are kept with their
+// argument patterns; instantiating X uses the first one whose patterns
+// match the arguments, binding the partial one's parameters. An explicit
+// specialization of a function template, `template <> R f<int>(int)`, is
+// an ordinary overload, which overload resolution prefers.
+
+// Whether `tokens` declare a class with arguments after its name.
+// `struct std::formatter<T>`: the class named without its namespace.
+function withoutClassQualifier(tokens: [Token]) -> [Token] {
+    let isClass = tokens.count > 0 && (tokens[0].kind == .KwStruct || (tokens[0].kind == .Ident && tokens[0].text == "class"))
+    if !isClass || tokens.count < 4 || tokens[1].kind != .Ident || tokens[2].kind != .Colon || tokens[3].kind != .Colon { return tokens }
+    var result: [Token] = [tokens[0]]
+    var i = 1
+    while i + 3 < tokens.count && tokens[i].kind == .Ident && tokens[i + 1].kind == .Colon && tokens[i + 2].kind == .Colon { i += 3 }
+    for j in i..tokens.count { result.append(tokens[j]) }
+    return result
+}
+function specializedClass(tokens: [Token]) -> Bool {
+    if tokens.count < 3 { return false }
+    let head = tokens[0]
+    let isClass = head.kind == .KwStruct || (head.kind == .Ident && head.text == "class")
+    return isClass && tokens[1].kind == .Ident && tokens[2].kind == .Lt
+}
+// After `template <>`.
+function parseExplicitSpecialization(p: borrow mut Parser) {
+    let tokens = withoutClassQualifier(captureDeclaration(p))
+    if tokens.count == 0 { return }
+    if specializedClass(tokens) {
+        recordSpecialization(p, [], tokens)
+        return
+    }
+    parseSpliced(p, withoutFunctionArguments(tokens))
+}
+function recordSpecialization(p: borrow mut Parser, params: [String], tokens: [Token]) {
+    var patterns: [[Token]] = []
+    var current: [Token] = []
+    var depth = 0
+    var i = 3
+    while i < tokens.count {
+        let t = tokens[i]
+        if depth == 0 && (t.kind == .Gt || t.kind == .Shr) { break }
+        if depth == 1 && t.kind == .Shr {
+            // `X<Y<T>>`: the `>>` closes both lists.
+            current.append(Token { space = false, spelling = "", kind = .Gt, text = ">", number = 0, start = t.start, end = t.end, line = t.line })
+            break
+        }
+        if t.kind == .Lt { depth = depth + 1 }
+        if t.kind == .Gt { depth = depth - 1 }
+        if depth == 0 && t.kind == .Comma {
+            patterns.append(current)
+            current = []
+        } else {
+            current.append(t)
+        }
+        i = i + 1
+    }
+    if current.count > 0 { patterns.append(current) }
+    var rest: [Token] = [tokens[0], tokens[1]]
+    for j in (i + 1)..tokens.count { rest.append(tokens[j]) }
+    p.tree.specializations.append(CppSpecialization { template = declarationName(p, tokens[1].text), params = params, patterns = patterns, tokens = rest })
+}
+// `R f<args>(...)`: the declaration without `<args>`.
+function withoutFunctionArguments(tokens: [Token]) -> [Token] {
+    var open = -1
+    var close = -1
+    var depth = 0
+    for i in 0..tokens.count {
+        if open < 0 && tokens[i].kind == .LParen { return tokens }
+        if tokens[i].kind == .Lt && i > 0 && tokens[i - 1].kind == .Ident && open < 0 { open = i }
+        if open >= 0 {
+            if tokens[i].kind == .Lt { depth = depth + 1 }
+            if tokens[i].kind == .Gt { depth = depth - 1 }
+            if tokens[i].kind == .Shr { depth = depth - 2 }
+            if depth <= 0 && i > open {
+                close = i
+                break
+            }
+        }
+    }
+    if open < 0 || close < 0 || close + 1 >= tokens.count || tokens[close + 1].kind != .LParen { return tokens }
+    var result: [Token] = []
+    for i in 0..tokens.count {
+        if i < open || i > close { result.append(tokens[i]) }
+    }
+    return result
+}
+// The tokens of the specialization of `template` matching `arguments`,
+// named `instance`; empty when none matches.
+function specializedTokens(p: borrow mut Parser, template: String, arguments: [String], instance: String) -> [Token] {
+    for s in p.tree.specializations {
+        if (s.template == template || qualifiedNamesMatch(s.template, template)) && s.patterns.count == arguments.count {
+            var bindings: [String] = []
+            for _ in s.params { bindings.append("") }
+            var matched = true
+            for i in 0..arguments.count {
+                if matched && !matchPattern(p, s.patterns[i], s.params, arguments[i], bindings) { matched = false }
+            }
+            for b in bindings {
+                if b == "" { matched = false }
+            }
+            if matched {
+                var valueParams: [Bool] = []
+                for _ in s.params { valueParams.append(false) }
+                let spec = CppTemplate { name = s.template, params = s.params, valueParams = valueParams, defaults = [], tokens = s.tokens, isClass = true, owner = "", pack = -1 }
+                let placeholder = instanceName(s.template, bindings)
+                var result: [Token] = []
+                for t in substituteTokens(p, spec, bindings, s.tokens) {
+                    if t.kind == .Ident && t.text == placeholder {
+                        result.append(Token { space = false, spelling = "", kind = .Ident, text = instance, number = 0, start = t.start, end = t.end, line = t.line })
+                    } else {
+                        result.append(t)
+                    }
+                }
+                return result
+            }
+        }
+    }
+    return []
+}
+// Whether the argument pattern `pattern` matches the type `argument`,
+// binding the specialization's parameters it mentions.
+function matchPattern(p: borrow mut Parser, pattern: [Token], params: [String], argument: String, bindings: borrow mut [String]) -> Bool {
+    var tokens: [Token] = []
+    for t in pattern {
+        let qualifier = t.kind == .KwConst || t.kind == .KwVolatile
+        if !qualifier { tokens.append(t) }
+    }
+    if tokens.count == 0 { return false }
+    if tokens.count == 1 && tokens[0].kind == .Ident {
+        for i in 0..params.count {
+            if params[i] == tokens[0].text {
+                if bindings[i] != "" { return bindings[i] == argument }
+                bindings[i] = argument
+                return true
+            }
+        }
+    }
+    let last = tokens[tokens.count - 1].kind
+    if last == .Star {
+        if !isPointerType(argument) { return false }
+        var inner: [Token] = []
+        for i in 0..(tokens.count - 1) { inner.append(tokens[i]) }
+        return matchPattern(p, inner, params, elementOfPointer(argument), bindings)
+    }
+    if last == .RBracket && tokens.count > 2 && tokens[tokens.count - 2].kind == .LBracket {
+        // `T[]`: an array of any bound.
+        if !isArrayType(argument) { return false }
+        var inner: [Token] = []
+        for i in 0..(tokens.count - 2) { inner.append(tokens[i]) }
+        return matchPattern(p, inner, params, arrayElementType(argument), bindings)
+    }
+    if last == .Amp || last == .AndAnd {
+        var inner: [Token] = []
+        for i in 0..(tokens.count - 1) { inner.append(tokens[i]) }
+        return matchPattern(p, inner, params, argument, bindings)
+    }
+    if tokens.count > 3 && tokens[0].kind == .Ident && tokens[1].kind == .Lt && isClassType(argument) {
+        // `Y<A, B>`: the argument is an instance of Y with matching arguments.
+        for record in p.tree.instances {
+            if record.name == nominalName(argument) && qualifiedNamesMatch(record.template, tokens[0].text) {
+                var groups: [[Token]] = []
+                var current: [Token] = []
+                var depth = 0
+                for i in 2..tokens.count {
+                    let t = tokens[i]
+                    if depth == 0 && (t.kind == .Gt || t.kind == .Shr) { break }
+                    if t.kind == .Lt { depth = depth + 1 }
+                    if t.kind == .Gt { depth = depth - 1 }
+                    if depth == 0 && t.kind == .Comma {
+                        groups.append(current)
+                        current = []
+                    } else {
+                        current.append(t)
+                    }
+                }
+                if current.count > 0 { groups.append(current) }
+                if groups.count != record.arguments.count { return false }
+                for i in 0..groups.count {
+                    if !matchPattern(p, groups[i], params, record.arguments[i], bindings) { return false }
+                }
+                return true
+            }
+        }
+        return false
+    }
+    for t in tokens {
+        for name in params {
+            if t.kind == .Ident && t.text == name { return false }
+        }
+    }
+    if tokens[0].kind == .Number || (tokens[0].kind == .Ident && (tokens[0].text == "true" || tokens[0].text == "false")) {
+        return decimalText(constantExpression(p, expressionFromTokens(p, tokens))) == argument
+    }
+    return parseTypeFromTokens(p, tokens) == argument
+}
+function expressionFromTokens(p: borrow mut Parser, tokens: [Token]) -> ExprId {
+    var stream = tokens
+    stream.append(Token { space = false, spelling = "", kind = .End, text = "", number = 0, start = 0, end = 0, line = false })
+    var q = subParser(p, stream)
+    let result = expression(q, 0)
+    p.tree = q.tree
+    return result
+}
+// Variable templates: `template <typename T> constexpr bool v = ...;`. Each
+// use `v<int>` defines the global `v__i32` from the substituted tokens.
+function variableTemplateName(tokens: [Token]) -> String {
+    var depth = 0
+    for i in 0..tokens.count {
+        let t = tokens[i]
+        if t.kind == .LParen || t.kind == .LBrace { return "" }
+        if t.kind == .Lt { depth = depth + 1 }
+        if t.kind == .Gt { depth = depth - 1 }
+        if depth == 0 && t.kind == .Assign && i > 0 && tokens[i - 1].kind == .Ident {
+            if tokens[i - 1].text == "operator" { return "" }
+            return tokens[i - 1].text
+        }
+    }
+    return ""
+}
+function variableTemplateIndex(tree: CppTree, name: String) -> Int {
+    for i in 0..tree.templates.count {
+        let t = tree.templates[i]
+        if t.owner == "@variable" && (t.name == name || qualifiedNamesMatch(t.name, name)) { return i }
+    }
+    return -1
+}
+// After a variable template's name: its arguments, and the name of the
+// instance, defined on first use.
+function instantiateVariable(p: borrow mut Parser, index: Int) -> String {
+    let template = p.tree.templates[index]
+    let arguments = parseTemplateArguments(p, index)
+    let instance = instanceName(template.name, arguments)
+    for g in p.tree.globals {
+        if g.name == instance { return instance }
+    }
+    let bare = unqualifiedName(template.name)
+    var tokens: [Token] = []
+    for t in instantiateTokens(p, template, arguments, template.tokens) {
+        if t.kind == .Ident && t.text == bare {
+            tokens.append(Token { space = false, spelling = "", kind = .Ident, text = instance, number = 0, start = t.start, end = t.end, line = t.line })
+        } else {
+            tokens.append(t)
+        }
+    }
+    // Keep the enclosing parse's pending state out of the instance's.
+    let saved = p.externNext
+    let outerScope = p.scope
+    p.scope = templateScope(template.name)
+    parseSpliced(p, tokens)
+    p.scope = outerScope
+    p.externNext = saved
+    return instance
+}

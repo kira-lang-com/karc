@@ -1,0 +1,582 @@
+// Operator overloading, references and class values. An operator on a class
+// operand calls the member `operator@` or a free `operator@`; a function that
+// returns a reference yields an address its caller reads or writes through;
+// a class returned by value lives in a temporary that is destroyed at the end
+// of the statement unless a declaration, assignment or return moves it.
+
+function isLvalueExpression(expr: Expr) -> Bool {
+    match expr.kind {
+        Name -> return true
+        Field -> return true
+        Index -> return true
+        Deref -> return true
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Call -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+// The place an address value denotes.
+function placeFromPointer(state: borrow mut Lowerer, pointer: Value) -> Place {
+    let element = elementOfPointer(pointer.pointer)
+    let base = kAddressOf(state, pointer.reference, arrayOfPointer(pointer.pointer))
+    let address = kElemAddr(state, base, kConstInt(state, "i64", 0), element)
+    return Place { address = address, ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+}
+// Reads through the result of the call just emitted when it returned a
+// reference.
+function derefIfReference(state: borrow mut Lowerer, value: Value) -> Value {
+    if !state.lastCallReference || value.pointer == "" { return value }
+    state.lastCallReference = false
+    return rvalueFromPlace(state, placeFromPointer(state, value))
+}
+// The address a reference parameter binds to: the argument's own storage, or
+// a temporary holding an rvalue.
+function emitReferenceArgument(state: borrow mut Lowerer, argId: ExprId, parameterType: String) -> KirValue {
+    let e = state.tree.expressions[argId.value]
+    let element = elementOfPointer(parameterType)
+    // A function's name is no object: its pointer goes in a temporary.
+    var designatesFunction = false
+    match e.kind {
+        Name(named) -> {
+            if lookup(state, named.name) < 0 && ensureGlobalSlot(state, named.name) < 0 && implicitFieldPlace(state, named.name).ty == "" {
+                designatesFunction = true
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if isLvalueExpression(e) && !designatesFunction {
+        let place = emitPlace(state, argId)
+        if place.ty != "" {
+            return kBitcast(state, slotPointer(state, place.address, place.ty), parameterType)
+        }
+    }
+    var value = zeroValue(state)
+    var isCall = false
+    match e.kind {
+        Call -> { isCall = true }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if isCall {
+        // A call returning a reference: the reference itself.
+        value = emitCall(state, argId)
+        let byReference = state.lastCallReference
+        state.lastCallReference = false
+        if byReference && value.pointer != "" { return kBitcast(state, value.reference, parameterType) }
+    } else {
+        value = emitExpression(state, argId)
+    }
+    let slot = declare(state, joinText(["__karc_ref_", decimalText(state.slots)]), element, "", e.span)
+    storeLocal(state, slot, value)
+    return slotPointer(state, state.slotsData[slot].address, element)
+}
+// The type a parameter accepts: its referent for a reference parameter.
+function parameterClassOf(parameter: CppParam) -> String {
+    if parameter.reference { return elementOfPointer(parameter.declType) }
+    return parameter.declType
+}
+// The `operator@` a binary expression calls, or -1 for a built-in operator.
+function binaryOperator(state: borrow mut Lowerer, expr: Expr, binary: BinaryExpression) -> Int {
+    match binary.op {
+        "&&", "||", "=" -> return -1
+        else -> {}
+    }
+    let left = staticType(state, binary.left)
+    let right = staticType(state, binary.right)
+    let leftClass = isClassType(left)
+    let rightClass = isClassType(right)
+    if !leftClass && !rightClass { return -1 }
+    let name = joinText(["operator", binary.op])
+    var member = -1
+    if leftClass {
+        member = chooseMember(state, left, name, [binary.right])
+        // A member that cannot take the operand gives way to a free one.
+        if member >= 0 && takesArguments(state, state.tree.functions[member], [binary.right]) { return member }
+    }
+    var best = -1
+    var bestScore = 0
+    for i in functionsNamed(state, name) {
+        let fn = state.tree.functions[i]
+        if fn.parameters.count == 2 && ownerOf(state.tree, i) == "" {
+            let first = argumentFit(state, fn.parameters[0], left)
+            let second = argumentFit(state, fn.parameters[1], right)
+            let score = first * 4 + second
+            if first > 0 && second > 0 && score > bestScore {
+                best = i
+                bestScore = score
+            }
+        }
+    }
+    if best >= 0 { return best }
+    let call = CallExpression { receiver = noExpr(), name = name, arguments = [binary.left, binary.right], explicitArguments = 0, awaitTransform = false }
+    let instance = templateInstanceFor(state, call, expr.span, name)
+    if instance >= 0 { return instance }
+    return member
+}
+// The function a call or overloaded operator expression invokes, or -1.
+function operatorOrCallTarget(state: borrow mut Lowerer, id: ExprId) -> Int {
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Binary(binary) -> return binaryOperator(state, e, binary)
+        Call(call) -> {
+            if call.name == "@invoke" { return -1 }
+            if hasExpr(call.receiver) {
+                let owner = staticType(state, call.receiver)
+                if !isClassType(owner) { return -1 }
+                return chooseMember(state, owner, utf8Slice(call.name, 9, utf8Count(call.name)), call.arguments)
+            }
+            let chosen = chooseFunction(state, call.name, call.arguments)
+            if chosen >= 0 && takesArguments(state, state.tree.functions[chosen], call.arguments) { return chosen }
+            let instance = templateInstanceFor(state, call, e.span, call.name)
+            if instance >= 0 { return instance }
+            return chosen
+        }
+        NumberLit -> return -1
+        FloatLit -> return -1
+        StringLit -> return -1
+        Name -> return -1
+        Neg -> return -1
+        Positive -> return -1
+        Not -> return -1
+        BitNot -> return -1
+        AddrOf -> return -1
+        Deref -> return -1
+        Sizeof -> return -1
+        Cast -> return -1
+        Field -> return -1
+        Index -> return -1
+        PreStep -> return -1
+        PostStep -> return -1
+        Ternary -> return -1
+        New -> return -1
+        Delete -> return -1
+    }
+}
+function emitOperatorCall(state: borrow mut Lowerer, binary: BinaryExpression, index: Int) -> Value {
+    let owner = methodOwnerType(state.tree, state.tree.functions[index].name)
+    if owner != "" {
+        let object = methodReceiver(state, binary.left, owner)
+        return callFunction(state, index, [object], [binary.right])
+    }
+    return callFunction(state, index, [], [binary.left, binary.right])
+}
+// `object[index]` on a class with `operator[]`, as a place.
+function classIndexPlace(state: borrow mut Lowerer, indexExpr: IndexExpression, span: Span) -> Place {
+    let owner = staticType(state, indexExpr.base)
+    let index = findMember(state.tree, owner, "operator[]", 1)
+    let object = methodReceiver(state, indexExpr.base, owner)
+    let result = callFunction(state, index, [object], [indexExpr.index])
+    let byReference = state.lastCallReference || state.tree.functions[index].refReturn
+    state.lastCallReference = false
+    let returned = state.tree.functions[index].returnType
+    if !byReference && !isClassType(returned) && returned != "unit" {
+        let slot = declare(state, joinText(["__karc_index_", decimalText(state.slots)]), returned, "", span)
+        storeLocal(state, slot, result)
+        return Place { address = state.slotsData[slot].address, ty = returned, unsigned = isUnsignedType(returned), bitOffset = 0, bitWidth = 0 }
+    }
+    if result.pointer == "" { return scratchPlace(state) }
+    return placeFromPointer(state, result)
+}
+function hasClassIndex(state: borrow mut Lowerer, indexExpr: IndexExpression) -> Bool {
+    let owner = staticType(state, indexExpr.base)
+    return isClassType(owner) && findMember(state.tree, owner, "operator[]", 1) >= 0
+}
+// A copy constructor: a one-parameter constructor taking the class itself.
+function copyConstructor(state: Lowerer, structType: String) -> Int {
+    let name = constructorName(structType)
+    for i in functionsNamedIn(state.tree, name) {
+        let fn = state.tree.functions[i]
+        if ownerOf(state.tree, i) == structType && fn.parameters.count == 1 && parameterClassOf(fn.parameters[0]) == structType {
+            return i
+        }
+    }
+    return -1
+}
+// An argument of another type bound to a class parameter goes through the
+// class's converting constructor.
+function needsConversion(state: borrow mut Lowerer, argument: ExprId, structType: String) -> Bool {
+    let actual = staticType(state, argument)
+    if isClassType(actual) && isBaseOf(state, structType, actual) { return false }
+    return actual != "" && actual != structType && actual != joinText(["*[0 x ", structType, "]"])
+}
+function emitConvertedArgument(state: borrow mut Lowerer, argument: ExprId, structType: String) -> KirValue {
+    let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), structType, "", state.tree.expressions[argument.value].span)
+    zeroAggregate(state, state.slotsData[slot].address, structType)
+    let object = slotPointer(state, state.slotsData[slot].address, structType)
+    emitConstruct(state, object, structType, [argument])
+    state.temporaries.append(slot)
+    return object
+}
+// `T(args)` as an expression: a temporary constructed in place.
+function emitTemporaryObject(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    let structType = joinText(["%", call.name])
+    let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), structType, "", span)
+    zeroAggregate(state, state.slotsData[slot].address, structType)
+    let object = slotPointer(state, state.slotsData[slot].address, structType)
+    emitConstruct(state, object, structType, call.arguments)
+    state.temporaries.append(slot)
+    state.lastCallReference = false
+    return Value { reference = object, boolean = false, wide = true, pointer = joinText(["*[0 x ", structType, "]"]), unsigned = false, floating = false }
+}
+function destroyTemporaries(state: borrow mut Lowerer, mark: Int) {
+    if !state.terminated {
+        var i = state.temporaries.count
+        while i > mark {
+            i = i - 1
+            let slot = state.temporaries[i]
+            let ty = state.slotsData[slot].ty
+            if hasDestructor(state, ty) {
+                let guard = guardOf(state, slot)
+                if guard < 0 {
+                    emitDestroy(state, slotPointer(state, state.slotsData[slot].address, ty), ty)
+                } else {
+                    let made = kBlock(state)
+                    let after = kBlock(state)
+                    let flag = state.guardedTemporaries[guard].flag
+                    kCondBr(state, kLoad(state, flag), made, after)
+                    kSwitchTo(state, made)
+                    emitDestroy(state, slotPointer(state, state.slotsData[slot].address, ty), ty)
+                    kStore(state, kConstInt(state, "i1", 0), flag)
+                    kBr(state, after)
+                    kSwitchTo(state, after)
+                }
+            }
+        }
+    }
+    truncateTemporaries(state, mark)
+}
+// Temporaries made in one branch of a conditional (from `mark` on): each
+// gets a flag, false until the branch makes it, so the end of the
+// statement destroys only the ones that were made.
+function guardBranchTemporaries(state: borrow mut Lowerer, mark: Int) {
+    for i in mark..state.temporaries.count {
+        let slot = state.temporaries[i]
+        if guardOf(state, slot) < 0 {
+            let flag = kStackAlloc(state, "i1")
+            kEnterEntry(state)
+            kStore(state, kConstInt(state, "i1", 0), flag)
+            kLeaveEntry(state)
+            kStore(state, kConstInt(state, "i1", 1), flag)
+            state.guardedTemporaries.append(GuardedTemporary { slot = slot, flag = flag })
+        }
+    }
+}
+function guardOf(state: Lowerer, slot: Int) -> Int {
+    for i in 0..state.guardedTemporaries.count {
+        if state.guardedTemporaries[i].slot == slot { return i }
+    }
+    return -1
+}
+function truncateTemporaries(state: borrow mut Lowerer, count: Int) {
+    if state.temporaries.count <= count { return }
+    var kept: [Int] = []
+    for i in 0..count { kept.append(state.temporaries[i]) }
+    state.temporaries = kept
+}
+// The value just computed was the last temporary; it now belongs elsewhere.
+function consumeTemporary(state: borrow mut Lowerer, mark: Int) {
+    if state.temporaries.count > mark { truncateTemporaries(state, state.temporaries.count - 1) }
+}
+// Evaluates a class rvalue and moves it into `destination`.
+function moveClassValue(state: borrow mut Lowerer, source: ExprId, destination: KirAddress, structType: String) {
+    let mark = state.temporaries.count
+    let value = emitExpression(state, source)
+    if value.pointer == "" { return }
+    copyAggregate(state, structBehindPointer(state, value.reference, structType), destination, structType)
+    consumeTemporary(state, mark)
+}
+function isClassLvalue(state: borrow mut Lowerer, id: ExprId) -> Bool {
+    let e = state.tree.expressions[id.value]
+    if isLvalueExpression(e) { return true }
+    let index = operatorOrCallTarget(state, id)
+    return index >= 0 && state.tree.functions[index].refReturn
+}
+// `T c = init` where init is not a direct call: copy-construct from an
+// lvalue, move from a temporary.
+function emitClassInit(state: borrow mut Lowerer, slot: Int, structType: String, init: ExprId) {
+    let object = slotPointer(state, state.slotsData[slot].address, structType)
+    if needsConversion(state, init, structType) {
+        emitConstruct(state, object, structType, [init])
+        return
+    }
+    if isClassLvalue(state, init) && isRvalueArgument(state, init) && hasMoveMember(state, structType, constructorName(structType)) {
+        // `T x = std::move(y)`: the move constructor.
+        emitConstruct(state, object, structType, [init])
+        return
+    }
+    if isClassLvalue(state, init) {
+        copyInto(state, object, methodReceiver(state, init, structType), structType)
+        return
+    }
+    moveClassValue(state, init, state.slotsData[slot].address, structType)
+}
+// Assignment to a class place: `op=` members, `operator=` for lvalues, and a
+// destroy-then-move for temporaries.
+function emitClassAssignment(state: borrow mut Lowerer, placeId: ExprId, valueId: ExprId, structType: String) {
+    let rhs = state.tree.expressions[valueId.value]
+    match rhs.kind {
+        Binary(binary) -> {
+            if binary.left.value == placeId.value {
+                var compound = -1
+                let operatorName = joinText(["operator", binary.op, "="])
+                if findMember(state.tree, structType, operatorName, 1) >= 0 {
+                    compound = chooseMember(state, structType, operatorName, [binary.right])
+                }
+                if compound >= 0 {
+                    let object = methodReceiver(state, placeId, structType)
+                    callFunction(state, compound, [object], [binary.right])
+                    return
+                }
+                let one = state.tree.expressions[binary.right.value]
+                match one.kind {
+                    NumberLit(number) -> {
+                        if number.value == 1 && (binary.op == "+" || binary.op == "-") {
+                            var name = "operator++"
+                            if binary.op == "-" { name = "operator--" }
+                            let step = findMember(state.tree, structType, name, 0)
+                            if step >= 0 {
+                                callFunction(state, step, [methodReceiver(state, placeId, structType)], [])
+                                return
+                            }
+                        }
+                    }
+                    FloatLit -> {}
+                    StringLit -> {}
+                    Name -> {}
+                    Neg -> {}
+                    Positive -> {}
+                    Not -> {}
+                    BitNot -> {}
+                    AddrOf -> {}
+                    Deref -> {}
+                    Sizeof -> {}
+                    Cast -> {}
+                    Call -> {}
+                    Field -> {}
+                    Index -> {}
+                    PreStep -> {}
+                    PostStep -> {}
+                    Binary -> {}
+                    Ternary -> {}
+                    New -> {}
+                    Delete -> {}
+                }
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if needsConversion(state, valueId, structType) {
+        let assign = chooseMember(state, structType, "operator=", [valueId])
+        let object = methodReceiver(state, placeId, structType)
+        if assign >= 0 && parameterClassOf(state.tree.functions[assign].parameters[0]) != structType {
+            callFunction(state, assign, [object], [valueId])
+            return
+        }
+        emitDestroy(state, object, structType)
+        zeroAggregate(state, structBehindPointer(state, object, structType), structType)
+        emitConstruct(state, object, structType, [valueId])
+        return
+    }
+    if isClassLvalue(state, valueId) {
+        var assign = findMember(state.tree, structType, "operator=", 1)
+        if assign >= 0 { assign = chooseMember(state, structType, "operator=", [valueId]) }
+        let object = methodReceiver(state, placeId, structType)
+        if assign >= 0 {
+            callFunction(state, assign, [object], [valueId])
+            return
+        }
+        let value = emitExpression(state, valueId)
+        if value.pointer != "" { assignInto(state, object, value.reference, structType) }
+        return
+    }
+    let target = emitPlace(state, placeId)
+    let mark = state.temporaries.count
+    let value = emitExpression(state, valueId)
+    if value.pointer == "" { return }
+    if hasDestructor(state, structType) {
+        emitDestroy(state, slotPointer(state, target.address, structType), structType)
+    }
+    copyAggregate(state, structBehindPointer(state, value.reference, structType), target.address, structType)
+    consumeTemporary(state, mark)
+}
+// `return init` from a function returning a class: a local moves, another
+// lvalue is copy-constructed, a temporary moves.
+function emitClassReturn(state: borrow mut Lowerer, value: ExprId, structType: String) -> Int {
+    let rhs = state.tree.expressions[value.value]
+    if isBracedCall(state, value) {
+        match rhs.kind {
+            Call(call) -> {
+                // `return {a, b};`: the result constructed from the list.
+                if !emitListConstruct(state, state.sret.unwrap(), structType, call.arguments) { emitConstruct(state, state.sret.unwrap(), structType, call.arguments) }
+                return -1
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Name -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+    }
+    match rhs.kind {
+        Name(named) -> {
+            let slot = lookup(state, named.name)
+            // A local of the result class itself; another type converts below.
+            if slot >= state.localsFrom && !state.slotsData[slot].reference && state.slotsData[slot].ty == structType {
+                emitStructReturn(state, value, structType)
+                return slot
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let base = structBehindPointer(state, state.sret.unwrap(), structType)
+    if needsConversion(state, value, structType) {
+        emitConstruct(state, state.sret.unwrap(), structType, [value])
+        return -1
+    }
+    if isClassLvalue(state, value) {
+        copyInto(state, state.sret.unwrap(), methodReceiver(state, value, structType), structType)
+        return -1
+    }
+    moveClassValue(state, value, base, structType)
+    return -1
+}
+// `*object` or `object->` on a class: its unary `operator*`, else its
+// `operator->`; -1 for a plain pointer.
+function dereferenceOperator(state: borrow mut Lowerer, id: ExprId) -> Int {
+    let owner = staticType(state, id)
+    if !isClassType(owner) { return -1 }
+    let star = findMember(state.tree, owner, "operator*", 0)
+    if star >= 0 && state.tree.functions[star].parameters.count == 0 { return star }
+    return findMember(state.tree, owner, "operator->", 0)
+}
+// A literal `1` expression, for `++x` on a class without operator++.
+function addStepOne(state: borrow mut Lowerer, span: Span) -> ExprId {
+    let index = state.tree.expressions.count
+    state.tree.expressions.append(Expr { kind = .NumberLit(NumberExpression { value = 1, suffix = "" }), span = span, nameSpan = span })
+    return ExprId { value = index }
+}
+// A condition: a class object tests through its `operator bool`.
+function emitCondition(state: borrow mut Lowerer, id: ExprId) -> Value {
+    let ty = staticType(state, id)
+    if isClassType(ty) {
+        let conversion = findMember(state.tree, ty, "operator i1", 0)
+        if conversion >= 0 {
+            let object = memberReceiver(state, methodReceiver(state, id, ty), ty, conversion)
+            return asBool(state, callFunction(state, conversion, [object], []))
+        }
+    }
+    return asBool(state, emitExpression(state, id))
+}
+// Whether class `ty` declares member `name` with an `&&` parameter.
+function hasMoveMember(state: Lowerer, ty: String, name: String) -> Bool {
+    for fn in state.tree.functions {
+        if methodOwnerType(state.tree, fn.name) == ty && unqualifiedName(fn.name) == name && fn.parameters.count == 1 && fn.parameters[0].rvalue {
+            return true
+        }
+    }
+    return false
+}

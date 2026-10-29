@@ -1,0 +1,100 @@
+// <expected>: std::expected, a value or the error that stands in for it,
+// and std::unexpected, which carries such an error.
+#ifndef KARC_STD_EXPECTED
+#define KARC_STD_EXPECTED
+
+#include <exception>
+#include <utility>
+
+namespace std {
+
+template <typename E>
+class unexpected {
+public:
+    unexpected(const E& error) : error_(error) {}
+    E& error() { return error_; }
+    bool operator==(const unexpected& other) const { return error_ == other.error_; }
+
+private:
+    E error_;
+};
+
+template <typename E>
+class bad_expected_access : public exception {
+public:
+    bad_expected_access(const E& error) : error_(error) {}
+    const char* what() const override { return "bad access to std::expected without expected value"; }
+    E& error() { return error_; }
+
+private:
+    E error_;
+};
+
+struct unexpect_t { int unused; };
+static unexpect_t unexpect;
+
+template <typename T, typename E>
+class expected {
+public:
+    typedef T value_type;
+    typedef E error_type;
+
+    expected() : present_(true), value_(), error_() {}
+    expected(const T& value) : present_(true), value_(value), error_() {}
+    expected(unexpected<E> failure) : present_(false), value_(), error_(failure.error()) {}
+    template <typename... Args>
+    expected(unexpect_t tag, Args&&... args) : present_(false), value_(), error_(std::forward<Args>(args)...) {}
+
+    bool has_value() const { return present_; }
+    explicit operator bool() const { return present_; }
+    T& value() {
+        if (!present_) { throw bad_expected_access<E>(error_); }
+        return value_;
+    }
+    T& operator*() { return value_; }
+    T* operator->() { return &value_; }
+    E& error() { return error_; }
+    T value_or(const T& fallback) const { return present_ ? value_ : fallback; }
+    E error_or(const E& fallback) const { return present_ ? fallback : error_; }
+    template <typename... Args>
+    T& emplace(Args&&... args) {
+        present_ = true;
+        value_ = T(std::forward<Args>(args)...);
+        return value_;
+    }
+    bool operator==(const expected& other) const {
+        if (present_ != other.present_) { return false; }
+        return present_ ? value_ == other.value_ : error_ == other.error_;
+    }
+    bool operator!=(const expected& other) const { return !(*this == other); }
+
+private:
+    bool present_;
+    T value_;
+    E error_;
+};
+
+template <typename E>
+class expected<void, E> {
+public:
+    typedef void value_type;
+    typedef E error_type;
+
+    expected() : present_(true), error_() {}
+    expected(unexpected<E> failure) : present_(false), error_(failure.error()) {}
+    bool has_value() const { return present_; }
+    explicit operator bool() const { return present_; }
+    void value() {
+        if (!present_) { throw bad_expected_access<E>(error_); }
+    }
+    E& error() { return error_; }
+    void emplace() { present_ = true; }
+
+private:
+    bool present_;
+    E error_;
+};
+
+}
+
+#endif

@@ -1,0 +1,8 @@
+// The arena-backed AST and parser state shared by the parser modules. Every
+// node carries a `Span`; child references use typed IDs so expression and
+// statement arenas cannot be mixed accidentally.
+
+struct Span {
+    let start: Int
+    let end: Int
+}

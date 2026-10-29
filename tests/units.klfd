@@ -1,0 +1,82 @@
+import Testing
+
+@Test
+function callsAFunctionDefinedInAnotherUnit() {
+    expect!(runFiles([
+        TestSource { name = "math.cpp", text = """
+            int square(int value) {
+                return value * value;
+            }
+            """ },
+        TestSource { name = "main.cpp", text = """
+            int square(int value);
+
+            int main() {
+                return square(7) + 1;
+            }
+            """ }
+    ]) == 50)
+}
+
+@Test
+function mergesGlobalsStringsAndStructsAcrossUnits() {
+    expect!(runFiles([
+        TestSource { name = "counter.cpp", text = """
+            int total = 0;
+
+            const char *label() {
+                return "unit";
+            }
+
+            int bump(int by) {
+                total = total + by;
+                return total;
+            }
+            """ },
+        TestSource { name = "main.cpp", text = """
+            int bump(int by);
+            const char *label();
+
+            int main() {
+                const char *name = label();
+                int first = (int)name[0];
+                bump(3);
+                return bump(4) + first;
+            }
+            """ }
+    ]) == 124)
+}
+
+@Test
+function rejectsAFunctionDefinedInTwoUnits() {
+    expect!(!compilesFiles([
+        TestSource { name = "a.cpp", text = """
+            int shared() {
+                return 1;
+            }
+            """ },
+        TestSource { name = "main.cpp", text = """
+            int shared() {
+                return 2;
+            }
+
+            int main() {
+                return shared();
+            }
+            """ }
+    ]))
+    expect!(reported("definition `karc` defines `shared` in more than one unit"))
+}
+
+@Test
+function rejectsAProgramWithoutMain() {
+    expect!(!compilesFiles([
+        TestSource { name = "only.cpp", text = """
+            int helper() {
+                return 1;
+            }
+            """ }
+    ]))
+    expect!(diagnosed(1033, 1, 1))
+    expect!(reported("phase `units` failed"))
+}

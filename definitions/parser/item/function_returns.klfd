@@ -1,0 +1,33 @@
+function functionReturningPointerAhead(p: borrow Parser) -> Bool {
+    if !fnPointerAhead(p) { return false }
+    var i = p.position + 2
+    while i < p.tokens.count && (isQualifier(p.tokens[i].kind) || compatibilityQualifier(p.tokens[i])) { i = i + 1 }
+    return i + 1 < p.tokens.count && p.tokens[i].kind == .Ident && p.tokens[i + 1].kind == .LParen
+}
+
+function declarationParameters(p: borrow mut Parser) -> [CppParam] {
+    expect(p, .LParen)
+    var parameters: [CppParam] = []
+    if peekKind(p) == .KwVoid && peek2Kind(p) == .RParen { consume(p) }
+    if peekKind(p) != .RParen {
+        parameters.append(parseParameter(p))
+        while peekKind(p) == .Comma && p.error == "" {
+            consume(p)
+            parameters.append(parseParameter(p))
+        }
+    }
+    expect(p, .RParen)
+    return parameters
+}
+
+function parseReturningPointerFunction(p: borrow mut Parser, result: String, start: Int, internal: Bool) {
+    expect(p, .LParen)
+    expect(p, .Star)
+    skipQualifiers(p)
+    let named = expect(p, .Ident)
+    let parameters = declarationParameters(p)
+    expect(p, .RParen)
+    let returned = parseFunctionTypeArgument(p, result)
+    let name = declarationName(p, named.text)
+    finishFunctionDeclaration(p, name, tokenSpan(named), returned, false, internal, start, parameters)
+}

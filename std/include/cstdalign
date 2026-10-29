@@ -1,0 +1,4 @@
+// <cstdalign>: nothing beyond the language's alignas and alignof.
+#ifndef KARC_STD_CSTDALIGN
+#define KARC_STD_CSTDALIGN
+#endif

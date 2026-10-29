@@ -1,0 +1,110 @@
+// <coroutine>: coroutine handles, the trivial awaitables and
+// coroutine_traits. KArc lowers a coroutine to a ramp that allocates its
+// frame and a resume function (lowering/lower_coroutine.klfd); the frame starts with
+// the header below and holds the promise at byte 32.
+#ifndef KARC_STD_COROUTINE
+#define KARC_STD_COROUTINE
+
+#include <cstddef>
+#include <cstdlib>
+
+namespace std {
+
+typedef void (*__karc_coroutine_fn)(void*);
+struct __karc_coroutine_frame {
+    __karc_coroutine_fn resume;
+    __karc_coroutine_fn destroy;
+    long state;
+    long done;
+};
+// What the lowering hands await_suspend; every coroutine_handle converts
+// from it.
+struct __karc_coroutine_address {
+    void* frame;
+};
+inline void* __karc_coroutine_alloc(long size) { return calloc(1, (size_t)size); }
+inline void __karc_coroutine_free(void* frame) { free(frame); }
+inline __karc_coroutine_address __karc_coroutine_handle_of(void* frame) {
+    __karc_coroutine_address address{frame};
+    return address;
+}
+
+template <class Promise = void>
+struct coroutine_handle {
+    void* frame_ = nullptr;
+    coroutine_handle() {}
+    coroutine_handle(nullptr_t) {}
+    coroutine_handle(__karc_coroutine_address address) : frame_(address.frame) {}
+    static coroutine_handle from_address(void* address) {
+        coroutine_handle handle;
+        handle.frame_ = address;
+        return handle;
+    }
+    static coroutine_handle from_promise(Promise& promise) {
+        coroutine_handle handle;
+        handle.frame_ = (char*)&promise - 32;
+        return handle;
+    }
+    void* address() const { return frame_; }
+    bool done() const { return ((__karc_coroutine_frame*)frame_)->done != 0; }
+    void resume() const { ((__karc_coroutine_frame*)frame_)->resume(frame_); }
+    void operator()() const { resume(); }
+    void destroy() const { ((__karc_coroutine_frame*)frame_)->destroy(frame_); }
+    Promise& promise() const { return *(Promise*)((char*)frame_ + 32); }
+    explicit operator bool() const { return frame_ != nullptr; }
+    bool operator==(const coroutine_handle& other) const { return frame_ == other.frame_; }
+    bool operator!=(const coroutine_handle& other) const { return frame_ != other.frame_; }
+    operator coroutine_handle<void>() const { return coroutine_handle<void>::from_address(frame_); }
+};
+
+template <>
+struct coroutine_handle<void> {
+    void* frame_ = nullptr;
+    coroutine_handle() {}
+    coroutine_handle(nullptr_t) {}
+    coroutine_handle(__karc_coroutine_address address) : frame_(address.frame) {}
+    static coroutine_handle from_address(void* address) {
+        coroutine_handle handle;
+        handle.frame_ = address;
+        return handle;
+    }
+    void* address() const { return frame_; }
+    bool done() const { return ((__karc_coroutine_frame*)frame_)->done != 0; }
+    void resume() const { ((__karc_coroutine_frame*)frame_)->resume(frame_); }
+    void operator()() const { resume(); }
+    void destroy() const { ((__karc_coroutine_frame*)frame_)->destroy(frame_); }
+    explicit operator bool() const { return frame_ != nullptr; }
+    bool operator==(const coroutine_handle& other) const { return frame_ == other.frame_; }
+    bool operator!=(const coroutine_handle& other) const { return frame_ != other.frame_; }
+};
+
+struct suspend_never {
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(coroutine_handle<> handle) const noexcept {}
+    void await_resume() const noexcept {}
+};
+struct suspend_always {
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(coroutine_handle<> handle) const noexcept {}
+    void await_resume() const noexcept {}
+};
+
+template <class R, class... Args>
+struct coroutine_traits {
+    using promise_type = typename R::promise_type;
+};
+
+// A coroutine that does nothing when resumed and is never done.
+inline void __karc_noop_resume(void* frame) {}
+struct noop_coroutine_promise {};
+static __karc_coroutine_frame __karc_noop_frame;
+using noop_coroutine_handle = coroutine_handle<noop_coroutine_promise>;
+inline noop_coroutine_handle noop_coroutine() {
+    __karc_noop_frame.resume = __karc_noop_resume;
+    __karc_noop_frame.destroy = __karc_noop_resume;
+    return noop_coroutine_handle::from_address(&__karc_noop_frame);
+}
+
+}
+
+#endif

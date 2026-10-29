@@ -1,0 +1,91 @@
+// clang's type-trait builtins, answered while parsing: `__is_same(A, B)`,
+// `__is_integral(T)` and the rest are integer constants.
+function isTypeTrait(name: String) -> Bool {
+    match name {
+        "__is_same", "__is_integral", "__is_floating_point", "__is_pointer", "__is_class", "__is_arithmetic",
+        "__is_signed", "__is_unsigned", "__is_void", "__karc_type_name", "__karc_derives", "__is_array",
+        "__is_base_of", "__is_convertible", "__is_polymorphic", "__is_trivially_copyable", "__is_empty",
+        "__karc_field_count" -> return true
+        else -> return false
+    }
+}
+function parseTypeTrait(p: borrow mut Parser) -> ExprId {
+    let nameToken = consume(p)
+    expect(p, .LParen)
+    let first = parseTypeToken(p)
+    var second = ""
+    if peekKind(p) == .Comma {
+        consume(p)
+        second = parseTypeToken(p)
+    }
+    expect(p, .RParen)
+    let name = nameToken.text
+    if name == "__karc_derives" {
+        // `__is_base_of` answered when lowering, when every class is
+        // complete (a class template instance may be parsed while the
+        // class it names is still being defined).
+        p.tree.explicitArguments.append([first, second])
+        return addExpr(p, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = "@derives", arguments = [], explicitArguments = p.tree.explicitArguments.count, awaitTransform = false }), span = tokenSpan(nameToken), nameSpan = tokenSpan(nameToken) })
+    }
+    if name == "__karc_type_name" {
+        // The type's karc spelling, as a string literal naming it.
+        let index = p.tree.strings.count
+        p.tree.strings.append(first)
+        return eStr(p, index, tokenSpan(nameToken))
+    }
+    if name == "__karc_field_count" {
+        // The data members of a class: a tuple's elements.
+        var count = 0
+        for record in p.tree.structs {
+            if isClassType(first) && joinText(["%", record.name]) == first { count = record.fields.count }
+        }
+        return eNumber(p, count, tokenSpan(nameToken))
+    }
+    let integral = isIntegerSpelling(first)
+    let floating = isFloatSpelling(first)
+    var answer = false
+    match name {
+        "__is_same" -> answer = first == second
+        "__is_integral" -> answer = integral
+        "__is_floating_point" -> answer = floating
+        "__is_arithmetic" -> answer = integral || floating
+        "__is_pointer" -> answer = isPointerType(first)
+        "__is_class" -> answer = isClassType(first)
+        "__is_void" -> answer = first == "unit"
+        "__is_unsigned" -> answer = integral && (utf8Byte(first, 0) == 117 || first == "i1")
+        "__is_signed" -> answer = floating || (integral && utf8Byte(first, 0) == 105 && first != "i1")
+        "__is_array" -> answer = isArrayType(first)
+        "__is_base_of" -> answer = first == second || classDerivesFrom(p.tree, second, first)
+        "__is_polymorphic" -> answer = isClassType(first) && isPolymorphicClass(p, first)
+        "__is_empty" -> answer = isClassType(first) && typeSize(p.tree, first) <= 1
+        "__is_trivially_copyable" -> answer = !isClassType(first) || !classHasSpecialMembers(p.tree, first)
+        "__is_convertible" -> {
+            let secondArithmetic = isIntegerSpelling(second) || second == "f64"
+            answer = first == second || ((integral || floating) && secondArithmetic) || classDerivesFrom(p.tree, first, second) ||
+                (isPointerType(first) && (second == "*[0 x unit]" || classDerivesFrom(p.tree, elementOfPointer(first), elementOfPointer(second))))
+        }
+        else -> {}
+    }
+    var value = 0
+    if answer { value = 1 }
+    return eNumber(p, value, tokenSpan(nameToken))
+}
+// A builtin call carrying a type, kept as its one explicit template
+// argument: `@dynamic_cast` its target, `@typeid` the type named.
+function eTypedCall(p: borrow mut Parser, marker: String, arguments: [ExprId], ty: String, start: Int) -> ExprId {
+    p.tree.explicitArguments.append([ty])
+    return addExpr(p, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = marker, arguments = arguments, explicitArguments = p.tree.explicitArguments.count, awaitTransform = false }), span = spanFrom(p, start), nameSpan = spanFrom(p, start) })
+}
+// `Alias::member` where Alias names a class, as a template parameter or a
+// typedef of a template instance does: the class's member.
+function throughClassAlias(p: borrow Parser, name: String) -> String {
+    let count = utf8Count(name)
+    var cut = -1
+    for i in 1..count {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i - 1) == 58 { cut = i - 1 }
+    }
+    if cut <= 0 { return name }
+    let aliased = typedefAlias(p, utf8Slice(name, 0, cut))
+    if !isClassType(aliased) { return name }
+    return joinText([nominalName(aliased), "::", utf8Slice(name, cut + 2, count)])
+}

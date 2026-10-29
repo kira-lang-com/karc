@@ -1,0 +1,36 @@
+// <stacktrace>: std::stacktrace. KArc keeps no frame information a
+// program can read, so a captured trace is empty.
+#ifndef KARC_STD_STACKTRACE
+#define KARC_STD_STACKTRACE
+
+#include <cstddef>
+#include <string>
+
+namespace std {
+
+class stacktrace_entry {
+public:
+    string description() const { return string(); }
+    string source_file() const { return string(); }
+    unsigned int source_line() const { return 0; }
+    explicit operator bool() const { return false; }
+    int unused;
+};
+
+class stacktrace {
+public:
+    static stacktrace current() { return stacktrace(); }
+    size_t size() const { return 0; }
+    bool empty() const { return true; }
+    const stacktrace_entry* begin() const { return &entry_; }
+    const stacktrace_entry* end() const { return &entry_; }
+
+private:
+    stacktrace_entry entry_;
+};
+
+inline string to_string(const stacktrace& trace) { return string(); }
+
+}
+
+#endif

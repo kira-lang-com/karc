@@ -1,0 +1,201 @@
+struct ExprId {
+    let value: Int
+}
+function noExpr() -> ExprId {
+    return ExprId { value = -1 }
+}
+function hasExpr(id: ExprId) -> Bool {
+    return id.value >= 0
+}
+enum UnaryKind {
+    Neg
+    Positive
+    Not
+    BitNot
+    AddrOf
+    Deref
+    Sizeof
+}
+enum StepKind {
+    PreStep
+    PostStep
+}
+struct NumberExpression {
+    let value: Int
+    let suffix: String
+}
+struct StringExpression {
+    let index: Int
+    let prefix: String
+}
+struct NameExpression {
+    let name: String
+    let explicitArguments: Int
+    let valueUse: Bool
+}
+struct CastExpression {
+    let ty: String
+    let operand: ExprId
+}
+struct CallExpression {
+    let receiver: ExprId
+    let name: String
+    let arguments: [ExprId]
+    let explicitArguments: Int
+    let awaitTransform: Bool
+}
+struct FieldExpression {
+    let base: ExprId
+    let name: String
+}
+struct IndexExpression {
+    let base: ExprId
+    let index: ExprId
+}
+struct StepExpression {
+    let operand: ExprId
+    let op: String
+}
+struct BinaryExpression {
+    let left: ExprId
+    let right: ExprId
+    let op: String
+}
+struct TernaryExpression {
+    let condition: ExprId
+    let thenValue: ExprId
+    let elseValue: ExprId
+}
+struct NewExpression {
+    let count: ExprId
+    let initializer: ExprId
+    let ty: String
+    let arguments: [ExprId]
+}
+struct DeleteExpression {
+    let operand: ExprId
+    let array: Bool
+}
+enum ExprKind {
+    NumberLit(NumberExpression)
+    FloatLit(String)
+    StringLit(StringExpression)
+    Name(NameExpression)
+    Neg(ExprId)
+    Positive(ExprId)
+    Not(ExprId)
+    BitNot(ExprId)
+    AddrOf(ExprId)
+    Deref(ExprId)
+    Sizeof(ExprId)
+    Cast(CastExpression)
+    Call(CallExpression)
+    Field(FieldExpression)
+    Index(IndexExpression)
+    PreStep(StepExpression)
+    PostStep(StepExpression)
+    Binary(BinaryExpression)
+    Ternary(TernaryExpression)
+    New(NewExpression)
+    Delete(DeleteExpression)
+}
+// Arena-backed expression node. Child references remain typed IDs, while each
+// variant carries only the payload that is valid for that expression shape.
+struct Expr {
+    let kind: ExprKind
+    let span: Span
+    let nameSpan: Span
+}
+function nameWithValueUse(expr: Expr, valueUse: Bool) -> Expr {
+    match expr.kind {
+        Name(named) -> return Expr {
+            kind = .Name(NameExpression { name = named.name, explicitArguments = named.explicitArguments, valueUse = valueUse }),
+            span = expr.span,
+            nameSpan = expr.nameSpan
+        }
+        NumberLit -> return expr
+        FloatLit -> return expr
+        StringLit -> return expr
+        Neg -> return expr
+        Positive -> return expr
+        Not -> return expr
+        BitNot -> return expr
+        AddrOf -> return expr
+        Deref -> return expr
+        Sizeof -> return expr
+        Cast -> return expr
+        Call -> return expr
+        Field -> return expr
+        Index -> return expr
+        PreStep -> return expr
+        PostStep -> return expr
+        Binary -> return expr
+        Ternary -> return expr
+        New -> return expr
+        Delete -> return expr
+    }
+}
+function callWithExplicitArguments(expr: Expr, explicitArguments: Int) -> Expr {
+    match expr.kind {
+        Call(call) -> return Expr {
+            kind = .Call(CallExpression {
+                receiver = call.receiver,
+                name = call.name,
+                arguments = call.arguments,
+                explicitArguments = explicitArguments,
+                awaitTransform = call.awaitTransform
+            }),
+            span = expr.span,
+            nameSpan = expr.nameSpan
+        }
+        NumberLit -> return expr
+        FloatLit -> return expr
+        StringLit -> return expr
+        Name -> return expr
+        Neg -> return expr
+        Positive -> return expr
+        Not -> return expr
+        BitNot -> return expr
+        AddrOf -> return expr
+        Deref -> return expr
+        Sizeof -> return expr
+        Cast -> return expr
+        Field -> return expr
+        Index -> return expr
+        PreStep -> return expr
+        PostStep -> return expr
+        Binary -> return expr
+        Ternary -> return expr
+        New -> return expr
+        Delete -> return expr
+    }
+}
+function stringWithPrefix(expr: Expr, prefix: String) -> Expr {
+    match expr.kind {
+        StringLit(string) -> return Expr {
+            kind = .StringLit(StringExpression { index = string.index, prefix = prefix }),
+            span = expr.span,
+            nameSpan = expr.nameSpan
+        }
+        NumberLit -> return expr
+        FloatLit -> return expr
+        Name -> return expr
+        Neg -> return expr
+        Positive -> return expr
+        Not -> return expr
+        BitNot -> return expr
+        AddrOf -> return expr
+        Deref -> return expr
+        Sizeof -> return expr
+        Cast -> return expr
+        Call -> return expr
+        Field -> return expr
+        Index -> return expr
+        PreStep -> return expr
+        PostStep -> return expr
+        Binary -> return expr
+        Ternary -> return expr
+        New -> return expr
+        Delete -> return expr
+    }
+}

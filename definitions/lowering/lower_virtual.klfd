@@ -1,0 +1,179 @@
+// Virtual functions. A polymorphic class's objects start with (or share
+// their first base's) `__vptr`, which points at the class's table: one
+// function pointer per virtual function, the destructor slot first, a
+// derived class's table extending its base's. Constructors store the table;
+// a virtual call loads the function from it.
+
+function vtableType() -> String { return "*[0 x i8]" }
+// The class whose `__vptr` field a `ty` object's table pointer lives in.
+function vptrOwner(state: Lowerer, ty: String) -> String {
+    let index = structIndex(state, nominalName(ty))
+    if index < 0 { return "" }
+    let fields = state.tree.structs[index].fields
+    if fields.count == 0 { return "" }
+    if fields[0].name == "__vptr" { return ty }
+    if isBaseField(fields[0]) { return vptrOwner(state, fields[0].declType) }
+    return ""
+}
+// What identifies a virtual function across a hierarchy: its name and
+// parameter types; every destructor shares the slot "~".
+function slotKey(state: Lowerer, index: Int) -> String {
+    let fn = state.tree.functions[index]
+    let name = unqualifiedName(fn.name)
+    if utf8Byte(name, 0) == 126 || name == "__karc_destroy" { return "~" }
+    var pieces: [String] = [name, "("]
+    for parameter in fn.parameters {
+        pieces.append(parameterKirType(parameter.declType))
+        pieces.append(",")
+    }
+    pieces.append(")")
+    return joinText(pieces)
+}
+function declaredVirtual(state: Lowerer, index: Int) -> Bool {
+    let name = state.tree.functions[index].name
+    if unqualifiedName(name) == "__karc_destroy" { return true }
+    for known in state.tree.virtualNames {
+        if known == name { return true }
+    }
+    return false
+}
+// Whether function `index` is virtual: declared so, or overriding a virtual
+// function of a base.
+function isVirtualFunction(state: Lowerer, index: Int) -> Bool {
+    if declaredVirtual(state, index) { return true }
+    let owner = methodOwnerType(state.tree, state.tree.functions[index].name)
+    if owner == "" || vptrOwner(state, owner) == "" { return false }
+    let key = slotKey(state, index)
+    for slot in vtableSlots(state, owner) {
+        if slot == key && key != "~" { return true }
+    }
+    return false
+}
+function vtableSlots(state: Lowerer, ty: String) -> [String] {
+    let index = structIndex(state, nominalName(ty))
+    // The destructor first, then the dynamic type's name chain for
+    // dynamic_cast and typeid (lowering/lower_rtti.klfd), then the virtual functions.
+    var slots: [String] = ["~", "@type", "@top"]
+    if index < 0 { return slots }
+    let fields = state.tree.structs[index].fields
+    if fields.count > 0 && isBaseField(fields[0]) && vptrOwner(state, fields[0].declType) != "" {
+        slots = vtableSlots(state, fields[0].declType)
+    }
+    for i in functionsOwnedIn(state.tree, ty) {
+        if declaredVirtual(state, i) {
+            let key = slotKey(state, i)
+            var present = false
+            for slot in slots {
+                if slot == key { present = true }
+            }
+            if !present { slots.append(key) }
+        }
+    }
+    return slots
+}
+// The function that fills slot `key` of `ty`'s table, or -1 (pure).
+function slotImplementation(state: Lowerer, ty: String, key: String) -> Int {
+    var found = -1
+    for i in functionsOwnedIn(state.tree, ty) {
+        let fn = state.tree.functions[i]
+        if slotKey(state, i) == key {
+            if key == "~" {
+                if unqualifiedName(fn.name) == "__karc_destroy" { found = i }
+            } else if !fn.isProto || found < 0 {
+                found = i
+            }
+        }
+    }
+    if found >= 0 && !(state.tree.functions[found].isProto && definitionOf(state.tree, found) == found) {
+        return definitionOf(state.tree, found)
+    }
+    let index = structIndex(state, nominalName(ty))
+    if index >= 0 && state.tree.structs[index].fields.count > 0 && isBaseField(state.tree.structs[index].fields[0]) {
+        return slotImplementation(state, state.tree.structs[index].fields[0].declType, key)
+    }
+    return -1
+}
+function vtableName(ty: String) -> String {
+    return joinText([nominalName(ty), "::__vtable"])
+}
+// One unit-private table global per polymorphic class.
+function declareVtables(state: borrow mut Lowerer) {
+    declareVtablesFrom(state, 0)
+}
+function declareVtablesFrom(state: borrow mut Lowerer, first: Int) {
+    for index in first..state.tree.structs.count {
+        let s = state.tree.structs[index]
+        let ty = joinText(["%", s.name])
+        if vptrOwner(state, ty) != "" {
+            state.tree.globals.append(CppGlobal { name = vtableName(ty), nameSpan = s.nameSpan, declType = vtableType(), arraySize = vtableSlots(state, ty).count, initValue = 0, hasInit = false, initList = [], internal = true, span = s.span })
+            declareSecondaryTables(state, ty, s)
+        }
+    }
+}
+// Fills `ty`'s table and points the object at it.
+function setVtable(state: borrow mut Lowerer, object: KirValue, ty: String) {
+    let owner = vptrOwner(state, ty)
+    if owner == "" { return }
+    let table = ensureGlobalSlot(state, vtableName(ty))
+    if table < 0 { return }
+    let slots = vtableSlots(state, ty)
+    for i in 0..slots.count {
+        var implementation = -1
+        var entry = kNull(state, vtableType())
+        match slots[i] {
+            "@type" -> entry = kBitcast(state, addedString(state, typeChain(state, ty)), vtableType())
+            "@top" -> {}
+            else -> implementation = slotImplementation(state, ty, slots[i])
+        }
+        if implementation >= 0 {
+            let callee = functionSlotForFunction(state, implementation)
+            if callee >= 0 { entry = kBitcast(state, kFuncRef(state, state.functionSlots[callee].handle), vtableType()) }
+        }
+        kStore(state, entry, kElemAddr(state, state.slotsData[table].address, kConstInt(state, "i64", i), vtableType()))
+    }
+    let tablePointer = kBitcast(state, slotPointer(state, state.slotsData[table].address, vtableType()), vtableType())
+    let holder = upcast(state, object, ty, owner)
+    let field = fieldPointer(state, holder, owner, 0, vtableType())
+    let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = joinText(["*[0 x ", vtableType(), "]"]), unsigned = false, floating = false }
+    kStore(state, tablePointer, placeFromPointer(state, fieldValue).address)
+    setSecondaryTables(state, object, ty)
+}
+// The function pointer in slot `key` of the table the `owner` object at
+// `object` points at, typed as a call to `callee`.
+function virtualTarget(state: borrow mut Lowerer, object: KirValue, owner: String, key: String, callee: Int) -> KirValue {
+    let root = vptrOwner(state, owner)
+    var slot = 0
+    let slots = vtableSlots(state, owner)
+    for i in 0..slots.count {
+        if slots[i] == key { slot = i }
+    }
+    let holder = upcast(state, object, owner, root)
+    let field = fieldPointer(state, holder, root, 0, vtableType())
+    let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = joinText(["*[0 x ", vtableType(), "]"]), unsigned = false, floating = false }
+    let table = kLoad(state, placeFromPointer(state, fieldValue).address)
+    let typedTable = kBitcast(state, table, joinText(["*[0 x ", vtableType(), "]"]))
+    let entries = kAddressOf(state, typedTable, joinText(["[0 x ", vtableType(), "]"]))
+    let entry = kLoad(state, kElemAddr(state, entries, kConstInt(state, "i64", slot), vtableType()))
+    var parameters: [String] = []
+    for parameter in state.functionSlots[callee].parameters {
+        if parameters.count > 0 { parameters.append(",") }
+        parameters.append(parameter)
+    }
+    let fnType = joinText(["fn<", state.functionSlots[callee].result, "|", joinText(parameters), ">"])
+    return kBitcast(state, entry, fnType)
+}
+// `delete` through a pointer to a polymorphic class: the dynamic type's
+// destructor slot.
+function emitVirtualDestroy(state: borrow mut Lowerer, object: KirValue, ty: String) {
+    let implementation = slotImplementation(state, ty, "~")
+    if implementation < 0 {
+        destroyValue(state, object, ty)
+        return
+    }
+    let callee = functionSlotForFunction(state, implementation)
+    if callee < 0 { return }
+    let target = virtualTarget(state, object, ty, "~", callee)
+    kIndirectParameter(state, state.functionSlots[callee].parameters[0])
+    kArgument(state, kBitcast(state, object, state.functionSlots[callee].parameters[0]))
+    kCallIndirectVoid(state, target)
+}

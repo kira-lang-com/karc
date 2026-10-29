@@ -1,0 +1,189 @@
+function operatorFunction(state: borrow mut Lowerer, name: String, parameter: String, result: String, span: Span) -> Int {
+    let existing = functionSlot(state, name)
+    if existing >= 0 { return existing }
+    let signature = kSignatureC(state, span, name, result)
+    var parameters: [String] = []
+    if parameter != "" {
+        kSignatureParameter(state, signature, parameter)
+        parameters.append(parameter)
+    }
+    let handle = kDeclareFunction(signature)
+    return addFunctionSlot(state, name, parameters, result, handle, true)
+}
+// `new T[count]` or `new T(init)`: zeroed storage from `karc_operator_new`,
+// with a scalar or pointer initializer stored into it. Classes have no
+// constructors in the subset, so nothing else runs.
+function emitNew(state: borrow mut Lowerer, newExpr: NewExpression, nameSpan: Span) -> Value {
+    let element = newExpr.ty
+    var bytes = kConstInt(state, "i64", typeSize(state.tree, element))
+    if hasExpr(newExpr.count) {
+        let count = convert(state, emitExpression(state, newExpr.count), "i64")
+        bytes = kBinary(state, "mul", false, false, count.reference, bytes)
+    }
+    let pointerType = joinText(["*[0 x ", element, "]"])
+    var pointer = zeroValue(state).reference
+    if hasExpr(newExpr.initializer) {
+        let address = emitExpression(state, newExpr.initializer)
+        pointer = kBitcast(state, address.reference, pointerType)
+    } else {
+        let allocate = operatorFunction(state, "karc_operator_new", "i64", "*[0 x i8]", nameSpan)
+        kArgument(state, bytes)
+        let raw = kCall(state, state.functionSlots[allocate].handle, "*[0 x i8]")
+        pointer = kBitcast(state, raw, pointerType)
+    }
+    if isClassType(element) && !hasExpr(newExpr.count) {
+        emitConstruct(state, pointer, element, newExpr.arguments)
+    } else if newExpr.arguments.count > 0 && !isClassType(element) {
+        let value = emitExpression(state, newExpr.arguments[0])
+        let base = kAddressOf(state, pointer, arrayOfPointer(pointerType))
+        let first = kElemAddr(state, base, kConstInt(state, "i64", 0), element)
+        kStore(state, coerceRef(state, value, element), first)
+    }
+    return Value { reference = pointer, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false }
+}
+function emitDelete(state: borrow mut Lowerer, deleteExpr: DeleteExpression, span: Span, nameSpan: Span) -> Value {
+    let operand = emitExpression(state, deleteExpr.operand)
+    let element = elementOfPointer(operand.pointer)
+    var complete = -1
+    if operand.pointer != "" && isClassType(element) && vptrOwner(state, element) != "" && !deleteExpr.array {
+        complete = declare(state, joinText(["__karc_complete_", decimalText(state.slots)]), "*[0 x i8]", "i8", span)
+        kStore(state, kBitcast(state, operand.reference, "*[0 x i8]"), state.slotsData[complete].address)
+    }
+    if operand.pointer != "" && !deleteExpr.array && isClassType(element) && hasDestructor(state, element) {
+        let live = kBlock(state)
+        let done = kBlock(state)
+        let address = toAddr64(state, operand)
+        kCondBr(state, kIcmp(state, "ne", address, kConstInt(state, "i64", 0)), live, done)
+        kSwitchTo(state, live)
+        if complete >= 0 { kStore(state, kBitcast(state, completeObject(state, operand.reference, element), "*[0 x i8]"), state.slotsData[complete].address) }
+        if vptrOwner(state, element) != "" {
+            emitVirtualDestroy(state, operand.reference, element)
+        } else {
+            emitDestroy(state, operand.reference, element)
+        }
+        kBr(state, done)
+        kSwitchTo(state, done)
+    }
+    var raw = kNull(state, "*[0 x i8]")
+    if operand.pointer != "" { raw = kBitcast(state, operand.reference, "*[0 x i8]") }
+    if complete >= 0 { raw = kLoad(state, state.slotsData[complete].address) }
+    let release = operatorFunction(state, "karc_operator_delete", "*[0 x i8]", "unit", nameSpan)
+    kArgument(state, raw)
+    kCallVoid(state, state.functionSlots[release].handle)
+    return zeroValue(state)
+}
+function qualifiedCall(name: String) -> Bool {
+    for i in 1..utf8Count(name) {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i - 1) == 58 { return true }
+    }
+    return false
+}
+// `member(args)` inside a member function, where `member` is a field holding
+// a callable: its operator(), or the function pointer it holds.
+function emitFieldCall(state: borrow mut Lowerer, call: CallExpression, span: Span, id: ExprId) -> Value {
+    let place = implicitFieldPlace(state, call.name)
+    if isFnPtrType(place.ty) {
+        let temporary = declare(state, joinText(["__karc_fn_", decimalText(state.slots)]), place.ty, "", span)
+        kStore(state, kLoad(state, place.address), state.slotsData[temporary].address)
+        return emitIndirectCall(state, temporary, id)
+    }
+    if isClassType(place.ty) {
+        let index = chooseMember(state, place.ty, "operator()", call.arguments)
+        if index >= 0 {
+            return callFunction(state, index, [slotPointer(state, place.address, place.ty)], call.arguments)
+        }
+    }
+    lowerError(state, diagUnknownName(), span)
+    return zeroValue(state)
+}
+// The callee of `@invoke`: a `(*f)` on a function pointer is the pointer.
+function invokedExpression(state: borrow mut Lowerer, callee: ExprId) -> ExprId {
+    let e = state.tree.expressions[callee.value]
+    match e.kind {
+        Deref(operand) -> {
+            if isFnPtrType(staticType(state, operand)) { return operand }
+            return callee
+        }
+        NumberLit -> return callee
+        FloatLit -> return callee
+        StringLit -> return callee
+        Name -> return callee
+        Neg -> return callee
+        Positive -> return callee
+        Not -> return callee
+        BitNot -> return callee
+        AddrOf -> return callee
+        Sizeof -> return callee
+        Cast -> return callee
+        Call -> return callee
+        Field -> return callee
+        Index -> return callee
+        PreStep -> return callee
+        PostStep -> return callee
+        Binary -> return callee
+        Ternary -> return callee
+        New -> return callee
+        Delete -> return callee
+    }
+}
+// Calling the value of an expression: operator() of a class object, or a
+// function pointer through a temporary slot.
+function emitInvoke(state: borrow mut Lowerer, id: ExprId) -> Value {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Call(call) -> return emitInvokePayload(state, id, call, expr.span)
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    lowerError(state, diagUnsupportedExpression(), expr.span)
+    return zeroValue(state)
+}
+function emitInvokePayload(state: borrow mut Lowerer, id: ExprId, call: CallExpression, span: Span) -> Value {
+    let callee = invokedExpression(state, call.receiver)
+    let calleeType = staticType(state, callee)
+    if isClassType(calleeType) {
+        let index = chooseMember(state, calleeType, "operator()", call.arguments)
+        if index < 0 {
+            lowerError(state, diagUnsupportedExpression(), span)
+            return zeroValue(state)
+        }
+        let object = memberReceiver(state, methodReceiver(state, callee, calleeType), calleeType, index)
+        return derefIfReference(state, callFunction(state, index, [object], call.arguments))
+    }
+    if isFnPtrType(calleeType) {
+        let value = emitExpression(state, callee)
+        let slot = declare(state, joinText(["__karc_fn_", decimalText(state.slots)]), calleeType, "", span)
+        kStore(state, coerceRef(state, value, calleeType), state.slotsData[slot].address)
+        return emitIndirectCall(state, slot, id)
+    }
+    lowerError(state, diagUnsupportedExpression(), span)
+    return zeroValue(state)
+}
+// For `object.name(args)` naming a data member, the `@invoke` of that
+// member; noExpr otherwise.
+function memberCallee(state: borrow mut Lowerer, call: CallExpression, span: Span, nameSpan: Span, name: String) -> ExprId {
+    let owner = staticType(state, call.receiver)
+    if !isClassType(owner) { return noExpr() }
+    let fieldType = memberType(state, owner, name)
+    if fieldType == "" || !(isFnPtrType(fieldType) || isClassType(fieldType)) { return noExpr() }
+    let field = addLoweredExpr(state, Expr { kind = .Field(FieldExpression { base = call.receiver, name = name }), span = span, nameSpan = nameSpan })
+    return addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = field, name = "@invoke", arguments = call.arguments, explicitArguments = 0, awaitTransform = false }), span = span, nameSpan = nameSpan })
+}

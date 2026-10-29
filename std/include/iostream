@@ -1,0 +1,26 @@
+// <iostream>: the standard streams. std::ostream and std::istream (see
+// <__ostream> and <__istream>) format into and read from a file
+// descriptor through a virtual hook, which string and file streams
+// override; stream state carries width, precision, fill and the ios_base
+// flags <iomanip> sets.
+#ifndef KARC_STD_IOSTREAM
+#define KARC_STD_IOSTREAM
+
+#include <cctype>
+#include <__ostream>
+#include <__istream>
+
+namespace std {
+
+static ostream cout(1);
+static ostream cerr(2);
+static ostream clog(2);
+static istream cin(0);
+
+typedef ostream iostream;
+
+}
+
+#include <iomanip>
+
+#endif

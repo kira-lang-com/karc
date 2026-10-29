@@ -1,0 +1,670 @@
+// Type and top-level declaration parsing: the built-in and user type grammar,
+// and the file-scope forms (functions, globals, structs, enums, typedefs).
+
+function keywordType(kind: TokenKind) -> String {
+    if kind == .KwChar { return "i8" }
+    if kind == .KwVoid { return "unit" }
+    if kind == .KwLong { return "i64" }
+    if kind == .KwBool { return "i1" }
+    return "i32"
+}
+function sizeOfKirType(ty: String) -> Int {
+    if isPointerType(ty) || isFnPtrType(ty) { return 8 }
+    match ty {
+        "i8", "u8" -> return 1
+        "i16", "u16" -> return 2
+        "i1" -> return 1
+        "i64", "u64" -> return 8
+        else -> return 4
+    }
+}
+function isQualifier(kind: TokenKind) -> Bool {
+    return kind == .KwConst || kind == .KwStatic || kind == .KwExtern || kind == .KwInline || kind == .KwRegister || kind == .KwVolatile
+}
+function skipQualifiers(p: borrow mut Parser) {
+    while (isQualifier(peekKind(p)) || compatibilityQualifier(peek(p))) && p.error == "" {
+        consume(p)
+    }
+}
+// Whether the qualifiers after a member function's parameters include
+// `const`.
+function constQualified(p: borrow Parser) -> Bool {
+    var i = p.position
+    while i < p.tokens.count && (isQualifier(p.tokens[i].kind) || compatibilityQualifier(p.tokens[i])) {
+        if p.tokens[i].kind == .KwConst { return true }
+        i = i + 1
+    }
+    return false
+}
+function compatibilityQualifier(t: Token) -> Bool {
+    if t.kind != .Ident { return false }
+    match t.text {
+        "constexpr", "consteval", "constinit", "thread_local", "mutable", "friend", "virtual",
+        "explicit", "export", "noexcept", "override", "final", "typename" -> return true
+        else -> return false
+    }
+}
+// The type an alias names, or "" when `name` is no alias here: a block's
+// own alias first, then what lookup finds.
+function typedefAlias(p: borrow Parser, name: String) -> String {
+    if !hasScope(name) {
+        let local = joinText(["@local::", name])
+        var i = p.tree.typedefs.count
+        while i > 0 {
+            i = i - 1
+            if p.tree.typedefs[i].name == local { return p.tree.typedefs[i].declType }
+        }
+    }
+    let found = resolveIn(p, name, entityTypeKinds())
+    if found == "" { return "" }
+    let index = entityIndex(p.tree, found)
+    let entity = p.tree.entities[index]
+    if hasKind(entity.kinds, .Typedef) { return entity.target }
+    return ""
+}
+function startsType(p: borrow Parser) -> Bool {
+    let k = peekKind(p)
+    if k == .KwInt || k == .KwChar || k == .KwBool || k == .KwLong || k == .KwVoid || k == .KwStruct || k == .KwEnum || k == .KwConst || k == .KwVolatile || k == .KwUnsigned || k == .KwSigned {
+        return true
+    }
+    if k == .Ident {
+        if localNamed(p, peek(p).text) && peek2Kind(p) != .Colon { return false }
+        if peek(p).text == "STACK_OF" { return true }
+        if peek(p).text == "decltype" && peek2Kind(p) == .LParen { return true }
+        if isTypeBuiltin(peek(p).text) && peek2Kind(p) == .LParen { return true }
+        // `Alias::member` is a type only as the qualified name below decides.
+        if (typedefAlias(p, peek(p).text) != "" && peek2Kind(p) != .Colon) || peek2Kind(p) == .Ident || peek2Kind(p) == .Star { return true }
+        if peek2Kind(p) == .Lt && classTemplateIndex(p, peek(p).text) >= 0 { return true }
+        if isClassName(p, peek(p).text) && (peek2Kind(p) == .Amp || peek2Kind(p) == .AndAnd) { return true }
+        if peek2Kind(p) == .Colon {
+            var qualifiedEnd = p.position + 3
+            for offset in 0..p.tokens.count {
+                let i = p.position + 3 + offset * 3
+                if i + 2 >= p.tokens.count || p.tokens[i + 1].kind != .Colon || p.tokens[i + 2].kind != .Colon { break }
+                qualifiedEnd = i + 3
+            }
+            var nextIndex = qualifiedEnd + 1
+            if nextIndex < p.tokens.count && p.tokens[nextIndex].kind == .Lt {
+                var depth = 1
+                nextIndex = nextIndex + 1
+                var templateEnd = nextIndex
+                for cursor in nextIndex..p.tokens.count {
+                    if depth <= 0 { break }
+                    if p.tokens[cursor].kind == .Lt { depth = depth + 1 }
+                    else if p.tokens[cursor].kind == .Gt { depth = depth - 1 }
+                    else if p.tokens[cursor].kind == .Shr { depth = depth - 2 }
+                    templateEnd = cursor + 1
+                }
+                nextIndex = templateEnd
+                // `A<T>::member`: a member type of the instance.
+                while nextIndex + 2 < p.tokens.count && p.tokens[nextIndex].kind == .Colon && p.tokens[nextIndex + 1].kind == .Colon && p.tokens[nextIndex + 2].kind == .Ident {
+                    nextIndex = nextIndex + 3
+                }
+            }
+            if nextIndex >= p.tokens.count { return false }
+            // `P::num * x` with P a type: a value unless the member is a type.
+            if typedefAlias(p, peek(p).text) != "" && nextIndex == qualifiedEnd + 1 && !namesMemberType(p, qualifiedEnd) { return false }
+            let next = p.tokens[nextIndex].kind
+            if (next == .RParen || next == .Comma || next == .Gt || next == .LBrace) && namesNestedClass(p, qualifiedEnd) { return true }
+            // `(std::string)`, `typeid(std::string)`: a class named whole.
+            if (next == .RParen || next == .Comma) && nextIndex == qualifiedEnd + 1 && isClassName(p, p.tokens[qualifiedEnd].text) { return true }
+            return next == .Ident || next == .Star || next == .Amp || next == .AndAnd || next == .LBracket
+        }
+        let first = utf8Byte(peek(p).text, 0)
+        if first >= 65 && first <= 90 && !p.tree.cInput { return true }
+        match peek(p).text {
+            "auto", "double", "float", "wchar_t", "char16_t", "char32_t", "char8_t", "short" -> return true
+            else -> return false
+        }
+    }
+    return false
+}
+// Whether `Alias::member` (tokens from the current one to `last`) names a
+// type: a member alias or class of what the alias stands for.
+function namesMemberType(p: borrow Parser, last: Int) -> Bool {
+    let aliased = typedefAlias(p, peek(p).text)
+    if !isClassType(aliased) { return true }
+    let member = p.tokens[last].text
+    if typedefAlias(p, joinText([nominalName(aliased), "::", member])) != "" { return true }
+    return isClassName(p, member)
+}
+// Whether a class definition just parsed ended at its `}`, not `};`, so
+// declarators follow.
+function definitionOpen(p: borrow Parser) -> Bool {
+    return p.position > 0 && p.tokens[p.position - 1].kind == .RBrace
+}
+// `struct S {...} a, *b;`: the objects declared after a class definition.
+function structDeclarators(p: borrow mut Parser, sname: String, start: Int, internal: Bool) {
+    if definitionOpen(p) && (peekKind(p) == .Ident || peekKind(p) == .Star) {
+        parseNamedTopLevel(p, joinText(["%", sname]), start, internal)
+    }
+}
+// Whether the `A::B::C` ending at token `last` names a nested class, whose
+// member alias has exactly that name.
+function namesNestedClass(p: borrow Parser, last: Int) -> Bool {
+    var pieces: [String] = [p.tokens[p.position].text]
+    var i = p.position + 3
+    while i <= last {
+        pieces.append("::")
+        pieces.append(p.tokens[i].text)
+        i = i + 3
+    }
+    let name = joinText(pieces)
+    for t in p.tree.typedefs {
+        if t.name == name { return isClassType(t.declType) && spelledClassName(nominalName(t.declType)) != nominalName(t.declType) }
+    }
+    return false
+}
+function qualifiedName(p: borrow mut Parser) -> String {
+    var name = expect(p, .Ident).text
+    while peekKind(p) == .Colon {
+        consume(p)
+        expect(p, .Colon)
+        name = expect(p, .Ident).text
+    }
+    if peekKind(p) == .Lt && classTemplateIndex(p, name) >= 0 { return name }
+    if peekKind(p) == .Lt {
+        consume(p)
+        var depth = 1
+        while depth > 0 && peekKind(p) != .End {
+            if peekKind(p) == .Lt { depth = depth + 1 }
+            else if peekKind(p) == .Gt { depth = depth - 1 }
+            else if peekKind(p) == .Shr { depth = depth - 2 }
+            consume(p)
+        }
+    }
+    return name
+}
+// The symbol after `operator`: `()`, `[]`, or the tokens up to the parameter
+// list (`==`, `+=`, `<<`, ...).
+function operatorSymbol(p: borrow mut Parser) -> String {
+    if peekKind(p) == .LParen && peek2Kind(p) == .RParen {
+        consume(p)
+        consume(p)
+        return "()"
+    }
+    if peekKind(p) == .LBracket {
+        consume(p)
+        expect(p, .RBracket)
+        return "[]"
+    }
+    var pieces: [String] = []
+    while peekKind(p) != .LParen && peekKind(p) != .End && p.error == "" {
+        pieces.append(consume(p).text)
+    }
+    return joinText(pieces)
+}
+function isOperatorAssignmentName(name: String) -> Bool {
+    if name == "operator" { return true }
+    let size = utf8Count(name)
+    if size < 10 { return false }
+    return utf8Slice(name, size - 10, size) == "::operator"
+}
+// The constants of an enum, each also under `Enum::name`; a scoped enum's
+// only under that.
+function parseLinkageSpecification(p: borrow mut Parser) {
+    consume(p)
+    let language = consume(p).text
+    let c = language == "C"
+    if c { p.cLinkageDepth = p.cLinkageDepth + 1 }
+    if peekKind(p) == .LBrace {
+        consume(p)
+        while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+            parseTopLevel(p)
+        }
+        expect(p, .RBrace)
+    } else {
+        parseTopLevel(p)
+    }
+    if c { p.cLinkageDepth = p.cLinkageDepth - 1 }
+}
+function parseTopLevelTemplate(p: borrow mut Parser) -> Bool {
+    if !(peekKind(p) == .Ident && peek(p).text == "template") { return false }
+    consume(p)
+    if peekKind(p) == .Lt && peek2Kind(p) != .Gt {
+        parseTemplateDeclaration(p, "")
+        return true
+    }
+    if peekKind(p) == .Lt {
+        consume(p)
+        consume(p)
+        parseExplicitSpecialization(p)
+        return true
+    }
+    captureDeclaration(p)
+    return true
+}
+
+function parseTopLevelNamespace(p: borrow mut Parser) -> Bool {
+    if peekKind(p) == .Ident && peek(p).text == "inline" && peek2Kind(p) == .Ident && p.tokens[p.position + 1].text == "namespace" {
+        consume(p)
+        p.inlineNamespace = true
+    }
+    if !(peekKind(p) == .Ident && peek(p).text == "namespace") { return false }
+    consume(p)
+    let inlined = p.inlineNamespace
+    p.inlineNamespace = false
+    let namespaceName = parseNamespaceName(p)
+    let anonymous = namespaceName == ""
+    if peekKind(p) == .Assign {
+        consume(p)
+        var pieces: [String] = []
+        while peekKind(p) != .Semicolon && peekKind(p) != .End && p.error == "" { pieces.append(consume(p).text) }
+        expect(p, .Semicolon)
+        p.tree.namespaceAliases.append(NamespaceAlias { name = namespaceName, target = joinText(pieces) })
+        let aliased = resolveIn(p, joinText(pieces), singleEntityKind(.Namespace))
+        if aliased != "" { declareEntityFor(p.tree, declaredName(p, namespaceName), .Using, aliased) }
+        return true
+    }
+    if peekKind(p) == .LBrace {
+        consume(p)
+        let oldNamespace = p.namespacePrefix
+        let oldScope = p.scope
+        if !anonymous {
+            p.namespacePrefix = namespaceScope(oldNamespace, namespaceName)
+            p.scope = qualify(oldScope, namespaceName)
+            declareEntity(p.tree, p.scope, .Namespace)
+            if inlined && !hasUsingTarget(p.tree, p.scope) {
+                p.tree.usingDirectives.append(UsingDirective { scope = oldScope, target = p.scope, order = 0 })
+            }
+        }
+        if anonymous { p.anonymousDepth = p.anonymousDepth + 1 }
+        while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" { parseTopLevel(p) }
+        expect(p, .RBrace)
+        if anonymous { p.anonymousDepth = p.anonymousDepth - 1 }
+        p.namespacePrefix = oldNamespace
+        p.scope = oldScope
+        if peekKind(p) == .Semicolon { consume(p) }
+    } else {
+        expect(p, .Semicolon)
+    }
+    return true
+}
+
+function parseTopLevelUsing(p: borrow mut Parser) -> Bool {
+    if !(peekKind(p) == .Ident && peek(p).text == "using") { return false }
+    if peek2Kind(p) == .Ident && p.position + 2 < p.tokens.count && p.tokens[p.position + 2].kind == .Assign {
+        consume(p)
+        let alias = consume(p).text
+        consume(p)
+        let ty = parseTypeToken(p)
+        expect(p, .Semicolon)
+        addTypedef(p.tree, declaredName(p, alias), ty)
+        return true
+    }
+    parseUsing(p, false)
+    return true
+}
+
+function parseTopLevelEnum(p: borrow mut Parser, start: Int, internal: Bool) -> Bool {
+    if peekKind(p) != .KwEnum { return false }
+    consume(p)
+    var scoped = false
+    if peekKind(p) == .Ident && (peek(p).text == "class" || peek(p).text == "struct") {
+        consume(p)
+        scoped = true
+    }
+    if peekKind(p) == .Ident {
+        let enumName = consume(p).text
+        addTypedef(p.tree, declaredName(p, enumName), "i32")
+        if peekKind(p) == .Colon {
+            consume(p)
+            parseTypeToken(p)
+        }
+        if peekKind(p) == .LBrace {
+            parseEnumDefinition(p, enumName, scoped)
+            return true
+        }
+        parseNamedTopLevel(p, "i32", start, internal)
+        return true
+    }
+    parseEnumDefinition(p, "", false)
+    return true
+}
+
+function parseTopLevelTypedef(p: borrow mut Parser) -> Bool {
+    if peekKind(p) != .KwTypedef { return false }
+    consume(p)
+    if typedefRecordAhead(p) { parseTypedefRecord(p); return true }
+    let aliased = parseTypeToken(p)
+    if peekKind(p) == .LParen {
+        let declarator = parseFnPointerDeclarator(p, aliased)
+        expect(p, .Semicolon)
+        addTypedef(p.tree, declaredName(p, declarator.name), declarator.declType)
+        return true
+    }
+    let aliasName = expect(p, .Ident).text
+    expect(p, .Semicolon)
+    addTypedef(p.tree, declaredName(p, aliasName), aliased)
+    return true
+}
+
+function parseTopLevelStruct(p: borrow mut Parser, start: Int, internal: Bool) -> Bool {
+    if peekKind(p) != .KwStruct { return false }
+    let keyword = consume(p)
+    if peekKind(p) == .LBrace {
+        let name = parseAnonymousRecord(p, keyword)
+        structDeclarators(p, name, start, internal)
+        return true
+    }
+    let snameToken = expect(p, .Ident)
+    var sname = snameToken.text
+    var snameSpan = tokenSpan(snameToken)
+    if peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+        consume(p)
+        consume(p)
+        let nestedToken = expect(p, .Ident)
+        sname = joinText([sname, "::", nestedToken.text])
+        snameSpan = Span { start = snameSpan.start, end = nestedToken.end }
+    }
+    if peekKind(p) == .LBrace || peekKind(p) == .Colon || peekKind(p) == .Semicolon {
+        sname = classDeclarationName(p, sname)
+        declareClass(p, sname)
+    } else {
+        let named = classNamed(p, sname)
+        if named != "" { sname = named }
+        else {
+            sname = declaredName(p, sname)
+            declareClass(p, sname)
+        }
+    }
+    if peekKind(p) == .LBrace {
+        parseStructDefinition(p, sname, snameSpan, start)
+        structDeclarators(p, sname, start, internal)
+        return true
+    }
+    if peekKind(p) == .Colon {
+        p.pendingBases = parseBaseList(p)
+        if peekKind(p) == .LBrace {
+            parseStructDefinition(p, sname, tokenSpan(snameToken), start)
+            structDeclarators(p, sname, start, internal)
+            return true
+        }
+    }
+    if peekKind(p) == .Semicolon {
+        consume(p)
+        return true
+    }
+    var structType = joinText(["%", sname])
+    if peekKind(p) == .Star {
+        consume(p)
+        structType = joinText(["*[0 x ", structType, "]"])
+    }
+    parseNamedTopLevel(p, structType, start, internal)
+    return true
+}
+
+function parseTopLevelClass(p: borrow mut Parser, start: Int, internal: Bool) -> Bool {
+    if !(peekKind(p) == .Ident && peek(p).text == "class") { return false }
+    consume(p)
+    let snameToken = expect(p, .Ident)
+    var sname = snameToken.text
+    if peekKind(p) == .LBrace || peekKind(p) == .Colon || peekKind(p) == .Semicolon {
+        sname = classDeclarationName(p, sname)
+        declareClass(p, sname)
+    } else {
+        let named = classNamed(p, sname)
+        if named != "" { sname = named }
+    }
+    if peekKind(p) == .LBrace {
+        parseStructDefinition(p, sname, tokenSpan(snameToken), start)
+        structDeclarators(p, sname, start, internal)
+        return true
+    }
+    if peekKind(p) == .Colon {
+        p.pendingBases = parseBaseList(p)
+        if peekKind(p) == .LBrace {
+            parseStructDefinition(p, sname, tokenSpan(snameToken), start)
+            structDeclarators(p, sname, start, internal)
+            return true
+        }
+    }
+    if peekKind(p) == .Semicolon {
+        consume(p)
+        return true
+    }
+    parseNamedTopLevel(p, joinText(["%", sname]), start, internal)
+    return true
+}
+
+function parseTopLevel(p: borrow mut Parser) {
+    if peekKind(p) == .Ident && peek(p).text == "static_assert" {
+        skipStatement(p)
+        return
+    }
+    if peekKind(p) == .KwExtern && peek2Kind(p) == .Str {
+        parseLinkageSpecification(p)
+        return
+    }
+    var internal = false
+    p.externNext = false
+    while (isQualifier(peekKind(p)) || compatibilityQualifier(peek(p))) && p.error == "" {
+        if peekKind(p) == .KwStatic || peekKind(p) == .KwInline || peek(p).text == "constexpr" { internal = true }
+        if peekKind(p) == .KwExtern { p.externNext = true }
+        consume(p)
+    }
+    if p.anonymousDepth > 0 { internal = true }
+    let start = peek(p).start
+    if parseTopLevelTemplate(p) { return }
+    if parseTopLevelNamespace(p) { return }
+    if parseTopLevelUsing(p) { return }
+    if parseTopLevelEnum(p, start, internal) { return }
+    if parseTopLevelTypedef(p) { return }
+    if parseTopLevelStruct(p, start, internal) { return }
+    if parseTopLevelClass(p, start, internal) { return }
+    if peekKind(p) == .Ident && p.position + 4 < p.tokens.count &&
+        p.tokens[p.position + 1].kind == .Colon && p.tokens[p.position + 2].kind == .Colon &&
+        ((p.tokens[p.position + 3].kind == .Ident && p.tokens[p.position + 4].kind == .LParen) ||
+            (p.tokens[p.position + 3].kind == .Tilde && p.position + 5 < p.tokens.count &&
+                p.tokens[p.position + 4].kind == .Ident && p.tokens[p.position + 5].kind == .LParen)) {
+        parseNamedTopLevel(p, "unit", start, internal)
+        return
+    }
+    let topType = parseTypeToken(p)
+    parseNamedTopLevel(p, topType, start, internal)
+}
+function parseParameter(p: borrow mut Parser) -> CppParam {
+    // `...` becomes a trailing parameter holding the address of the caller's
+    // packed variadic arguments (see `emitVariadicPack`).
+    if peekKind(p) == .Ellipsis {
+        consume(p)
+        return CppParam { name = "...", declType = "*[0 x i64]", reference = false, fallback = noExpr(), rvalue = false }
+    }
+    skipQualifiers(p)
+    p.lastReference = false
+    var baseType = parseBaseType(p)
+    skipQualifiers(p)
+    if baseType == "unit" && peekKind(p) == .Star { baseType = "i8" }
+    let signatureReference = p.lastReference
+    var parameterType = baseType
+    while peekKind(p) == .Star {
+        consume(p)
+        parameterType = joinText(["*[0 x ", parameterType, "]"])
+        skipQualifiers(p)
+    }
+    if fnPointerAhead(p) {
+        var declarator = parseFnPointerDeclarator(p, parameterType)
+        if isArrayType(declarator.declType) {
+            declarator = CppParam { name = declarator.name, declType = joinText(["*[0 x ", arrayElementType(declarator.declType), "]"]), reference = false, fallback = declarator.fallback, rvalue = false }
+        }
+        if declarator.name == "" { declarator = CppParam { name = joinText(["_arg", decimalText(p.position)]), declType = declarator.declType, reference = false, fallback = noExpr(), rvalue = false } }
+        return declarator
+    }
+    var reference = signatureReference
+    var rvalue = false
+    if peekKind(p) == .Amp || peekKind(p) == .AndAnd {
+        rvalue = peekKind(p) == .AndAnd
+        consume(p)
+        reference = true
+        if parameterType == baseType {
+            parameterType = joinText(["*[0 x ", baseType, "]"])
+        }
+    }
+    var name: String = joinText(["_arg", decimalText(p.position)])
+    if peekKind(p) == .Ident { name = consume(p).text }
+    if peekKind(p) == .LBracket {
+        consume(p)
+        expect(p, .RBracket)
+        parameterType = joinText(["*[0 x ", parameterType, "]"])
+    }
+    var fallback = noExpr()
+    if peekKind(p) == .Assign {
+        consume(p)
+        fallback = expression(p, 0)
+    }
+    return CppParam { name = name, declType = parameterType, reference = reference, fallback = fallback, rvalue = rvalue }
+}
+// A declarator at namespace scope. One qualified by a class or namespace,
+// `X::f` or `a::b::g`, is that scope's member, its parameters and body
+// looked up from there.
+function parseNamedTopLevel(p: borrow mut Parser, declaredType: String, start: Int, internal: Bool) {
+    let outerScope = p.scope
+    parseNamedDeclaration(p, declaredType, start, internal)
+    p.scope = outerScope
+}
+struct NamedDeclarator {
+    let name: String
+    let span: Span
+}
+function parseDeclaratorName(p: borrow mut Parser, nameToken: Token) -> NamedDeclarator {
+    var name = declarationName(p, nameToken.text)
+    var nameSpan = tokenSpan(nameToken)
+    if peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+        var owner = nameToken.text
+        var member = ""
+        while peekKind(p) == .Colon && peek2Kind(p) == .Colon && p.error == "" {
+            consume(p)
+            consume(p)
+            if member != "" { owner = joinText([owner, "::", member]) }
+            var prefix = ""
+            if peekKind(p) == .Tilde {
+                consume(p)
+                prefix = "~"
+            }
+            let qualifiedToken = expect(p, .Ident)
+            member = joinText([prefix, qualifiedToken.text])
+            nameSpan = Span { start = nameSpan.start, end = qualifiedToken.end }
+        }
+        var ownerScope = scopeNamed(p.tree, resolveIn(p, owner, entityTypeKinds()))
+        if ownerScope == "" { ownerScope = declarationName(p, owner) }
+        name = qualify(ownerScope, member)
+        if member == "operator" { name = joinText([name, operatorSymbol(p)]) }
+        p.scope = ownerScope
+    } else if nameToken.text == "operator" && peekKind(p) != .Assign {
+        name = joinText([name, operatorSymbol(p)])
+    }
+    return NamedDeclarator { name = name, span = nameSpan }
+}
+
+function parseFunctionDeclaration(p: borrow mut Parser, name: String, nameSpan: Span, returnType: String, refReturn: Bool, internal: Bool, start: Int) {
+    let parameters = declarationParameters(p)
+    finishFunctionDeclaration(p, name, nameSpan, returnType, refReturn, internal, start, parameters)
+}
+function finishFunctionDeclaration(p: borrow mut Parser, name: String, nameSpan: Span, returnType: String, refReturn: Bool, internal: Bool, start: Int, parameters: [CppParam]) {
+    let constMember = constQualified(p)
+    skipQualifiers(p)
+    if peekKind(p) == .Assign {
+        consume(p)
+        if peekKind(p) == .Ident || peekKind(p) == .KwDefault { consume(p) }
+        else { expression(p, 0) }
+        expect(p, .Semicolon)
+        declareEntity(p.tree, name, .Function)
+        p.tree.functions.append(CppFunction { name = name, nameSpan = nameSpan, parameters = parameters, returnType = returnType, body = [], isProto = true, internal = internal, cLinkage = p.cLinkageDepth > 0, refReturn = refReturn, isConst = constMember, span = spanFrom(p, start) })
+        return
+    }
+    if peekKind(p) == .Colon {
+        while peekKind(p) != .LBrace && peekKind(p) != .Semicolon && peekKind(p) != .End { consume(p) }
+    }
+    if peekKind(p) == .Semicolon {
+        consume(p)
+        declareEntity(p.tree, name, .Function)
+        p.tree.functions.append(CppFunction { name = name, nameSpan = nameSpan, parameters = parameters, returnType = returnType, body = [], isProto = true, internal = internal, cLinkage = p.cLinkageDepth > 0, refReturn = refReturn, isConst = constMember, span = spanFrom(p, start) })
+        return
+    }
+    let enclosing = p.bodyStart
+    p.bodyStart = p.tree.statements.count
+    let marks = p.coroutineMarks
+    let outerParameters = p.bodyParameters
+    let outerParametersStart = p.bodyParametersStart
+    p.bodyParameters = parameters
+    p.bodyParametersStart = p.tree.statements.count
+    let body = block(p)
+    p.bodyParameters = outerParameters
+    p.bodyParametersStart = outerParametersStart
+    markCoroutine(p, marks, body)
+    p.bodyStart = enclosing
+    declareEntity(p.tree, name, .Function)
+    p.tree.functions.append(CppFunction { name = name, nameSpan = nameSpan, parameters = parameters, returnType = returnType, body = body, isProto = false, internal = internal, cLinkage = p.cLinkageDepth > 0, refReturn = refReturn, isConst = constMember, span = spanFrom(p, start) })
+}
+
+function parseNamedDeclaration(p: borrow mut Parser, declaredType: String, start: Int, internal: Bool) {
+    let refReturn = p.lastReference
+    p.lastReference = false
+    var effectiveType = declaredType
+    while peekKind(p) == .Star {
+        consume(p)
+        effectiveType = joinText(["*[0 x ", effectiveType, "]"])
+    }
+    if functionReturningPointerAhead(p) {
+        parseReturningPointerFunction(p, effectiveType, start, internal)
+        return
+    }
+    if fnPointerAhead(p) {
+        // `R (*name)(P...) = f;` at file scope.
+        let pointerName = fnPointerName(p)
+        let declarator = parseFnPointerDeclarator(p, effectiveType)
+        parseGlobalVariable(p, declarationName(p, declarator.name), tokenSpan(pointerName), declarator.declType, internal, start)
+        return
+    }
+    let nameToken = expect(p, .Ident)
+    var base = effectiveType
+    var back = p.position - 2
+    while back >= 0 && p.tokens[back].kind == .Star && isPointerType(base) {
+        base = elementOfPointer(base)
+        back -= 1
+    }
+    p.declaratorBase = base
+    let declarator = parseDeclaratorName(p, nameToken)
+    let name = declarator.name
+    let nameSpan = declarator.span
+    if peekKind(p) == .Assign && isOperatorAssignmentName(name) {
+        consume(p)
+        if peekKind(p) == .LParen { skipParenInitializer(p) }
+        skipQualifiers(p)
+        if peekKind(p) == .LBrace { skipAggregate(p) }
+        return
+    }
+    if peekKind(p) != .LParen || (isClassType(effectiveType) && !parameterListAhead(p)) {
+        parseGlobalVariable(p, name, nameSpan, effectiveType, internal, start)
+        return
+    }
+    parseFunctionDeclaration(p, name, nameSpan, effectiveType, refReturn, internal, start)
+}
+// `using namespace T;`, `using a::name;` or, in a block, either: what they
+// make visible. A block's directives stay in effect to the end of the block.
+function parseUsing(p: borrow mut Parser, block: Bool) -> String {
+    consume(p)
+    var directive = false
+    if peekKind(p) == .Ident && peek(p).text == "namespace" {
+        consume(p)
+        directive = true
+    }
+    var pieces: [String] = []
+    while peekKind(p) != .Semicolon && peekKind(p) != .End && p.error == "" {
+        let t = consume(p)
+        if t.kind == .Colon { pieces.append(":") } else if t.text != "typename" { pieces.append(t.text) }
+    }
+    if peekKind(p) == .Semicolon { consume(p) }
+    let written = joinText(pieces)
+    if directive {
+        if block {
+            let target = resolveIn(p, written, singleEntityKind(.Namespace))
+            if target != "" { p.blockUsings.append(target) }
+            return target
+        }
+        addUsingDirective(p, written)
+        return ""
+    }
+    addUsingDeclaration(p, written)
+    return ""
+}

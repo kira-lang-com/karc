@@ -1,0 +1,24 @@
+// <print>: std::print and std::println, std::format written to stdout.
+#ifndef KARC_STD_PRINT
+#define KARC_STD_PRINT
+
+#include <cstdio>
+#include <format>
+
+namespace std {
+
+template <typename... Args>
+void print(const char* f, const Args&... args) {
+    string text = format(f, args...);
+    fwrite(text.c_str(), 1, text.size(), stdout);
+}
+template <typename... Args>
+void println(const char* f, const Args&... args) {
+    string text = format(f, args...);
+    text += '\n';
+    fwrite(text.c_str(), 1, text.size(), stdout);
+}
+
+}
+
+#endif

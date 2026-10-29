@@ -1,0 +1,307 @@
+// Type parsing: the base types and the pointer and reference declarators
+// around them.
+
+// The base (element) type of a declaration, without any per-declarator `*`. The
+// declarator applies pointer and array modifiers around it.
+function parseNamedBaseType(p: borrow mut Parser, token: Token) -> String {
+    if token.text == "decltype" && peek2Kind(p) == .LParen { return parseDecltype(p) }
+    if token.text == "STACK_OF" {
+        consume(p)
+        skipParenInitializer(p)
+        return "i8"
+    }
+    let alias = typedefAlias(p, token.text)
+    let qualifiedAhead = peek2Kind(p) == .Colon && p.position + 2 < p.tokens.count && p.tokens[p.position + 2].kind == .Colon
+    if alias != "" && !qualifiedAhead && !(peek2Kind(p) == .Lt && classTemplateIndex(p, token.text) >= 0) {
+        consume(p)
+        return alias
+    }
+    if token.text == "short" {
+        consume(p)
+        if peekKind(p) == .KwInt { consume(p) }
+        return "i16"
+    }
+    let spelled = spelledQualifiedName(p)
+    let qualified = qualifiedName(p)
+    if qualified == "" { return missingType() }
+    if (qualified == "__karc_fn_result" || qualified == "__karc_fn_param") && peekKind(p) == .LParen {
+        return parseSignatureType(p, qualified)
+    }
+    if qualified == "__karc_element" && peekKind(p) == .LParen { return parseElementType(p) }
+    if peekKind(p) == .Lt {
+        let template = spelledTemplateIndex(p, spelled, qualified)
+        if template >= 0 {
+            let arguments = parseTemplateArguments(p, template)
+            if p.tree.templates[template].tokens[0].text == "using" { return aliasTemplateType(p, template, arguments) }
+            let instance = instantiateClass(p, template, arguments)
+            if !p.pendingGt && peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+                consume(p)
+                consume(p)
+                let member = expect(p, .Ident).text
+                let memberAlias = typedefAlias(p, joinText([instance, "::", member]))
+                if memberAlias != "" { return memberAlias }
+                if !isClassName(p, member) { return missingType() }
+            }
+            return joinText(["%", instance])
+        }
+    }
+    match qualified {
+        "int8_t" -> return "i8"
+        "int16_t" -> return "i16"
+        "uint16_t" -> return "u16"
+        "int32_t" -> return "i32"
+        "int64_t" -> return "i64"
+        "uint8_t" -> return "u8"
+        "uint32_t" -> return "u32"
+        "uint64_t" -> return "u64"
+        "double", "float" -> return "f64"
+        "wchar_t", "char32_t" -> return "i32"
+        "char16_t" -> return "u16"
+        "char8_t" -> return "u8"
+        "auto" -> return "auto"
+        else -> {}
+    }
+    let spelledAlias = typedefAlias(p, spelled)
+    if spelledAlias != "" { return spelledAlias }
+    let named = classNamed(p, spelled)
+    if named != "" { return joinText(["%", named]) }
+    if hasScope(spelled) {
+        let owner = resolveIn(p, scopeOf(spelled), entityTypeKinds())
+        if owner != "" && hasKind(entityKinds(p.tree, scopeNamed(p.tree, owner)), .Class) { return missingType() }
+    }
+    let first = utf8Byte(qualified, 0)
+    if first >= 65 && first <= 90 { return joinText(["%", qualified]) }
+    return qualified
+}
+
+function parseSignedBaseType(p: borrow mut Parser, token: Token) -> String {
+    let unsigned = token.kind == .KwUnsigned
+    consume(p)
+    var element = "i32"
+    if unsigned { element = "u32" }
+    if peekKind(p) == .KwChar {
+        consume(p)
+        if unsigned { return "u8" }
+        return "i8"
+    }
+    if peekKind(p) == .Ident && peek(p).text == "short" {
+        consume(p)
+        if peekKind(p) == .KwInt { consume(p) }
+        if unsigned { return "u16" }
+        return "i16"
+    }
+    if peekKind(p) == .KwLong {
+        consume(p)
+        if peekKind(p) == .KwLong { consume(p) }
+        if peekKind(p) == .KwInt { consume(p) }
+        if unsigned { element = "u64" } else { element = "i64" }
+    } else if peekKind(p) == .KwInt {
+        consume(p)
+    }
+    return element
+}
+
+function parseBaseType(p: borrow mut Parser) -> String {
+    skipQualifiers(p)
+    let token = peek(p)
+    if token.kind == .Ident { return parseNamedBaseType(p, token) }
+    if token.kind == .KwStruct {
+        consume(p)
+        if peekKind(p) == .LBrace {
+            return joinText(["%", parseAnonymousRecord(p, token)])
+        }
+        let written = spelledQualifiedName(p)
+        qualifiedName(p)
+        var named = classNamed(p, written)
+        if named == "" {
+            named = declaredName(p, written)
+            declareClass(p, named)
+        }
+        return joinText(["%", named])
+    }
+    if token.kind == .KwEnum {
+        consume(p)
+        if peekKind(p) == .Ident { consume(p) }
+        return "i32"
+    }
+    if token.kind == .KwUnsigned || token.kind == .KwSigned { return parseSignedBaseType(p, token) }
+    if token.kind == .KwLong {
+        consume(p)
+        if peekKind(p) == .Ident && peek(p).text == "double" {
+            consume(p)
+            return "f64"
+        }
+        if peekKind(p) == .KwLong { consume(p) }
+        if peekKind(p) == .KwInt { consume(p) }
+        return "i64"
+    }
+    if token.kind == .KwInt || token.kind == .KwChar || token.kind == .KwBool || token.kind == .KwVoid {
+        consume(p)
+        return keywordType(token.kind)
+    }
+    parseError(p, "Expected a type", token.start)
+    return "i32"
+}
+// A full type including a trailing pointer `*`, for parameters, casts, fields
+// and top-level declarations. `void*` is a byte pointer.
+function parseTypeToken(p: borrow mut Parser) -> String {
+    var element = parseBaseType(p)
+    skipQualifiers(p)
+    var pointerCount = 0
+    if element == "unit" && peekKind(p) == .Star {
+        element = "i8"
+    }
+    while peekKind(p) == .Star {
+        consume(p)
+        pointerCount = pointerCount + 1
+        skipQualifiers(p)
+    }
+    var reference = false
+    if peekKind(p) == .Amp || peekKind(p) == .AndAnd {
+        consume(p)
+        reference = true
+    }
+    p.lastReference = reference
+    var result = element
+    for _ in 0..pointerCount {
+        result = joinText(["*[0 x ", result, "]"])
+    }
+    if reference { return joinText(["*[0 x ", result, "]"]) }
+    return result
+}
+function isClassName(p: borrow Parser, name: String) -> Bool {
+    return classNamed(p, name) != ""
+}
+function parseAbstractType(p: borrow mut Parser) -> String {
+    let base = parseTypeToken(p)
+    if fnPointerAhead(p) { return parseFnPointerDeclarator(p, base).declType }
+    return base
+}
+function isTypeBuiltin(name: String) -> Bool {
+    match name {
+        "__karc_fn_result", "__karc_fn_param", "__karc_element" -> return true
+        else -> return false
+    }
+}
+// `__karc_element(I)`: what the iterator type I refers to, the element of a
+// pointer or the result of a class's operator*.
+function parseElementType(p: borrow mut Parser) -> String {
+    expect(p, .LParen)
+    let iterator = parseTypeToken(p)
+    expect(p, .RParen)
+    if isPointerType(iterator) { return elementOfPointer(iterator) }
+    if isArrayType(iterator) { return arrayElementType(iterator) }
+    if isClassType(iterator) {
+        let wanted = joinText([nominalName(iterator), "::operator*"])
+        for fn in p.tree.functions {
+            if fn.name == wanted && fn.parameters.count == 0 { return referentOf(fn) }
+        }
+        for fn in p.deferredFunctions {
+            if fn.name == wanted && fn.parameters.count == 0 { return referentOf(fn) }
+        }
+    }
+    return "i32"
+}
+// What a function returns, seen through a reference result.
+function referentOf(fn: CppFunction) -> String {
+    if fn.refReturn { return elementOfPointer(fn.returnType) }
+    return fn.returnType
+}
+// `__karc_fn_result(F)` and `__karc_fn_param(F, N)`: the result and N-th
+// parameter type of the function-pointer type F, `int` past its last one.
+function parseSignatureType(p: borrow mut Parser, builtin: String) -> String {
+    expect(p, .LParen)
+    let signature = parseTypeToken(p)
+    var index = 0
+    if peekKind(p) == .Comma {
+        consume(p)
+        index = expect(p, .Number).number
+    }
+    expect(p, .RParen)
+    if !isFnPtrType(signature) { return "i32" }
+    if builtin == "__karc_fn_result" { return fnPtrReturn(signature) }
+    let parameters = splitCommas(fnPtrParams(signature))
+    if index < parameters.count {
+        let parameter = parameters[index]
+        if utf8Byte(parameter, 0) == 38 {
+            p.lastReference = true
+            return withoutReferenceMark(parameter)
+        }
+        return parameter
+    }
+    return "i32"
+}
+// A member type a class does not have: substituting template arguments
+// that name it fails, and the candidate is set aside (SFINAE).
+function missingType() -> String {
+    return "@missing"
+}
+function mentionsMissing(ty: String) -> Bool {
+    let count = utf8Count(ty)
+    for i in 0..count {
+        if i + 8 <= count && utf8Slice(ty, i, i + 8) == "@missing" { return true }
+    }
+    return false
+}
+// The `a::b::c` ahead, whole (qualifiedName keeps only its last name).
+function spelledQualifiedName(p: borrow Parser) -> String {
+    var pieces: [String] = [peek(p).text]
+    var i = p.position + 1
+    while i + 2 < p.tokens.count && p.tokens[i].kind == .Colon && p.tokens[i + 1].kind == .Colon && p.tokens[i + 2].kind == .Ident {
+        pieces.append("::")
+        pieces.append(p.tokens[i + 2].text)
+        i = i + 3
+    }
+    return joinText(pieces)
+}
+// `(*name)(params)` after a result type: a function-pointer declarator.
+function fnPointerAhead(p: borrow Parser) -> Bool {
+    return peekKind(p) == .LParen && peek2Kind(p) == .Star
+}
+function fnPointerName(p: borrow Parser) -> Token {
+    var i = p.position + 2
+    while i < p.tokens.count {
+        let t = p.tokens[i]
+        if t.kind != .LParen && t.kind != .Star && !isQualifier(t.kind) && !compatibilityQualifier(t) { return t }
+        i = i + 1
+    }
+    return peek(p)
+}
+// The declarator's name ("" when abstract) and its `fn<R|P...>` type.
+function parseFnPointerDeclarator(p: borrow mut Parser, result: String) -> CppParam {
+    expect(p, .LParen)
+    expect(p, .Star)
+    skipQualifiers(p)
+    var extraPointers = 0
+    while peekKind(p) == .Star {
+        consume(p)
+        skipQualifiers(p)
+        extraPointers = extraPointers + 1
+    }
+    if fnPointerAhead(p) {
+        let inner = parseFnPointerDeclarator(p, result)
+        expect(p, .RParen)
+        var returned = parseFunctionTypeArgument(p, result)
+        for _ in 0..extraPointers { returned = joinText(["*[0 x ", returned, "]"]) }
+        let signature = joinText(["fn<", returned, "|", fnPtrParams(inner.declType), ">"])
+        return CppParam { name = inner.name, declType = signature, reference = false, fallback = noExpr(), rvalue = false }
+    }
+    var name = ""
+    if peekKind(p) == .Ident { name = consume(p).text }
+    var bounds: [Int] = []
+    while peekKind(p) == .LBracket && p.error == "" {
+        consume(p)
+        var size = 0
+        if peekKind(p) != .RBracket { size = constantExpression(p, expression(p, 0)) }
+        expect(p, .RBracket)
+        bounds.append(size)
+    }
+    expect(p, .RParen)
+    var signature = parseFunctionTypeArgument(p, result)
+    for _ in 0..extraPointers { signature = joinText(["*[0 x ", signature, "]"]) }
+    for offset in 0..bounds.count {
+        let index = bounds.count - offset - 1
+        signature = joinText(["[", decimalText(bounds[index]), " x ", signature, "]"])
+    }
+    return CppParam { name = name, declType = signature, reference = false, fallback = noExpr(), rvalue = false }
+}

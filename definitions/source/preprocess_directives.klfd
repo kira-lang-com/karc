@@ -1,0 +1,318 @@
+// Directive execution and constant expressions used by KArc's preprocessor.
+
+struct ConstParser {
+    let tokens: [Token]
+    var position: Int
+    var bad: Bool
+}
+function constKind(c: ConstParser) -> TokenKind {
+    if c.position < c.tokens.count { return c.tokens[c.position].kind }
+    return .End
+}
+function constTake(c: borrow mut ConstParser) -> Token {
+    let t = c.tokens[c.position]
+    c.position = c.position + 1
+    return t
+}
+function constPrecedence(kind: TokenKind) -> Int {
+    if kind == .OrOr { return 1 }
+    if kind == .AndAnd { return 2 }
+    if kind == .Pipe { return 3 }
+    if kind == .Caret { return 4 }
+    if kind == .Amp { return 5 }
+    if kind == .EqEq || kind == .NotEq { return 6 }
+    if kind == .Lt || kind == .Gt || kind == .Le || kind == .Ge { return 7 }
+    if kind == .Shl || kind == .Shr { return 8 }
+    if kind == .Plus || kind == .Minus { return 9 }
+    if kind == .Star || kind == .Slash || kind == .Percent { return 10 }
+    return -1
+}
+function boolInt(value: Bool) -> Int {
+    if value { return 1 }
+    return 0
+}
+function constBits(op: TokenKind, left: Int, right: Int) -> Int {
+    if op == .Amp { return left & right }
+    if op == .Pipe { return left | right }
+    if op == .Caret { return left ^ right }
+    if op == .Shl {
+        if right < 0 || right > 62 { return 0 }
+        var value = left
+        for _ in 0..right { value = value * 2 }
+        return value
+    }
+    if right < 0 || right > 62 { return 0 }
+    var value = left
+    for _ in 0..right { value = value / 2 }
+    return value
+}
+function constApply(op: TokenKind, left: Int, right: Int) -> Int {
+    if op == .Plus { return left + right }
+    if op == .Minus { return left - right }
+    if op == .Star { return left * right }
+    if op == .Slash {
+        if right == 0 { return 0 }
+        return left / right
+    }
+    if op == .Percent {
+        if right == 0 { return 0 }
+        return left % right
+    }
+    if op == .Amp || op == .Pipe || op == .Caret || op == .Shl || op == .Shr { return constBits(op, left, right) }
+    if op == .EqEq { return boolInt(left == right) }
+    if op == .NotEq { return boolInt(left != right) }
+    if op == .Lt { return boolInt(left < right) }
+    if op == .Gt { return boolInt(left > right) }
+    if op == .Le { return boolInt(left <= right) }
+    if op == .Ge { return boolInt(left >= right) }
+    if op == .AndAnd { return boolInt(left != 0 && right != 0) }
+    return boolInt(left != 0 || right != 0)
+}
+function constUnary(c: borrow mut ConstParser) -> Int {
+    let kind = constKind(c)
+    if kind == .Minus { constTake(c); return 0 - constUnary(c) }
+    if kind == .Plus { constTake(c); return constUnary(c) }
+    if kind == .Bang { constTake(c); return boolInt(constUnary(c) == 0) }
+    if kind == .Tilde { constTake(c); return (0 - constUnary(c)) - 1 }
+    if kind == .LParen {
+        constTake(c)
+        let value = constExpression(c, 0)
+        if constKind(c) != .RParen { c.bad = true; return 0 }
+        constTake(c)
+        return value
+    }
+    if kind == .Number { return constTake(c).number }
+    if kind == .Ident { constTake(c); return 0 }
+    c.bad = true
+    return 0
+}
+function constExpression(c: borrow mut ConstParser, minimum: Int) -> Int {
+    var left = constUnary(c)
+    while !c.bad {
+        let op = constKind(c)
+        let precedence = constPrecedence(op)
+        if precedence < minimum { break }
+        constTake(c)
+        let right = constExpression(c, precedence + 1)
+        left = constApply(op, left, right)
+    }
+    if minimum <= 0 && constKind(c) == .Question && !c.bad {
+        constTake(c)
+        let whenTrue = constExpression(c, 0)
+        if constKind(c) != .Colon { c.bad = true; return left }
+        constTake(c)
+        let whenFalse = constExpression(c, 0)
+        if left != 0 { return whenTrue }
+        return whenFalse
+    }
+    return left
+}
+function lineTokens(state: Preprocessor, from: Int, stop: Int) -> [Token] {
+    var out: [Token] = []
+    for i in from..stop { out.append(state.input[i]) }
+    return out
+}
+function evaluateCondition(state: borrow mut Preprocessor, line: [Token], at: Token) -> Bool {
+    let resolved = resolveDefined(state, line)
+    let expanded = expandList(state, resolved, [])
+    if expanded.count == 0 {
+        ppError(state, diagDirectiveSyntax(), at)
+        return false
+    }
+    var parser = ConstParser { tokens = expanded, position = 0, bad = false }
+    let value = constExpression(parser, 0)
+    if parser.bad || parser.position != expanded.count {
+        ppError(state, diagDirectiveSyntax(), at)
+        return false
+    }
+    return value != 0
+}
+function directiveDefine(state: borrow mut Preprocessor, from: Int, stop: Int, at: Token) {
+    if from >= stop || state.input[from].kind != .Ident {
+        ppError(state, diagDirectiveSyntax(), at)
+        return
+    }
+    let nameToken = state.input[from]
+    var i = from + 1
+    var parameters: [String] = []
+    var isFunction = false
+    if i < stop && state.input[i].kind == .LParen && byteStart(state.input[i]) == byteEnd(nameToken) {
+        isFunction = true
+        i = i + 1
+        if i < stop && state.input[i].kind == .RParen {
+            i = i + 1
+        } else {
+            var more = true
+            while more && i < stop {
+                if state.input[i].kind != .Ident {
+                    ppError(state, diagDirectiveSyntax(), at)
+                    return
+                }
+                parameters.append(state.input[i].text)
+                i = i + 1
+                if i < stop && state.input[i].kind == .Comma { i = i + 1 }
+                else { more = false }
+            }
+            if i >= stop || state.input[i].kind != .RParen {
+                ppError(state, diagDirectiveSyntax(), at)
+                return
+            }
+            i = i + 1
+        }
+    }
+    var body: [Token] = []
+    for bodyIndex in i..stop {
+        let bodyToken = state.input[bodyIndex]
+        if bodyToken.kind == .HashHash {
+            if bodyIndex == i || bodyIndex + 1 == stop || state.input[bodyIndex - 1].kind == .HashHash || state.input[bodyIndex + 1].kind == .HashHash {
+                ppError(state, diagDirectiveSyntax(), bodyToken)
+                return
+            }
+        }
+        if bodyToken.kind == .Hash && isFunction {
+            if bodyIndex + 1 >= stop || nameIndexIn(parameters, state.input[bodyIndex + 1].text) < 0 {
+                ppError(state, diagDirectiveSyntax(), bodyToken)
+                return
+            }
+        }
+        body.append(state.input[bodyIndex])
+    }
+    defineMacro(state, Macro { name = nameToken.text, isFunction = isFunction, parameters = parameters, body = body, live = true })
+}
+function directiveInclude(state: borrow mut Preprocessor, hash: Int, stop: Int, at: Token) -> Int {
+    let requested = includePath(state, hash + 2, stop)
+    if requested == "" {
+        ppError(state, diagDirectiveSyntax(), at)
+        return stop
+    }
+    let system = isSystemInclude(requested)
+    let path = resolveInclude(state, requested, state.bases[hash])
+    if !includeExists(path) {
+        if system { return stop }
+        ppError(state, diagIncludeUnsupported(), at)
+        return stop
+    }
+    if guardedAway(state, path) { return stop }
+    let source = includeText(path)
+    let lexed = lex(source)
+    if lexed.error != "" {
+        ppError(state, diagLexError(), at)
+        return stop
+    }
+    let guard = includeGuard(lexed.tokens)
+    if guard != "" {
+        state.guardPaths.append(path)
+        state.guardMacros.append(guard)
+    }
+    return pushInclude(state, stop, lexed.tokens, path, sourceHash(source))
+}
+function directive(state: borrow mut Preprocessor, hash: Int) -> Int {
+    let stop = lineEnd(state, hash)
+    let at = state.input[hash]
+    if hash + 1 >= stop { return stop }
+    let nameToken = state.input[hash + 1]
+    let name = nameToken.text
+    let live = emitting(state)
+    match name {
+        "endif" -> closeConditional(state, at)
+        "else" -> elseConditional(state, at)
+        "elif" -> elifConditional(state, hash, stop, at)
+        "if", "ifdef", "ifndef" -> openConditional(state, name, hash, stop, at, live)
+        else -> {
+            if live { return emittingDirective(state, nameToken, hash, stop, at) }
+        }
+    }
+    return stop
+}
+// `#endif`.
+function closeConditional(state: borrow mut Preprocessor, at: Token) {
+    if state.condLive.count == 0 { ppError(state, diagUnbalancedConditional(), at); return }
+    state.condLive = popBools(state.condLive)
+    state.condTaken = popBools(state.condTaken)
+    state.condElse = popBools(state.condElse)
+}
+// `#else`.
+function elseConditional(state: borrow mut Preprocessor, at: Token) {
+    let depth = state.condLive.count
+    if depth == 0 || state.condElse[depth - 1] { ppError(state, diagUnbalancedConditional(), at); return }
+    state.condElse[depth - 1] = true
+    state.condLive[depth - 1] = !state.condTaken[depth - 1]
+    if state.condLive[depth - 1] { state.condTaken[depth - 1] = true }
+}
+// `#elif`.
+function elifConditional(state: borrow mut Preprocessor, hash: Int, stop: Int, at: Token) {
+    let depth = state.condLive.count
+    if depth == 0 || state.condElse[depth - 1] { ppError(state, diagUnbalancedConditional(), at); return }
+    if state.condTaken[depth - 1] { state.condLive[depth - 1] = false; return }
+    var outerLive = true
+    for i in 0..(depth - 1) { if !state.condLive[i] { outerLive = false } }
+    var taken = false
+    if outerLive { taken = evaluateCondition(state, lineTokens(state, hash + 2, stop), at) }
+    state.condLive[depth - 1] = taken
+    if taken { state.condTaken[depth - 1] = true }
+}
+// `#if`, `#ifdef` and `#ifndef`.
+function openConditional(state: borrow mut Preprocessor, name: String, hash: Int, stop: Int, at: Token, live: Bool) {
+    var taken = false
+    if live {
+        if name == "if" {
+            taken = evaluateCondition(state, lineTokens(state, hash + 2, stop), at)
+        } else {
+            if hash + 2 >= stop || state.input[hash + 2].kind != .Ident { ppError(state, diagDirectiveSyntax(), at); return }
+            taken = macroDefined(state, state.input[hash + 2].text)
+            if name == "ifndef" { taken = !taken }
+        }
+    }
+    state.condLive.append(taken)
+    state.condTaken.append(taken)
+    state.condElse.append(false)
+}
+// A directive outside the conditionals, in a live region.
+function emittingDirective(state: borrow mut Preprocessor, nameToken: Token, hash: Int, stop: Int, at: Token) -> Int {
+    match nameToken.text {
+        "define" -> directiveDefine(state, hash + 2, stop, at)
+        "undef" -> {
+            if hash + 2 >= stop || state.input[hash + 2].kind != .Ident { ppError(state, diagDirectiveSyntax(), at); return stop }
+            undefineMacro(state, state.input[hash + 2].text)
+        }
+        "include" -> return directiveInclude(state, hash, stop, at)
+        "error" -> ppError(state, diagUserError(), at)
+        "pragma", "line" -> {}
+        else -> ppError(state, diagUnknownDirective(), nameToken)
+    }
+    return stop
+}
+function preprocess(tokens: [Token], base: String) -> Preprocessed {
+    return preprocessForTarget(tokens, base, "")
+}
+function preprocessForTarget(tokens: [Token], base: String, target: String) -> Preprocessed {
+    var bases: [String] = []
+    for _ in tokens { bases.append(base) }
+    var state = Preprocessor { input = tokens, bases = bases, frames = [], guardPaths = [], guardMacros = [], out = [], macros = [], condLive = [], condTaken = [], condElse = [], code = 0, errorOffset = 0, errorEnd = 0 }
+    defineTargetMacros(state, target)
+    var i = 0
+    while state.code == 0 {
+        if i >= state.input.count {
+            if state.frames.count == 0 { break }
+            i = popInclude(state)
+            continue
+        }
+        let t = state.input[i]
+        if t.kind == .End { break }
+        if t.kind == .Hash && t.line {
+            i = directive(state, i)
+            continue
+        }
+        if !emitting(state) { i = i + 1; continue }
+        let step = expandAt(state, state.input, i, [])
+        for produced in step.tokens {
+            if produced.kind == .Other { ppError(state, diagLexError(), produced); break }
+            state.out.append(produced)
+        }
+        i = step.next
+    }
+    let last = tokens[tokens.count - 1]
+    if state.code == 0 && state.condLive.count != 0 { ppError(state, diagUnbalancedConditional(), last) }
+    state.out.append(Token { space = false, spelling = "", kind = .End, text = "", number = 0, start = last.start, end = last.end, line = true })
+    return Preprocessed { tokens = state.out, code = state.code, errorOffset = state.errorOffset, errorEnd = state.errorEnd }
+}

@@ -1,0 +1,11 @@
+// <clocale>: setlocale. KArc's std always behaves as the "C" locale.
+#ifndef KARC_STD_CLOCALE
+#define KARC_STD_CLOCALE
+
+#define LC_ALL 6
+#define LC_CTYPE 0
+#define LC_NUMERIC 1
+
+inline char* setlocale(int category, const char* locale) { return (char*)"C"; }
+
+#endif

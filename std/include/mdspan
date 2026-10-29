@@ -1,0 +1,85 @@
+// <mdspan>: std::mdspan, a multidimensional row-major view of up to three
+// dimensions over a pointer. std::extents gives the sizes in the type
+// (dynamic_extent for one given at construction), std::dextents gives
+// them all at construction. m[i, j] and m(i, j) both index.
+#ifndef KARC_STD_MDSPAN
+#define KARC_STD_MDSPAN
+
+#include <cstddef>
+#include <span>
+
+namespace std {
+
+template <typename I, size_t A = 0, size_t B = 0, size_t C = 0>
+struct extents {
+    typedef I index_type;
+    extents() {
+        sizes_[0] = (I)A;
+        sizes_[1] = (I)B;
+        sizes_[2] = (I)C;
+    }
+    static size_t rank() { return (A != 0 ? 1 : 0) + (B != 0 ? 1 : 0) + (C != 0 ? 1 : 0); }
+    I extent(size_t r) const { return sizes_[r]; }
+    I sizes_[3];
+};
+
+template <typename I, size_t R>
+struct karc_dextents {
+    typedef I index_type;
+    karc_dextents() {
+        sizes_[0] = 0;
+        sizes_[1] = 0;
+        sizes_[2] = 0;
+    }
+    static size_t rank() { return R; }
+    I extent(size_t r) const { return sizes_[r]; }
+    I sizes_[3];
+};
+template <typename I, size_t R>
+using dextents = karc_dextents<I, R>;
+
+template <typename T, typename E>
+class mdspan {
+public:
+    typedef T element_type;
+    mdspan() : data_(0) {}
+    explicit mdspan(T* data) : data_(data) {}
+    mdspan(T* data, size_t a) : data_(data) { given(a, 0, 0, 1); }
+    mdspan(T* data, size_t a, size_t b) : data_(data) { given(a, b, 0, 2); }
+    mdspan(T* data, size_t a, size_t b, size_t c) : data_(data) { given(a, b, c, 3); }
+    T& operator[](size_t i) const { return data_[i]; }
+    T& operator[](size_t i, size_t j) const { return data_[i * extents_.sizes_[1] + j]; }
+    T& operator[](size_t i, size_t j, size_t k) const { return data_[(i * extents_.sizes_[1] + j) * extents_.sizes_[2] + k]; }
+    T& operator()(size_t i) const { return data_[i]; }
+    T& operator()(size_t i, size_t j) const { return data_[i * extents_.sizes_[1] + j]; }
+    T& operator()(size_t i, size_t j, size_t k) const { return data_[(i * extents_.sizes_[1] + j) * extents_.sizes_[2] + k]; }
+    size_t rank() const { return extents_.rank(); }
+    size_t extent(size_t r) const { return (size_t)extents_.sizes_[r]; }
+    size_t size() const {
+        size_t total = 1;
+        for (size_t r = 0; r < extents_.rank(); r++) { total *= (size_t)extents_.sizes_[r]; }
+        return total;
+    }
+    bool empty() const { return size() == 0; }
+    T* data_handle() const { return data_; }
+    const E& extents() const { return extents_; }
+
+private:
+    // Sizes given at construction fill the dynamic ones in order.
+    void given(size_t a, size_t b, size_t c, int count) {
+        size_t values[3] = {a, b, c};
+        int next = 0;
+        for (int r = 0; r < 3 && next < count; r++) {
+            if (extents_.sizes_[r] == 0 || (size_t)extents_.sizes_[r] == dynamic_extent) {
+                extents_.sizes_[r] = values[next];
+                next++;
+            }
+        }
+    }
+    T* data_;
+    E extents_;
+};
+
+}
+
+#endif

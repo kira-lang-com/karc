@@ -1,0 +1,42 @@
+// <__allocator>: std::allocator, the default allocator of every container,
+// and allocator_traits.
+#ifndef KARC_STD_ALLOCATOR
+#define KARC_STD_ALLOCATOR
+
+#include <cstddef>
+#include <cstdlib>
+#include <new>
+#include <utility>
+
+namespace std {
+
+template <typename T>
+class allocator {
+public:
+    typedef T value_type;
+    typedef size_t size_type;
+    allocator() {}
+    template <typename U>
+    allocator(const allocator<U>& other) {}
+    T* allocate(size_t count) { return (T*)malloc(count * sizeof(T)); }
+    void deallocate(T* pointer, size_t count) { free(pointer); }
+    bool operator==(const allocator& other) const { return true; }
+    bool operator!=(const allocator& other) const { return false; }
+    int unused;
+};
+
+template <typename A>
+struct allocator_traits {
+    typedef typename A::value_type value_type;
+    typedef size_t size_type;
+    static value_type* allocate(A& allocator, size_t count) { return allocator.allocate(count); }
+    static void deallocate(A& allocator, value_type* pointer, size_t count) { allocator.deallocate(pointer, count); }
+    template <typename... Args>
+    static void construct(A& allocator, value_type* pointer, Args&&... args) { new (pointer) value_type(std::forward<Args>(args)...); }
+    static void destroy(A& allocator, value_type* pointer) { pointer->~value_type(); }
+    int unused;
+};
+
+}
+
+#endif

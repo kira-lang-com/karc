@@ -1,0 +1,45 @@
+// The GCC and clang bit builtins programs call without including anything
+// for them, as inline functions: the popcount, leading and trailing zero
+// counts, parity and ffs families, and __builtin_expect.
+#ifndef KARC_STD_BUILTINS
+#define KARC_STD_BUILTINS
+
+inline int __builtin_popcountll(unsigned long x) {
+    int count = 0;
+    while (x != 0) {
+        x = x & (x - 1);
+        count++;
+    }
+    return count;
+}
+inline int __builtin_popcount(unsigned int x) { return __builtin_popcountll(x); }
+inline int __builtin_popcountl(unsigned long x) { return __builtin_popcountll(x); }
+// Leading zeros of a 64-bit value; 64 for zero.
+inline int __builtin_clzll(unsigned long x) {
+    int count = 0;
+    for (int bit = 63; bit >= 0 && ((x >> bit) & 1) == 0; bit--) { count++; }
+    return count;
+}
+inline int __builtin_clzl(unsigned long x) { return __builtin_clzll(x); }
+inline int __builtin_clz(unsigned int x) { return __builtin_clzll(x) - 32; }
+// Trailing zeros; the width for zero.
+inline int __builtin_ctzll(unsigned long x) {
+    if (x == 0) { return 64; }
+    int count = 0;
+    while ((x & 1) == 0) {
+        x = x >> 1;
+        count++;
+    }
+    return count;
+}
+inline int __builtin_ctzl(unsigned long x) { return __builtin_ctzll(x); }
+inline int __builtin_ctz(unsigned int x) { return x == 0 ? 32 : __builtin_ctzll(x); }
+inline int __builtin_parityll(unsigned long x) { return __builtin_popcountll(x) & 1; }
+inline int __builtin_parity(unsigned int x) { return __builtin_popcountll(x) & 1; }
+inline int __builtin_parityl(unsigned long x) { return __builtin_popcountll(x) & 1; }
+inline int __builtin_ffsll(long x) { return x == 0 ? 0 : __builtin_ctzll((unsigned long)x) + 1; }
+inline int __builtin_ffs(int x) { return x == 0 ? 0 : __builtin_ctzll((unsigned int)x) + 1; }
+inline int __builtin_ffsl(long x) { return __builtin_ffsll(x); }
+inline long __builtin_expect(long value, long expected) { return value; }
+
+#endif

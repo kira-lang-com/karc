@@ -1,0 +1,571 @@
+// Call lowering: direct, member and external calls, the declarations an
+// external call creates, and the heap builtins.
+
+function externalReturnType(name: String, args: [Value]) -> String {
+    if utf8Count(name) > 8 && utf8Slice(name, 0, 8) == "@member:" {
+        return "i32"
+    }
+    match name {
+        "std::llround" -> return "i64"
+        "std::round", "std::floor", "std::ceil" -> return "f64"
+        "Kten::object", "Kten::null", "Kten::list", "Kten::variant", "Kten::text" -> return "*[0 x %Kten]"
+        "std::min", "std::max", "std::clamp", "std::move", "std::forward" -> {
+            if args.count > 0 { return valueType(args[0]) }
+        }
+        else -> {}
+    }
+    return "i32"
+}
+function isExternalName(name: String) -> Bool {
+    match name {
+        "nullptr", "stdout", "stderr", "errno", "environ", "duration_cast", "milliseconds" -> return true
+        else -> {}
+    }
+    if utf8Count(name) >= 5 && utf8Slice(name, 0, 5) == "std::" { return true }
+    if utf8Count(name) > 0 && utf8Byte(name, 0) == 95 { return true }
+    for scope in 0..(utf8Count(name) - 1) {
+        if utf8Byte(name, scope) == 58 && utf8Byte(name, scope + 1) == 58 { return true }
+    }
+    var hasUpper = false
+    for i in 0..utf8Count(name) {
+        let byte = utf8Byte(name, i)
+        if byte >= 65 && byte <= 90 {
+            hasUpper = true
+        } else if !(byte >= 48 && byte <= 57) && byte != 95 {
+            return false
+        }
+    }
+    return hasUpper
+}
+function methodReceiver(state: borrow mut Lowerer, id: ExprId, owner: String) -> KirValue {
+    let actual = staticType(state, id)
+    if isClassType(actual) && actual != owner && isBaseOf(state, owner, actual) {
+        return upcast(state, methodReceiver(state, id, actual), actual, owner)
+    }
+    let receiverType = joinText(["*[0 x ", owner, "]"])
+    let expr = state.tree.expressions[id.value]
+    var computed = false
+    match expr.kind {
+        Call -> { computed = true }
+        Binary -> { computed = true }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if computed {
+        let value = emitExpression(state, id)
+        return coerceRef(state, value, receiverType)
+    }
+    let place = emitPlace(state, id)
+    if isPointerType(place.ty) {
+        return kBitcast(state, kLoad(state, place.address), receiverType)
+    }
+    return slotPointer(state, place.address, owner)
+}
+function computedReceiver(tree: CppTree, id: ExprId) -> Bool {
+    let expr = tree.expressions[id.value]
+    match expr.kind {
+        Call -> return true
+        Deref(operand) -> {
+            if !hasExpr(operand) { return false }
+            let inner = tree.expressions[operand.value]
+            match inner.kind {
+                Call -> return true
+                NumberLit -> return false
+                FloatLit -> return false
+                StringLit -> return false
+                Name -> return false
+                Neg -> return false
+                Positive -> return false
+                Not -> return false
+                BitNot -> return false
+                AddrOf -> return false
+                Deref -> return false
+                Sizeof -> return false
+                Cast -> return false
+                Field -> return false
+                Index -> return false
+                PreStep -> return false
+                PostStep -> return false
+                Binary -> return false
+                Ternary -> return false
+                New -> return false
+                Delete -> return false
+            }
+        }
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Name -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+// The `fn<result|parameters>` type of the function declared at `slot`, which
+// is what its `func.ref` holds.
+function unresolvedNameArgument(state: Lowerer, id: ExprId) -> Bool {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Name(named) -> return lookup(state, named.name) < 0
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Call -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+function functionPointerType(state: Lowerer, slot: Int) -> String {
+    var parameters: [String] = []
+    for i in 0..state.functionSlots[slot].parameters.count {
+        if i > 0 { parameters.append(",") }
+        parameters.append(state.functionSlots[slot].parameters[i])
+    }
+    return joinText(["fn<", state.functionSlots[slot].result, "|", joinText(parameters), ">"])
+}
+function declareExternal(state: borrow mut Lowerer, name: String, args: [Value], result: String, nameSpan: Span) -> Int {
+    let suffix = valueSuffix(args, result)
+    let externalName = joinText([name, "#", decimalText(suffix)])
+    var existing = functionSlot(state, externalName)
+    if existing >= 0 { return existing }
+    let signature = kSignatureNamed(state, nameSpan, name, result, suffix)
+    for arg in args {
+        kSignatureParameter(state, signature, valueType(arg))
+    }
+    var parameterTypes: [String] = []
+    for arg in args { parameterTypes.append(valueType(arg)) }
+    let handle = kDeclareFunction(signature)
+    return addFunctionSlot(state, externalName, parameterTypes, result, handle, true)
+}
+// `__builtin_klf_alloc(size, align)` and `__builtin_klf_free(p)`: the raw
+// heap of the KLF runtime, which the std's allocator is written over.
+function emitHeapBuiltin(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    if call.name == "__builtin_klf_throw" {
+        emitThrow(state, call.arguments)
+        return zeroValue(state)
+    }
+    if isMathBuiltin(call.name) {
+        if call.arguments.count != 1 {
+            lowerError(state, diagBuiltinArguments(), span)
+            return zeroValue(state)
+        }
+        let operand = convert(state, emitExpression(state, call.arguments[0]), "f64").reference
+        let result = kFloatUnary(state, call.name, operand)
+        return Value { reference = result, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+    }
+    if call.name == "__builtin_klf_va_start" {
+        let slot = lookup(state, "...")
+        if slot < 0 || call.arguments.count != 0 {
+            lowerError(state, diagBuiltinArguments(), span)
+            return zeroValue(state)
+        }
+        let pack = loadLocal(state, slot)
+        let bytes = kBitcast(state, pack.reference, "*[0 x i8]")
+        return Value { reference = bytes, boolean = false, wide = true, pointer = "*[0 x i8]", unsigned = false, floating = false }
+    }
+    if call.name == "__builtin_klf_free" {
+        if call.arguments.count == 1 {
+            let pointer = emitExpression(state, call.arguments[0])
+            var raw = kNull(state, "ptr")
+            if pointer.pointer != "" { raw = kBitcast(state, pointer.reference, "ptr") }
+            kir_value_heap_free_raw(state.functionHandle.unwrap(), raw)
+        } else {
+            lowerError(state, diagBuiltinArguments(), span)
+        }
+        return zeroValue(state)
+    }
+    if call.arguments.count != 2 {
+        lowerError(state, diagBuiltinArguments(), span)
+        return zeroValue(state)
+    }
+    let size = convert(state, emitExpression(state, call.arguments[0]), "i64").reference
+    let align = convert(state, emitExpression(state, call.arguments[1]), "i64").reference
+    let raw = kir_value_heap_alloc_raw(state.functionHandle.unwrap(), size, align)
+    let bytes = kBitcast(state, raw, "*[0 x i8]")
+    return Value { reference = bytes, boolean = false, wide = true, pointer = "*[0 x i8]", unsigned = false, floating = false }
+}
+function isVariadicFunction(fn: CppFunction) -> Bool {
+    return fn.parameters.count > 0 && fn.parameters[fn.parameters.count - 1].name == "..."
+}
+// KArc's variadic convention: the arguments from `from` on are widened to
+// 64-bit words in a stack array whose address is the callee's last
+// parameter. `<cstdarg>` reads them back, so no engine needs `va.*`.
+function emitVariadicPack(state: borrow mut Lowerer, arguments: [ExprId], span: Span, from: Int) -> Value {
+    var count = arguments.count - from
+    if count < 1 { count = 1 }
+    let name = joinText(["__karc_va_pack_", decimalText(state.slots)])
+    let slot = declare(state, name, joinText(["[", decimalText(count), " x i64]"]), "i64", span)
+    for i in from..arguments.count {
+        let value = emitExpression(state, arguments[i])
+        var word = value.reference
+        if value.pointer != "" {
+            word = toAddr64(state, value)
+        } else if value.floating {
+            word = kBitcast(state, value.reference, "i64")
+        } else {
+            word = convert(state, value, "i64").reference
+        }
+        let element = kElemAddr(state, state.slotsData[slot].address, kConstInt(state, "i64", i - from), "i64")
+        kStore(state, word, element)
+    }
+    let pointer = slotPointer(state, state.slotsData[slot].address, "i64")
+    return Value { reference = pointer, boolean = false, wide = true, pointer = "*[0 x i64]", unsigned = false, floating = false }
+}
+function emitCall(state: borrow mut Lowerer, id: ExprId) -> Value {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Call(call) -> return emitCallPayload(state, id, expr, call)
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    lowerError(state, diagUnsupportedExpression(), expr.span)
+    return zeroValue(state)
+}
+function emitSpecialCall(state: borrow mut Lowerer, id: ExprId, expr: Expr, call: CallExpression) -> Optional<Value> {
+    if isBuiltinName(call.name) && !hasExpr(call.receiver) {
+        return .Some(emitHeapBuiltin(state, call, expr.span))
+    }
+    if !hasExpr(call.receiver) && utf8Count(call.name) > 9 && utf8Slice(call.name, 0, 9) == "@lambda::" {
+        return .Some(emitLambda(state, call, expr.span))
+    }
+    match call.name {
+        "@invoke" -> return .Some(emitInvokePayload(state, id, call, expr.span))
+        "@dynamic_cast", "@dynamic_cast&" -> return .Some(emitDynamicCast(state, call, expr.span))
+        "@typeid" -> return .Some(emitTypeid(state, call, expr.span))
+        else -> {}
+    }
+    if call.name == "@derives" {
+        let types = state.tree.explicitArguments[call.explicitArguments - 1]
+        var answer = 0
+        if types[0] == types[1] || classDerivesFrom(state.tree, types[1], types[0]) { answer = 1 }
+        return .Some(intValue(state, answer))
+    }
+    if !hasExpr(call.receiver) && (call.name == "@braced" || (utf8Count(call.name) > 7 && utf8Slice(call.name, 0, 7) == "@list::")) {
+        return .Some(emitBraced(state, call, expr.span))
+    }
+    if !hasExpr(call.receiver) && utf8Count(call.name) > 7 && utf8Slice(call.name, 0, 7) == "@init::" {
+        return .Some(emitMemberInit(state, call))
+    }
+    if !hasExpr(call.receiver) && structIndex(state, call.name) >= 0 {
+        return .Some(emitTemporaryObject(state, call, expr.span))
+    }
+    return .None
+}
+
+function emitLocalCallable(state: borrow mut Lowerer, id: ExprId, call: CallExpression, span: Span) -> Optional<Value> {
+    var calleeSlot = lookup(state, call.name)
+    if calleeSlot < 0 { calleeSlot = ensureGlobalSlot(state, call.name) }
+    if calleeSlot >= 0 {
+        if isFnPtrType(state.slotsData[calleeSlot].ty) {
+            return .Some(emitIndirectCall(state, calleeSlot, id))
+        }
+        var objectType = state.slotsData[calleeSlot].ty
+        if state.slotsData[calleeSlot].reference { objectType = elementOfPointer(objectType) }
+        if isClassType(objectType) {
+            let index = chooseMember(state, objectType, "operator()", call.arguments)
+            var object = slotPointer(state, state.slotsData[calleeSlot].address, objectType)
+            if state.slotsData[calleeSlot].reference { object = kLoad(state, state.slotsData[calleeSlot].address) }
+            if index >= 0 { return .Some(callFunction(state, index, [object], call.arguments)) }
+            let record = structIndex(state, nominalName(objectType))
+            if record >= 0 && state.tree.structs[record].fields.count == 1 && isFnPtrType(state.tree.structs[record].fields[0].declType) {
+                let fieldType = state.tree.structs[record].fields[0].declType
+                let target = kLoad(state, kFieldAddr(state, structBehindPointer(state, object, objectType), 0, fieldType))
+                let temporary = declare(state, joinText(["__karc_fn_", decimalText(state.slots)]), fieldType, "", span)
+                kStore(state, target, state.slotsData[temporary].address)
+                return .Some(emitIndirectCall(state, temporary, id))
+            }
+        }
+    }
+    if calleeSlot < 0 && !hasExpr(call.receiver) && memberFieldType(state, call.name) != "" {
+        return .Some(emitFieldCall(state, call, span, id))
+    }
+    return .None
+}
+
+function callLookupName(call: CallExpression) -> String {
+    if hasExpr(call.receiver) { return utf8Slice(call.name, 9, utf8Count(call.name)) }
+    return call.name
+}
+
+function emitMemberCall(state: borrow mut Lowerer, call: CallExpression, expr: Expr, lookupName: String) -> Optional<Value> {
+    if !hasExpr(call.receiver) { return .None }
+    if utf8Byte(lookupName, 0) == 126 {
+        let owner = staticType(state, call.receiver)
+        if isClassType(owner) { destroyValue(state, methodReceiver(state, call.receiver, owner), owner) }
+        return .Some(zeroValue(state))
+    }
+    let method = resolveMethod(state, call, lookupName)
+    if method >= 0 { return .Some(emitMethodCall(state, call, method)) }
+    let invoked = memberCallee(state, call, expr.span, expr.nameSpan, lookupName)
+    if invoked.value >= 0 { return .Some(emitInvoke(state, invoked)) }
+    return .None
+}
+
+function resolveCallTarget(state: borrow mut Lowerer, call: CallExpression, span: Span, lookupName: String) -> Int {
+    var target = -1
+    if !hasExpr(call.receiver) {
+        target = chooseFunction(state, lookupName, call.arguments)
+        let inexact = target >= 0 && !exactArguments(state, state.tree.functions[target], call.arguments)
+        let freeTarget = target >= 0 && methodOwnerType(state.tree, state.tree.functions[target].name) == ""
+        let inexactInstance = inexact && (isMemberInstance(state, target) || (freeTarget && hasFunctionTemplate(state.tree, lookupName)))
+        if target >= 0 && (inexactInstance || !takesArguments(state, state.tree.functions[target], call.arguments)) {
+            var instance = -1
+            let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+            if owner != "" && !hasScope(lookupName) { instance = instantiateMember(state, owner, lookupName, call.arguments) }
+            if instance < 0 { instance = templateInstanceFor(state, call, span, lookupName) }
+            if instance >= 0 { target = instance }
+        }
+    }
+    if target < 0 {
+        let current = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+        for i in 0..state.tree.functions.count {
+            let candidate = state.tree.functions[i].name
+            if qualifiedNamesMatch(candidate, lookupName) && (hasExpr(call.receiver) || visibleByName(state.tree, candidate, lookupName, current)) { target = i }
+        }
+    }
+    if target < 0 && !hasExpr(call.receiver) {
+        let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+        if owner != "" && !hasScope(lookupName) { target = instantiateMember(state, owner, lookupName, call.arguments) }
+    }
+    if target < 0 && !hasExpr(call.receiver) && outerClass(state) != "" {
+        target = chooseMember(state, outerClass(state), lookupName, call.arguments)
+    }
+    if target < 0 && !hasExpr(call.receiver) {
+        target = templateInstanceFor(state, call, span, lookupName)
+    }
+    if target >= 0 {
+        target = definitionOf(state.tree, target)
+        if hasExpr(call.receiver) && computedReceiver(state.tree, call.receiver) { target = -1 }
+    }
+    return target
+}
+
+function emitResolvedDirectCall(state: borrow mut Lowerer, target: Int, call: CallExpression) -> Optional<Value> {
+    if target < 0 || hasExpr(call.receiver) || isVariadicFunction(state.tree.functions[target]) || call.name == "main" {
+        return .None
+    }
+    let owner = methodOwnerType(state.tree, state.tree.functions[target].name)
+    if owner == "" { return .Some(callFunction(state, target, [], call.arguments)) }
+    let selfSlot = lookup(state, "this")
+    var object = kNull(state, joinText(["*[0 x ", owner, "]"]))
+    let outer = outerObject(state)
+    let current = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    if outer.pointer != "" && owner != current {
+        object = coerceRef(state, outer, joinText(["*[0 x ", owner, "]"]))
+        state.dispatchNext = !qualifiedCall(call.name)
+        return .Some(callFunction(state, target, [object], call.arguments))
+    }
+    if selfSlot >= 0 {
+        let currentOwner = elementOfPointer(state.slotsData[selfSlot].ty)
+        object = coerceRef(state, loadLocal(state, selfSlot), joinText(["*[0 x ", owner, "]"]))
+        if currentOwner != owner && isBaseOf(state, owner, currentOwner) {
+            object = upcast(state, loadLocal(state, selfSlot).reference, currentOwner, owner)
+        }
+    }
+    state.dispatchNext = !qualifiedCall(call.name)
+    return .Some(callFunction(state, target, [object], call.arguments))
+}
+
+function prepareCallArguments(state: borrow mut Lowerer, target: Int, call: CallExpression, span: Span) -> [Value] {
+    var values: [Value] = []
+    if target < 0 && hasExpr(call.receiver) {
+        values.append(emitExpression(state, call.receiver))
+    }
+    if target >= 0 && methodOwnerType(state.tree, state.tree.functions[target].name) != "" {
+        if hasExpr(call.receiver) {
+            let owner = methodOwnerType(state.tree, state.tree.functions[target].name)
+            let self = methodReceiver(state, call.receiver, owner)
+            values.append(Value { reference = self, boolean = false, wide = true, pointer = joinText(["*[0 x ", owner, "]"]), unsigned = false, floating = false })
+        } else {
+            let selfSlot = lookup(state, "this")
+            if selfSlot >= 0 {
+                values.append(loadLocal(state, selfSlot))
+            } else {
+                let owner = methodOwnerType(state.tree, state.tree.functions[target].name)
+                values.append(Value {
+                    reference = kNull(state, joinText(["*[0 x ", owner, "]"])),
+                    boolean = false,
+                    wide = true,
+                    pointer = joinText(["*[0 x ", owner, "]"]),
+                    unsigned = false,
+                    floating = false
+                })
+            }
+        }
+    }
+    var variadicFrom = -1
+    if target >= 0 && isVariadicFunction(state.tree.functions[target]) {
+        variadicFrom = state.tree.functions[target].parameters.count - 1
+    }
+    var expected = call.arguments.count
+    if target >= 0 && state.tree.functions[target].parameters.count > expected {
+        expected = state.tree.functions[target].parameters.count
+    }
+    if variadicFrom >= 0 { expected = variadicFrom }
+    for i in 0..expected {
+        var argId = noExpr()
+        if i < call.arguments.count { argId = call.arguments[i] }
+        if i < call.arguments.count && target >= 0 && i < state.tree.functions[target].parameters.count &&
+            state.tree.functions[target].parameters[i].reference &&
+            firstByte(elementOfPointer(parameterKirType(state.tree.functions[target].parameters[i].declType))) != 37 {
+            let parameterType = parameterKirType(state.tree.functions[target].parameters[i].declType)
+            let address = emitReferenceArgument(state, argId, parameterType)
+            values.append(Value { reference = address, boolean = false, wide = true, pointer = parameterType, unsigned = false, floating = false })
+        } else if i < call.arguments.count && target >= 0 && i < state.tree.functions[target].parameters.count &&
+            isFnPtrType(parameterKirType(state.tree.functions[target].parameters[i].declType)) &&
+            unresolvedNameArgument(state, argId) {
+            let reference = emitArgument(state, argId, parameterKirType(state.tree.functions[target].parameters[i].declType))
+            values.append(Value { reference = reference, boolean = false, wide = true, pointer = "", unsigned = false, floating = false })
+        } else if i < call.arguments.count {
+            values.append(emitExpression(state, argId))
+        } else {
+            values.append(zeroValue(state))
+        }
+    }
+    if variadicFrom >= 0 {
+        values.append(emitVariadicPack(state, call.arguments, span, variadicFrom))
+    }
+    return values
+}
+
+function emitPreparedCall(state: borrow mut Lowerer, target: Int, call: CallExpression, expr: Expr, lookupName: String, rawInput: [Value]) -> Value {
+    var rawValues = rawInput
+    var calleeName = lookupName
+    var returnType = externalReturnType(call.name, rawValues)
+    var structResultType: String = ""
+    var structResult = zeroValue(state)
+    var callee = -1
+    if target >= 0 {
+        calleeName = state.tree.functions[target].name
+        returnType = state.tree.functions[target].returnType
+        if isClassType(returnType) {
+            structResultType = returnType
+            let tempName = joinText(["__karc_struct_tmp_", decimalText(state.slots)])
+            let tempSlot = declare(state, tempName, returnType, "", expr.span)
+            state.temporaries.append(tempSlot)
+            let tempPointer = slotPointer(state, state.slotsData[tempSlot].address, returnType)
+            structResult = Value { reference = tempPointer, boolean = false, wide = true, pointer = joinText(["*[0 x ", returnType, "]"]), unsigned = false, floating = false }
+            var withResult: [Value] = [structResult]
+            for value in rawValues { withResult.append(value) }
+            rawValues = withResult
+        }
+        callee = functionSlotForFunction(state, target)
+    } else {
+        callee = declareExternal(state, calleeName, rawValues, returnType, expr.nameSpan)
+    }
+    if callee < 0 { return zeroValue(state) }
+
+    var typedArguments: [KirValue] = []
+    var argumentIndex = 0
+    for parameterType in state.functionSlots[callee].parameters {
+        if argumentIndex < rawValues.count {
+            typedArguments.append(coerceRef(state, rawValues[argumentIndex], parameterType))
+        } else {
+            typedArguments.append(coerceRef(state, zeroValue(state), parameterType))
+        }
+        argumentIndex = argumentIndex + 1
+    }
+    returnType = state.functionSlots[callee].result
+    for argument in typedArguments { kArgument(state, argument) }
+
+    if structResultType != "" {
+        kCallVoid(state, state.functionSlots[callee].handle)
+        afterCall(state, callee)
+        return structResult
+    }
+    if returnType == "unit" {
+        kCallVoid(state, state.functionSlots[callee].handle)
+        afterCall(state, callee)
+        return zeroValue(state)
+    }
+    let result = kCall(state, state.functionSlots[callee].handle, returnType)
+    afterCall(state, callee)
+    state.lastCallReference = target >= 0 && state.tree.functions[target].refReturn
+    return promoteFromType(state, result, returnType)
+}
+
+function emitCallPayload(state: borrow mut Lowerer, id: ExprId, expr: Expr, call: CallExpression) -> Value {
+    state.lastCallReference = false
+    match emitSpecialCall(state, id, expr, call) {
+        Some(value) -> return value
+        None -> {}
+    }
+    match emitLocalCallable(state, id, call, expr.span) {
+        Some(value) -> return value
+        None -> {}
+    }
+    let lookupName = callLookupName(call)
+    match emitMemberCall(state, call, expr, lookupName) {
+        Some(value) -> return value
+        None -> {}
+    }
+    let target = resolveCallTarget(state, call, expr.span, lookupName)
+    match emitResolvedDirectCall(state, target, call) {
+        Some(value) -> return value
+        None -> {}
+    }
+    if call.name == "main" { lowerError(state, diagCallsMain(), expr.span) }
+    let rawValues = prepareCallArguments(state, target, call, expr.span)
+    return emitPreparedCall(state, target, call, expr, lookupName, rawValues)
+}

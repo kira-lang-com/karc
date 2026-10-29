@@ -1,0 +1,610 @@
+// Expression parsing: a precedence climber, prefix-unary parsing, and a
+// compositional postfix loop so member, index and call operators chain freely
+// (`a.b.c`, `f().g`, `a[i].b`). `p->f` desugars to `(*p).f`. Mirrors the shape
+// of klf-kira-syntax/parser/exprs.rs within the C subset.
+
+function precedence(kind: TokenKind) -> Int {
+    if kind == .Assign || isCompoundAssign(kind) { return 0 }
+    if kind == .OrOr { return 1 }
+    if kind == .AndAnd { return 2 }
+    if kind == .Pipe { return 3 }
+    if kind == .Caret { return 4 }
+    if kind == .Amp { return 5 }
+    if kind == .EqEq || kind == .NotEq { return 6 }
+    if kind == .Lt || kind == .Gt || kind == .Le || kind == .Ge || kind == .Spaceship { return 7 }
+    if kind == .Shl || kind == .Shr { return 8 }
+    if kind == .Plus || kind == .Minus { return 9 }
+    if kind == .Star || kind == .Slash || kind == .Percent { return 10 }
+    return -1
+}
+function isTemplateName(name: String) -> Bool {
+    match name {
+        "std::max", "std::min", "std::clamp", "std::make_unique", "std::make_shared", "std::lock_guard",
+        "std::unique_lock", "std::vector", "std::optional", "std::pair", "std::map", "std::set",
+        "duration_cast", "get" -> return true
+        else -> return false
+    }
+}
+function skipCallTemplate(p: borrow mut Parser, name: String) {
+    if !isTemplateName(name) { return }
+    if peekKind(p) != .Lt { return }
+    consume(p)
+    var depth = 1
+    while depth > 0 && peekKind(p) != .End {
+        if peekKind(p) == .Lt { depth = depth + 1 }
+        else if peekKind(p) == .Gt { depth = depth - 1 }
+        else if peekKind(p) == .Shr { depth = depth - 2 }
+        consume(p)
+    }
+}
+// A character or string literal's encoding prefix: `L"..."`, `u8"..."`.
+function isEncodingPrefix(text: String) -> Bool {
+    match text {
+        "L", "u", "U", "u8" -> return true
+        else -> return false
+    }
+}
+function primaryAtom(p: borrow mut Parser, token: Token) -> Optional<ExprId> {
+    if token.kind == .Ident && isTypeTrait(token.text) && peek2Kind(p) == .LParen { return .Some(parseTypeTrait(p)) }
+    if token.kind == .Number {
+        consume(p)
+        if p.tree.cInput && token.text == "char" { return .Some(eNumber(p, token.number, spanFrom(p, token.start))) }
+        match token.text {
+            "char", "u", "l", "ul" -> {
+                return .Some(addExpr(p, Expr { kind = .NumberLit(NumberExpression { value = token.number, suffix = token.text }), span = spanFrom(p, token.start), nameSpan = spanFrom(p, token.start) }))
+            }
+            else -> return .Some(eNumber(p, token.number, spanFrom(p, token.start)))
+        }
+    }
+    if token.kind == .Float {
+        consume(p)
+        return .Some(eFloat(p, token.text, spanFrom(p, token.start)))
+    }
+    if token.kind == .Ident && isEncodingPrefix(token.text) && p.position + 1 < p.tokens.count &&
+        p.tokens[p.position + 1].start == token.end && (p.tokens[p.position + 1].kind == .Str || p.tokens[p.position + 1].kind == .Number) {
+        return .Some(wideLiteral(p, token))
+    }
+    if token.kind == .Str {
+        consume(p)
+        var raw = token.text
+        while peekKind(p) == .Str { raw = joinText([raw, consume(p).text]) }
+        let index = p.tree.strings.count
+        p.tree.strings.append(raw)
+        let literal = eStr(p, index, spanFrom(p, token.start))
+        if !p.tree.cInput && peekKind(p) == .Ident && !peek(p).space {
+            let suffix = consume(p)
+            let length = eNumber(p, decodedLength(raw), tokenSpan(token))
+            return .Some(eCall(p, literalOperatorName(suffix.text), [literal, length], spanFrom(p, token.start), tokenSpan(suffix), noExpr()))
+        }
+        return .Some(literal)
+    }
+    if token.kind == .LBracket { return .Some(parseLambda(p)) }
+    if token.kind == .LBrace {
+        consume(p)
+        var elements: [ExprId] = []
+        while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+            elements.append(listElement(p))
+            if peekKind(p) == .Comma { consume(p) }
+        }
+        expect(p, .RBrace)
+        return .Some(eCall(p, "@braced", elements, spanFrom(p, token.start), spanFrom(p, token.start), noExpr()))
+    }
+    if scalarTypeToken(token) && peek2Kind(p) == .LParen {
+        return .Some(functionalCast(p, parseTypeToken(p), token.start))
+    }
+    return .None
+}
+
+function primaryIdentifier(p: borrow mut Parser, token: Token, rooted: Bool) -> ExprId {
+    consume(p)
+    match token.text {
+        "true", "false" -> {
+            var truth = 0
+            if token.text == "true" { truth = 1 }
+            return addExpr(p, Expr { kind = .NumberLit(NumberExpression { value = truth, suffix = "bool" }), span = spanFrom(p, token.start), nameSpan = spanFrom(p, token.start) })
+        }
+        "static_cast", "const_cast", "reinterpret_cast", "dynamic_cast" -> return castExpression(p, token)
+        "alignof", "_Alignof", "__alignof__" -> {
+            if peekKind(p) == .LParen { return alignofExpression(p, token) }
+        }
+        "typeid" -> {
+            if peekKind(p) == .LParen { return typeidExpression(p, token) }
+        }
+        else -> {}
+    }
+    var name = token.text
+    while peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+        consume(p)
+        expect(p, .Colon)
+        name = joinText([name, "::", expect(p, .Ident).text])
+    }
+    if rooted { name = joinText(["::", name]) }
+    name = expandNamespaceAlias(p, name)
+    name = throughClassAlias(p, name)
+    if peekKind(p) == .LParen || peekKind(p) == .LBrace {
+        let aliased = typedefAlias(p, name)
+        if aliased != "" && !isFnPtrType(aliased) {
+            if isClassType(aliased) { name = nominalName(aliased) }
+            else if peekKind(p) == .LParen { return functionalCast(p, aliased, token.start) }
+        }
+        let found = resolveIn(p, name, entityExpressionKinds())
+        if found != "" && hasKind(entityKinds(p.tree, found), .Class) && !hasKind(entityKinds(p.tree, found), .Function) && !localNamed(p, name) { name = found }
+    }
+    if peekKind(p) == .LBrace && isClassName(p, name) {
+        consume(p)
+        var arguments: [ExprId] = []
+        while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+            arguments.append(expression(p, 0))
+            if peekKind(p) == .Comma { consume(p) }
+        }
+        expect(p, .RBrace)
+        return eCall(p, name, arguments, spanFrom(p, token.start), spanFrom(p, token.start), noExpr())
+    }
+    if peekKind(p) == .LBrace {
+        skipAggregate(p)
+        return eNumber(p, 0, spanFrom(p, token.start))
+    }
+    return eName(p, name, spanFrom(p, token.start))
+}
+
+// `static_cast<T>(operand)` and its kin, with the keyword read.
+function castExpression(p: borrow mut Parser, token: Token) -> ExprId {
+    expect(p, .Lt)
+    p.lastReference = false
+    let castType = parseTypeToken(p)
+    let toReference = p.lastReference
+    expectCloseAngle(p)
+    expect(p, .LParen)
+    let operand = expression(p, 0)
+    expect(p, .RParen)
+    if token.text == "dynamic_cast" {
+        var marker = "@dynamic_cast"
+        if toReference { marker = "@dynamic_cast&" }
+        return eTypedCall(p, marker, [operand], castType, token.start)
+    }
+    return eCast(p, castType, operand, spanFrom(p, token.start))
+}
+
+// `alignof(T)` or `alignof(expression)`, with the keyword read.
+function alignofExpression(p: borrow mut Parser, token: Token) -> ExprId {
+    consume(p)
+    if castTypeAhead(p) {
+        let ty = parseTypeToken(p)
+        expect(p, .RParen)
+        return eNumber(p, typeAlign(p.tree, ty), spanFrom(p, token.start))
+    }
+    let operand = expression(p, 0)
+    expect(p, .RParen)
+    return eCall(p, "@alignof", [operand], spanFrom(p, token.start), tokenSpan(token), noExpr())
+}
+
+// `typeid(T)` or `typeid(expression)`, with the keyword read.
+function typeidExpression(p: borrow mut Parser, token: Token) -> ExprId {
+    consume(p)
+    var arguments: [ExprId] = []
+    var named = ""
+    if castTypeAhead(p) { named = parseTypeToken(p) } else { arguments.append(expression(p, 0)) }
+    expect(p, .RParen)
+    return eTypedCall(p, "@typeid", arguments, named, token.start)
+}
+
+function primaryParen(p: borrow mut Parser, token: Token) -> ExprId {
+    consume(p)
+    if castTypeAhead(p) {
+        let castType = parseAbstractType(p)
+        expect(p, .RParen)
+        return eCast(p, castType, unary(p), spanFrom(p, token.start))
+    }
+    let inner = fullExpression(p)
+    expect(p, .RParen)
+    return inner
+}
+
+function primary(p: borrow mut Parser) -> ExprId {
+    var token = peek(p)
+    var rooted = false
+    if token.kind == .Colon && peek2Kind(p) == .Colon {
+        consume(p)
+        expect(p, .Colon)
+        token = peek(p)
+        rooted = true
+    }
+    match primaryAtom(p, token) {
+        Some(value) -> return value
+        None -> {}
+    }
+    if token.kind == .Ident { return primaryIdentifier(p, token, rooted) }
+    if token.kind == .LParen { return primaryParen(p, token) }
+    parseError(p, "Expected an integer, name, call or parenthesized expression", token.start)
+    return eNumber(p, 0, spanFrom(p, token.start))
+}
+// One element of a braced list: an expression, or `.member = value`, a
+// designated initializer.
+function listElement(p: borrow mut Parser) -> ExprId {
+    if peekKind(p) != .Dot || peek2Kind(p) != .Ident { return expression(p, 0) }
+    consume(p)
+    let member = consume(p)
+    if peekKind(p) == .Assign { consume(p) }
+    let value = expression(p, 0)
+    return eCall(p, joinText(["@designated::", member.text]), [value], tokenSpan(member), tokenSpan(member), noExpr())
+}
+function postfixTemplate(p: borrow mut Parser, expr: ExprId, start: Int) -> Optional<ExprId> {
+    if isGetName(p.tree.expressions[expr.value]) && peek2Kind(p) == .Number {
+        consume(p)
+        let index = consume(p).number
+        expectCloseAngle(p)
+        expect(p, .LParen)
+        let value = expression(p, 0)
+        expect(p, .RParen)
+        return .Some(eField(p, value, joinText(["#", decimalText(index)]), spanFrom(p, start), spanFrom(p, start)))
+    }
+    let target = p.tree.expressions[expr.value]
+    var targetName = ""
+    match target.kind {
+        Name(named) -> { targetName = named.name }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if targetName != "" && classTemplateIndex(p, targetName) >= 0 && templateArgumentsAhead(p) {
+        let template = classTemplateIndex(p, targetName)
+        let arguments = parseTemplateArguments(p, template)
+        var instance = instantiateClass(p, template, arguments)
+        if !p.pendingGt && peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+            consume(p)
+            consume(p)
+            instance = joinText([instance, "::", expect(p, .Ident).text])
+        }
+        if peekKind(p) == .LBrace && !p.pendingGt { return .Some(bracedTemporary(p, instance, start)) }
+        return .Some(eName(p, instance, target.span))
+    }
+    if targetName != "" && variableTemplateIndex(p.tree, targetName) >= 0 && variableArgumentsAhead(p) {
+        return .Some(eName(p, instantiateVariable(p, variableTemplateIndex(p.tree, targetName)), target.span))
+    }
+    if targetName != "" && functionTemplateByName(p.tree, targetName) && templateArgumentsAhead(p) {
+        let arguments = parseExplicitArguments(p)
+        p.tree.explicitArguments.append(arguments)
+        return .Some(addExpr(p, Expr { kind = .Name(NameExpression { name = targetName, explicitArguments = p.tree.explicitArguments.count, valueUse = true }), span = target.span, nameSpan = target.nameSpan }))
+    }
+    if targetName == "" || !isTemplateName(targetName) { return .None }
+    skipCallTemplate(p, targetName)
+    if peekKind(p) == .LBrace {
+        skipAggregate(p)
+        return .Some(eNumber(p, 0, spanFrom(p, start)))
+    }
+    return .Some(expr)
+}
+
+function postfixMember(p: borrow mut Parser, expr: ExprId, start: Int, arrow: Bool) -> ExprId {
+    consume(p)
+    if peekKind(p) == .Tilde { return parseDestructorCall(p, expr, start, arrow) }
+    let nameToken = expect(p, .Ident)
+    let name = nameToken.text
+    var base = expr
+    if arrow { base = eUnary(p, .Deref, expr, spanFrom(p, start)) }
+    let result = eField(p, base, name, spanFrom(p, start), tokenSpan(nameToken))
+    skipCallTemplate(p, name)
+    return result
+}
+
+function postfixIndex(p: borrow mut Parser, expr: ExprId, start: Int) -> ExprId {
+    consume(p)
+    let index = expression(p, 0)
+    if peekKind(p) == .Comma {
+        var indices: [ExprId] = [index]
+        while peekKind(p) == .Comma && p.error == "" {
+            consume(p)
+            indices.append(expression(p, 0))
+        }
+        expect(p, .RBracket)
+        return eCall(p, "@member::operator[]", indices, spanFrom(p, start), spanFrom(p, start), expr)
+    }
+    expect(p, .RBracket)
+    return eIndex(p, expr, index, spanFrom(p, start))
+}
+
+function postfixCall(p: borrow mut Parser, expr: ExprId, start: Int) -> ExprId {
+    let target = p.tree.expressions[expr.value]
+    var callee = ""
+    var receiver = noExpr()
+    var explicitArguments = 0
+    var namedTarget = false
+    match target.kind {
+        Name(named) -> {
+            callee = named.name
+            explicitArguments = named.explicitArguments
+            namedTarget = true
+        }
+        Field(field) -> {
+            callee = joinText(["@member::", field.name])
+            receiver = field.base
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    consume(p)
+    var arguments: [ExprId] = []
+    while peekKind(p) != .RParen && peekKind(p) != .End && p.error == "" {
+        arguments.append(expression(p, 0))
+        if peekKind(p) == .Comma { consume(p) }
+    }
+    expect(p, .RParen)
+    if callee == "" { return eCall(p, "@invoke", arguments, spanFrom(p, start), target.nameSpan, expr) }
+    let targetId = expr
+    let result = eCall(p, callee, arguments, spanFrom(p, start), target.nameSpan, receiver)
+    if namedTarget {
+        p.tree.expressions[targetId.value] = nameWithValueUse(target, false)
+        if explicitArguments > 0 {
+            let call = p.tree.expressions[result.value]
+            p.tree.expressions[result.value] = callWithExplicitArguments(call, explicitArguments)
+        }
+    }
+    return result
+}
+
+function postfix(p: borrow mut Parser) -> ExprId {
+    let start = peek(p).start
+    var expr = primary(p)
+    while p.error == "" {
+        let kind = peekKind(p)
+        if kind == .Lt {
+            match postfixTemplate(p, expr, start) {
+                Some(next) -> { expr = next }
+                None -> { break }
+            }
+        } else if kind == .Dot {
+            expr = postfixMember(p, expr, start, false)
+        } else if kind == .Arrow {
+            expr = postfixMember(p, expr, start, true)
+        } else if kind == .LBracket {
+            expr = postfixIndex(p, expr, start)
+        } else if kind == .LParen {
+            expr = postfixCall(p, expr, start)
+        } else if kind == .PlusPlus || kind == .MinusMinus {
+            let step = consume(p)
+            var op = "+"
+            if step.kind == .MinusMinus { op = "-" }
+            expr = eStep(p, .PostStep, op, expr, spanFrom(p, start))
+        } else {
+            break
+        }
+    }
+    return expr
+}
+function unary(p: borrow mut Parser) -> ExprId {
+    let t = peek(p)
+    if isCoroutineKeyword(t) && t.text != "co_return" { return coroutineExpression(p) }
+    if t.kind == .PlusPlus || t.kind == .MinusMinus {
+        consume(p)
+        var op: String = "+"
+        if t.kind == .MinusMinus { op = "-" }
+        return eStep(p, .PreStep, op, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Plus {
+        consume(p)
+        return eUnary(p, .Positive, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Minus {
+        consume(p)
+        return eUnary(p, .Neg, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Bang {
+        consume(p)
+        return eUnary(p, .Not, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Tilde {
+        consume(p)
+        return eUnary(p, .BitNot, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Amp {
+        consume(p)
+        return eUnary(p, .AddrOf, unary(p), spanFrom(p, t.start))
+    }
+    if t.kind == .Star {
+        consume(p)
+        return eUnary(p, .Deref, unary(p), spanFrom(p, t.start))
+    }
+    if !p.tree.cInput && t.kind == .Ident && t.text == "new" {
+        return parseNew(p)
+    }
+    if !p.tree.cInput && t.kind == .Ident && t.text == "delete" {
+        let keyword = consume(p)
+        var array = 0
+        if peekKind(p) == .LBracket {
+            consume(p)
+            expect(p, .RBracket)
+            array = 1
+        }
+        let operand = unary(p)
+        return addExpr(p, Expr { kind = .Delete(DeleteExpression { operand = operand, array = array != 0 }), span = spanFrom(p, t.start), nameSpan = tokenSpan(keyword) })
+    }
+    if t.kind == .KwSizeof {
+        consume(p)
+        if peekKind(p) == .LParen {
+            consume(p)
+            if castTypeAhead(p) {
+                let ty = parseAbstractType(p)
+                expect(p, .RParen)
+                return eNumber(p, typeSize(p.tree, ty), spanFrom(p, t.start))
+            }
+            let operand = expression(p, 0)
+            expect(p, .RParen)
+            return eUnary(p, .Sizeof, operand, spanFrom(p, t.start))
+        }
+        return eUnary(p, .Sizeof, unary(p), spanFrom(p, t.start))
+    }
+    return postfix(p)
+}
+// `new T`, `new T(init)`, `new T{init}` or `new T[count]`: `a` is the count,
+// `b` the initializer, `text` the element type.
+function parseNew(p: borrow mut Parser) -> ExprId {
+    let keyword = consume(p)
+    let start = keyword.start
+    var placement = noExpr()
+    if peekKind(p) == .LParen {
+        consume(p)
+        placement = expression(p, 0)
+        expect(p, .RParen)
+    }
+    let ty = parseTypeToken(p)
+    var count = noExpr()
+    var init = noExpr()
+    if peekKind(p) == .LBracket {
+        consume(p)
+        count = expression(p, 0)
+        expect(p, .RBracket)
+        // `new T[n]()` or `new T[n]{}`: value-initialized, as all new
+        // storage already is.
+        if (peekKind(p) == .LParen && peek2Kind(p) == .RParen) || (peekKind(p) == .LBrace && peek2Kind(p) == .RBrace) {
+            consume(p)
+            consume(p)
+        }
+    }
+    var arguments: [ExprId] = []
+    if !hasExpr(count) && (peekKind(p) == .LParen || peekKind(p) == .LBrace) {
+        var close: TokenKind = .RParen
+        if peekKind(p) == .LBrace { close = .RBrace }
+        consume(p)
+        if peekKind(p) != close {
+            arguments.append(expression(p, 0))
+            while peekKind(p) == .Comma && p.error == "" {
+                consume(p)
+                arguments.append(expression(p, 0))
+            }
+        }
+        expect(p, close)
+    }
+    init = placement
+    return addExpr(p, Expr { kind = .New(NewExpression { count = count, initializer = init, ty = ty, arguments = arguments }), span = spanFrom(p, start), nameSpan = tokenSpan(keyword) })
+}
+// A parenthesized type ends at its `)` and, being an abstract declarator,
+// names nothing after a top-level `*` or `&`: `(n * 3)` is an expression.
+function castTypeAhead(p: borrow Parser) -> Bool {
+    if !startsType(p) { return false }
+    var angle = 0
+    var paren = 0
+    var bracket = 0
+    var declarator = false
+    for i in p.position..p.tokens.count {
+        let kind = p.tokens[i].kind
+        if kind == .Semicolon || kind == .LBrace || kind == .RBrace { return false }
+        if kind == .LParen { paren = paren + 1 }
+        else if kind == .RParen {
+            if paren == 0 { return angle == 0 }
+            paren = paren - 1
+        } else if kind == .LBracket { bracket = bracket + 1 }
+        else if kind == .RBracket { bracket = bracket - 1 }
+        else if kind == .Lt { angle = angle + 1 }
+        else if kind == .Gt { angle = angle - 1 }
+        else if kind == .Shr { angle = angle - 2 }
+        else if paren == 0 && angle == 0 && bracket == 0 {
+            let qualifier = kind == .KwConst || kind == .KwVolatile
+            if kind == .Star || kind == .Amp || kind == .AndAnd { declarator = true }
+            else if declarator && !qualifier { return false }
+            else if !qualifier && kind != .Ident && kind != .Colon && kind != .KwInt && kind != .KwChar && kind != .KwBool && kind != .KwLong && kind != .KwVoid && kind != .KwStruct && kind != .KwEnum && kind != .KwUnsigned && kind != .KwSigned { return false }
+        }
+    }
+    return false
+}
+function expression(p: borrow mut Parser, minimum: Int) -> ExprId {
+    let start = peek(p).start
+    var left = unary(p)
+    while p.error == "" {
+        if minimum <= 0 && peekKind(p) == .Question {
+            consume(p)
+            let thenExpr = fullExpression(p)
+            expect(p, .Colon)
+            let elseExpr = expression(p, 0)
+            left = eTernary(p, left, thenExpr, elseExpr, spanFrom(p, start))
+            continue
+        }
+        let operator = peek(p)
+        let strength = precedence(operator.kind)
+        if strength < minimum { break }
+        consume(p)
+        // Assignment is right-associative and takes a conditional on its
+        // right: `a = b ? c : d` assigns the conditional.
+        var rightMinimum = strength + 1
+        if operator.kind == .Assign || isCompoundAssign(operator.kind) { rightMinimum = 0 }
+        let right = expression(p, rightMinimum)
+        left = eBinary(p, operator.text, left, right, spanFrom(p, start))
+    }
+    return left
+}
+// `object.~T()` or `pointer->~T()`: a destructor call on a class, nothing on
+// a scalar (a pseudo-destructor).
+function parseDestructorCall(p: borrow mut Parser, object: ExprId, start: Int, arrow: Bool) -> ExprId {
+    consume(p)
+    let nameToken = expect(p, .Ident)
+    var typeName = nameToken.text
+    let alias = typedefAlias(p, typeName)
+    if alias != "" { typeName = alias }
+    expect(p, .LParen)
+    expect(p, .RParen)
+    let first = utf8Byte(typeName, 0)
+    let isClass = first == 37 || (first >= 65 && first <= 90) || isClassName(p, typeName)
+    if !isClass { return eNumber(p, 0, spanFrom(p, start)) }
+    var receiver = object
+    if arrow { receiver = eUnary(p, .Deref, object, spanFrom(p, start)) }
+    let className = unqualifiedName(nominalName(typeName))
+    return eCall(p, joinText(["@member::~", className]), [], spanFrom(p, start), tokenSpan(nameToken), receiver)
+}
+function isGetName(e: Expr) -> Bool {
+    match e.kind {
+        Name(named) -> return named.name == "get" || named.name == "std::get"
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Call -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}

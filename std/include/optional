@@ -1,0 +1,165 @@
+// <optional>: std::optional and std::nullopt. The value lives in the
+// optional's own storage, constructed only while there is one.
+#ifndef KARC_STD_OPTIONAL
+#define KARC_STD_OPTIONAL
+
+#include <new>
+#include <exception>
+#include <utility>
+
+namespace std {
+
+struct nullopt_t { int unused; };
+struct in_place_t { int unused; };
+static in_place_t in_place;
+
+class bad_optional_access : public exception {
+public:
+    const char* what() const override { return "bad optional access"; }
+};
+static nullopt_t nullopt;
+
+template <typename T>
+class optional {
+public:
+    typedef T value_type;
+
+    optional() : present_(false) {}
+    optional(nullopt_t none) : present_(false) {}
+    optional(const T& value) : present_(false) { new (pointer()) T(value); present_ = true; }
+    optional(T&& value) : present_(false) { new (pointer()) T(std::move(value)); present_ = true; }
+    template <typename... Args>
+    explicit optional(in_place_t tag, Args&&... args) : present_(false) {
+        new (pointer()) T(std::forward<Args>(args)...);
+        present_ = true;
+    }
+    optional(const optional& other) : present_(false) {
+        if (other.present_) {
+            new (pointer()) T(*other.pointer());
+            present_ = true;
+        }
+    }
+    optional(optional&& other) : present_(false) {
+        if (other.present_) {
+            new (pointer()) T(std::move(*other.pointer()));
+            present_ = true;
+        }
+    }
+    ~optional() { reset(); }
+    optional& operator=(const optional& other) {
+        if (this == &other) { return *this; }
+        if (!other.present_) {
+            reset();
+        } else if (present_) {
+            *pointer() = *other.pointer();
+        } else {
+            new (pointer()) T(*other.pointer());
+            present_ = true;
+        }
+        return *this;
+    }
+    optional& operator=(optional&& other) {
+        if (this == &other) { return *this; }
+        if (!other.present_) {
+            reset();
+        } else if (present_) {
+            *pointer() = std::move(*other.pointer());
+        } else {
+            new (pointer()) T(std::move(*other.pointer()));
+            present_ = true;
+        }
+        return *this;
+    }
+    optional& operator=(const T& value) {
+        if (present_) {
+            *pointer() = value;
+        } else {
+            new (pointer()) T(value);
+            present_ = true;
+        }
+        return *this;
+    }
+    optional& operator=(nullopt_t none) {
+        reset();
+        return *this;
+    }
+
+    bool has_value() const { return present_; }
+    explicit operator bool() const { return present_; }
+    // One member of each, const, serves const and non-const objects.
+    T& value() const {
+        if (!present_) { karc_throw_bad_optional_access(); }
+        return *pointer();
+    }
+    T& operator*() const { return *pointer(); }
+    T* operator->() const { return pointer(); }
+    T value_or(const T& fallback) const {
+        if (present_) { return *pointer(); }
+        return fallback;
+    }
+    void reset() {
+        if (present_) {
+            pointer()->~T();
+            present_ = false;
+        }
+    }
+    template <typename... Args>
+    T& emplace(Args&&... args) {
+        reset();
+        new (pointer()) T(std::forward<Args>(args)...);
+        present_ = true;
+        return *pointer();
+    }
+    void swap(optional& other) {
+        optional held(std::move(*this));
+        *this = std::move(other);
+        other = std::move(held);
+    }
+
+    // The C++23 monadic members. A result type comes from the first return,
+    // so the empty case returns nullopt, converted.
+    template <typename F>
+    auto transform(F f) const {
+        if (present_) { return make_optional(f(*pointer())); }
+        return nullopt;
+    }
+    template <typename F>
+    auto and_then(F f) const {
+        if (present_) { return f(*pointer()); }
+        return nullopt;
+    }
+    template <typename F>
+    optional or_else(F f) const {
+        if (present_) { return *this; }
+        return f();
+    }
+
+    bool operator==(nullopt_t none) const { return !present_; }
+    bool operator!=(nullopt_t none) const { return present_; }
+    bool operator==(const optional& other) const {
+        if (present_ != other.present_) { return false; }
+        return !present_ || *pointer() == *other.pointer();
+    }
+    bool operator!=(const optional& other) const { return !(*this == other); }
+    bool operator<(const optional& other) const {
+        if (!other.present_) { return false; }
+        if (!present_) { return true; }
+        return *pointer() < *other.pointer();
+    }
+    bool operator==(const T& value) const { return present_ && *pointer() == value; }
+    bool operator!=(const T& value) const { return !(*this == value); }
+
+private:
+    T* pointer() const { return (T*)words_; }
+    long words_[(sizeof(T) + 7) / 8];
+    bool present_;
+};
+
+template <typename T>
+optional<T> make_optional(T value) { return optional<T>(std::move(value)); }
+template <typename T, typename... Args>
+optional<T> make_optional(Args&&... args) { return optional<T>(in_place, std::forward<Args>(args)...); }
+
+}
+
+#endif

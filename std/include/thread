@@ -1,0 +1,111 @@
+// <thread>: std::thread and std::this_thread over the std's cooperative
+// scheduler (<__thread_tasks>): a thread's function runs when it is
+// joined, or earlier when something waits (yield, sleep, a condition
+// variable, a future). Detached threads run when something waits.
+#ifndef KARC_STD_THREAD
+#define KARC_STD_THREAD
+
+#include <cstddef>
+#include <exception>
+#include <utility>
+#include <__thread_tasks>
+#include <chrono>
+#include <stop_token>
+
+namespace std {
+
+template <typename F, typename... Args>
+class karc_thread_task : public karc_task {
+public:
+    Args... arguments;
+    karc_thread_task(F function, Args... args) : function_(function) {
+        arguments = args...;
+    }
+    void run() override { function_(arguments...); }
+    F function_;
+};
+
+class thread {
+public:
+    class id {
+    public:
+        id() : value_(0) {}
+        id(unsigned long value) : value_(value) {}
+        bool operator==(const id& other) const { return value_ == other.value_; }
+        bool operator!=(const id& other) const { return value_ != other.value_; }
+        bool operator<(const id& other) const { return value_ < other.value_; }
+        unsigned long value_;
+    };
+
+    thread() : task_(0) {}
+    template <typename F, typename... Args>
+    thread(F function, Args... args) : task_(new karc_thread_task<F, Args...>(function, args...)) {
+        karc_task_start(task_);
+    }
+    thread(const thread& other) : task_(other.task_) { const_cast<thread&>(other).task_ = 0; }
+    thread& operator=(const thread& other) {
+        if (task_ != 0) { terminate(); }
+        task_ = other.task_;
+        const_cast<thread&>(other).task_ = 0;
+        return *this;
+    }
+    ~thread() {
+        if (task_ != 0) { terminate(); }
+    }
+    bool joinable() const { return task_ != 0; }
+    void join() {
+        if (task_ == 0) { karc_throw_invalid_argument("thread::join: not joinable"); }
+        karc_task_finish(task_);
+        delete task_;
+        task_ = 0;
+    }
+    void detach() { task_ = 0; }
+    id get_id() const { return task_ == 0 ? id() : id(task_->id_); }
+    void swap(thread& other) {
+        karc_task* task = task_;
+        task_ = other.task_;
+        other.task_ = task;
+    }
+    static unsigned int hardware_concurrency() { return 1; }
+
+private:
+    karc_task* task_;
+};
+
+// A thread that asks its function to stop and joins when destroyed.
+class jthread {
+public:
+    jthread() {}
+    template <typename F, typename... Args>
+    jthread(F function, Args... args) : thread_(function, args...) {}
+    ~jthread() {
+        if (thread_.joinable()) {
+            stop_.request_stop();
+            thread_.join();
+        }
+    }
+    bool joinable() const { return thread_.joinable(); }
+    void join() { thread_.join(); }
+    void detach() { thread_.detach(); }
+    thread::id get_id() const { return thread_.get_id(); }
+    stop_source get_stop_source() { return stop_; }
+    stop_token get_stop_token() const { return stop_.get_token(); }
+    bool request_stop() { return stop_.request_stop(); }
+
+private:
+    thread thread_;
+    stop_source stop_;
+};
+
+namespace this_thread {
+inline thread::id get_id() { return thread::id(karc_task_current()); }
+inline void yield() { karc_task_run_one(); }
+template <typename D>
+void sleep_for(const D& duration) { while (karc_task_run_one()) {} }
+template <typename T>
+void sleep_until(const T& time) { while (karc_task_run_one()) {} }
+}
+
+}
+
+#endif

@@ -1,0 +1,73 @@
+// <system_error>: error codes, their categories and std::system_error.
+#ifndef KARC_STD_SYSTEM_ERROR
+#define KARC_STD_SYSTEM_ERROR
+
+#include <cstring>
+#include <string>
+#include <stdexcept>
+#include <__errc>
+
+namespace std {
+
+class error_category {
+public:
+    error_category() : unused_(0) {}
+    virtual ~error_category() {}
+    virtual const char* name() const { return "generic"; }
+    virtual string message(int value) const { return string(strerror(value)); }
+    bool operator==(const error_category& other) const { return this == &other; }
+    bool operator!=(const error_category& other) const { return this != &other; }
+    int unused_;
+};
+
+class karc_system_category : public error_category {
+public:
+    const char* name() const override { return "system"; }
+};
+
+inline const error_category& generic_category() {
+    static error_category category;
+    return category;
+}
+inline const error_category& system_category() {
+    static karc_system_category category;
+    return category;
+}
+
+class error_code {
+public:
+    error_code() : value_(0), category_(&system_category()) {}
+    error_code(int value, const error_category& category) : value_(value), category_(&category) {}
+    error_code(errc value) : value_((int)value), category_(&generic_category()) {}
+    int value() const { return value_; }
+    const error_category& category() const { return *category_; }
+    string message() const { return category_->message(value_); }
+    void clear() { value_ = 0; }
+    explicit operator bool() const { return value_ != 0; }
+    bool operator==(const error_code& other) const { return value_ == other.value_; }
+    bool operator!=(const error_code& other) const { return value_ != other.value_; }
+    bool operator==(errc other) const { return value_ == (int)other; }
+
+private:
+    int value_;
+    const error_category* category_;
+};
+typedef error_code error_condition;
+
+inline error_code make_error_code(errc value) { return error_code(value); }
+
+class system_error : public runtime_error {
+public:
+    system_error(error_code code) : runtime_error(code.message()), code_(code) {}
+    system_error(error_code code, const char* what) : runtime_error(string(what) + ": " + code.message()), code_(code) {}
+    system_error(error_code code, const string& what) : runtime_error(what + ": " + code.message()), code_(code) {}
+    system_error(int value, const error_category& category) : runtime_error(category.message(value)), code_(value, category) {}
+    const error_code& code() const { return code_; }
+
+private:
+    error_code code_;
+};
+
+}
+
+#endif

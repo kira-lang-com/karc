@@ -1,0 +1,179 @@
+// Inheritance. A base is a field named `__base_<Base>` at the front of the
+// class, so reaching a base member walks base fields, and converting a
+// pointer to a base (an upcast) takes the address of that field.
+
+function isBaseField(field: CppField) -> Bool {
+    return utf8Count(field.name) > 7 && utf8Slice(field.name, 0, 7) == "__base_"
+}
+// The base-field indices from `from` down to base class `to`; empty when `to`
+// is not a base of `from`.
+function basePath(state: Lowerer, from: String, to: String) -> [Int] {
+    let index = structIndex(state, nominalName(from))
+    if index < 0 { return [] }
+    let fields = state.tree.structs[index].fields
+    for i in 0..fields.count {
+        if isBaseField(fields[i]) {
+            if fields[i].declType == to { return [i] }
+            let deeper = basePath(state, fields[i].declType, to)
+            if deeper.count > 0 {
+                var path: [Int] = [i]
+                for step in deeper { path.append(step) }
+                return path
+            }
+        }
+    }
+    return []
+}
+function isBaseOf(state: Lowerer, base: String, derived: String) -> Bool {
+    return basePath(state, derived, base).count > 0
+}
+// A pointer to the `to` subobject of the `from` object `pointer` points at.
+function upcast(state: borrow mut Lowerer, pointer: KirValue, from: String, to: String) -> KirValue {
+    if from == to { return pointer }
+    var current = pointer
+    var currentType = from
+    for step in basePath(state, from, to) {
+        let record = structIndex(state, nominalName(currentType))
+        let fieldType = state.tree.structs[record].fields[step].declType
+        current = fieldPointer(state, current, currentType, step, fieldType)
+        currentType = fieldType
+    }
+    return current
+}
+// The place of member `name` of the `structType` object at `address`,
+// searching the bases; its type is "" when there is none.
+function memberPlace(state: borrow mut Lowerer, address: KirAddress, structType: String, name: String) -> Place {
+    let index = structIndex(state, nominalName(structType))
+    if index < 0 { return Place { address = address, ty = "", unsigned = false, bitOffset = 0, bitWidth = 0 } }
+    let fields = state.tree.structs[index].fields
+    let bit = bitFieldOf(state.tree, state.tree.structs[index].name, name)
+    if bit >= 0 { return bitPlace(state, address, structType, bit) }
+    let direct = fieldIndexOf(state.tree.structs[index], name)
+    if direct >= 0 {
+        let ty = fields[direct].declType
+        return Place { address = memberAddress(state, address, structType, direct, ty), ty = ty, unsigned = isUnsignedType(ty), bitOffset = 0, bitWidth = 0 }
+    }
+    for i in 0..fields.count {
+        if isBaseField(fields[i]) && memberType(state, fields[i].declType, name) != "" {
+            let baseAddress = kFieldAddr(state, address, i, fields[i].declType)
+            return memberPlace(state, baseAddress, fields[i].declType, name)
+        }
+    }
+    return Place { address = address, ty = "", unsigned = false, bitOffset = 0, bitWidth = 0 }
+}
+function memberType(state: Lowerer, structType: String, name: String) -> String {
+    let index = structIndex(state, nominalName(structType))
+    if index < 0 { return "" }
+    let direct = fieldIndexOf(state.tree.structs[index], name)
+    if direct >= 0 { return state.tree.structs[index].fields[direct].declType }
+    let bit = bitFieldOf(state.tree, state.tree.structs[index].name, name)
+    if bit >= 0 { return state.tree.bitFields[bit].declType }
+    for field in state.tree.structs[index].fields {
+        if isBaseField(field) {
+            let found = memberType(state, field.declType, name)
+            if found != "" { return found }
+        }
+    }
+    return ""
+}
+// `@init::name(args)` from a constructor's initializer list: construct base
+// `name` or member `name` of `this` in place.
+function emitMemberInit(state: borrow mut Lowerer, call: CallExpression) -> Value {
+    let name = utf8Slice(call.name, 7, utf8Count(call.name))
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    let selfSlot = lookup(state, "this")
+    let index = structIndex(state, nominalName(owner))
+    if selfSlot < 0 || index < 0 { return zeroValue(state) }
+    let object = loadLocal(state, selfSlot).reference
+    let fields = state.tree.structs[index].fields
+    let bit = bitFieldOf(state.tree, state.tree.structs[index].name, name)
+    if bit >= 0 {
+        if call.arguments.count > 0 {
+            let place = bitPlace(state, structBehindPointer(state, object, owner), owner, bit)
+            storeToPlace(state, place, emitExpression(state, call.arguments[0]))
+        }
+        return zeroValue(state)
+    }
+    for f in 0..fields.count {
+        // A base named through a template parameter arrives as its type, `%B`.
+        let isBase = isBaseField(fields[f]) && (nominalName(fields[f].declType) == name || fields[f].declType == name)
+        if isBase || fields[f].name == name {
+            let ty = fields[f].declType
+            let member = fieldPointer(state, object, owner, f, ty)
+            if isClassType(ty) {
+                emitConstruct(state, member, ty, call.arguments)
+                if isBase { setVtable(state, object, owner) }
+            } else {
+                let memberValue = Value { reference = member, boolean = false, wide = true, pointer = joinText(["*[0 x ", ty, "]"]), unsigned = false, floating = false }
+                let place = placeFromPointer(state, memberValue)
+                if call.arguments.count > 0 {
+                    kStore(state, coerceRef(state, emitExpression(state, call.arguments[0]), ty), place.address)
+                }
+            }
+            return zeroValue(state)
+        }
+    }
+    return zeroValue(state)
+}
+// The members and bases constructor `index` initializes itself.
+function explicitlyInitialized(state: Lowerer, index: Int) -> [String] {
+    var names: [String] = []
+    for statement in state.tree.functions[index].body {
+        let s = state.tree.statements[statement.value]
+        match s.kind {
+            ExprStmt(expression) -> {
+                let e = state.tree.expressions[expression.value]
+                match e.kind {
+                    Call(call) -> {
+                        if utf8Count(call.name) > 7 && utf8Slice(call.name, 0, 7) == "@init::" {
+                            names.append(utf8Slice(call.name, 7, utf8Count(call.name)))
+                        }
+                    }
+                    NumberLit -> {}
+                    FloatLit -> {}
+                    StringLit -> {}
+                    Name -> {}
+                    Neg -> {}
+                    Positive -> {}
+                    Not -> {}
+                    BitNot -> {}
+                    AddrOf -> {}
+                    Deref -> {}
+                    Sizeof -> {}
+                    Cast -> {}
+                    Field -> {}
+                    Index -> {}
+                    PreStep -> {}
+                    PostStep -> {}
+                    Binary -> {}
+                    Ternary -> {}
+                    New -> {}
+                    Delete -> {}
+                }
+            }
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            Group -> {}
+            DeclGroup -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Case -> {}
+            Default -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    return names
+}

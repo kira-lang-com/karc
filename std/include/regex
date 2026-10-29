@@ -1,0 +1,222 @@
+// <regex>: ECMAScript regular expressions with a backtracking matcher
+// (std/src/regex.cpp): literals, `.`, classes with ranges and \d \w \s,
+// anchors, \b, groups (capturing and `(?:`), alternation, greedy and lazy
+// quantifiers and backreferences. regex_match, regex_search,
+// regex_replace and sregex_iterator work over std::string.
+#ifndef KARC_STD_REGEX
+#define KARC_STD_REGEX
+
+#include <cstddef>
+#include <string>
+#include <vector>
+#include <exception>
+#include <__ostream>
+
+namespace std {
+
+namespace regex_constants {
+typedef int syntax_option_type;
+typedef int match_flag_type;
+static const int ECMAScript = 0;
+static const int icase = 1;
+static const int nosubs = 2;
+static const int optimize = 4;
+static const int match_default = 0;
+static const int format_default = 0;
+static const int format_first_only = 8;
+}
+
+class regex_error : public exception {
+public:
+    regex_error(const char* message) : message_(message) {}
+    const char* what() const override { return message_; }
+private:
+    const char* message_;
+};
+
+// One compiled node: its kind, a character or group number, repetition
+// bounds, a character class and the node sequences it contains.
+struct karc_regex_node {
+    int kind;
+    int value;
+    int least;
+    int most;
+    bool lazy;
+    bool negate;
+    vector<int> ranges;
+    vector<int> sequence;
+    vector<vector<int>> alternatives;
+};
+
+class basic_regex_karc {
+public:
+    vector<karc_regex_node> nodes;
+    vector<int> top;
+    int groups;
+    bool icase;
+};
+
+class regex {
+public:
+    typedef int flag_type;
+    static const int ECMAScript = 0;
+    static const int icase = 1;
+    static const int nosubs = 2;
+    static const int optimize = 4;
+    static const int extended = 0;
+    static const int basic = 0;
+    regex() { program_.groups = 0; program_.icase = false; }
+    regex(const char* pattern, int flags = 0) { assign(pattern, flags); }
+    regex(const string& pattern, int flags = 0) { assign(pattern.c_str(), flags); }
+    regex& assign(const char* pattern, int flags = 0);
+    regex& operator=(const char* pattern) { return assign(pattern, 0); }
+    size_t mark_count() const { return (size_t)program_.groups; }
+    const basic_regex_karc& karc_program() const { return program_; }
+
+private:
+    basic_regex_karc program_;
+};
+
+class ssub_match {
+public:
+    ssub_match() : matched(false), first(0), second(0), text_(0) {}
+    bool matched;
+    size_t first;
+    size_t second;
+    const string* text_;
+    string str() const { return matched ? text_->substr(first, second - first) : string(); }
+    operator string() const { return str(); }
+    size_t length() const { return matched ? second - first : 0; }
+    bool operator==(const char* other) const { return str() == other; }
+    bool operator==(const string& other) const { return str() == other; }
+};
+
+class smatch {
+public:
+    smatch() : ready_(false) {}
+    // A copy's sub-matches point into its own copy of the text.
+    smatch(const smatch& other) : text_(other.text_), subs_(other.subs_), ready_(other.ready_) {
+        for (size_t i = 0; i < subs_.size(); i++) { subs_[i].text_ = &text_; }
+    }
+    smatch& operator=(const smatch& other) {
+        text_ = other.text_;
+        subs_ = other.subs_;
+        ready_ = other.ready_;
+        for (size_t i = 0; i < subs_.size(); i++) { subs_[i].text_ = &text_; }
+        return *this;
+    }
+    size_t size() const { return subs_.size(); }
+    bool empty() const { return subs_.empty(); }
+    bool ready() const { return ready_; }
+    const ssub_match& operator[](size_t n) const { return subs_[n]; }
+    string str(size_t n = 0) const { return subs_[n].str(); }
+    size_t position(size_t n = 0) const { return subs_[n].first; }
+    size_t length(size_t n = 0) const { return subs_[n].length(); }
+    string prefix() const { return subs_.empty() ? string() : text_.substr(0, subs_[0].first); }
+    string suffix() const { return subs_.empty() ? string() : text_.substr(subs_[0].second); }
+    ssub_match* begin() { return subs_.begin(); }
+    ssub_match* end() { return subs_.end(); }
+    // Filled by the matcher: the searched text and each group's bounds.
+    void karc_set(const string& text, const vector<long>& bounds) {
+        text_ = text;
+        subs_.clear();
+        for (size_t i = 0; i + 1 < bounds.size(); i += 2) {
+            ssub_match sub;
+            sub.text_ = &text_;
+            sub.matched = bounds[i] >= 0;
+            sub.first = bounds[i] >= 0 ? (size_t)bounds[i] : 0;
+            sub.second = bounds[i] >= 0 ? (size_t)bounds[i + 1] : 0;
+            subs_.push_back(sub);
+        }
+        for (size_t i = 0; i < subs_.size(); i++) { subs_[i].text_ = &text_; }
+        ready_ = true;
+    }
+    string format(const char* pattern) const;
+
+private:
+    string text_;
+    vector<ssub_match> subs_;
+    bool ready_;
+};
+typedef smatch cmatch;
+inline ostream& operator<<(ostream& out, const ssub_match& sub) { return out << sub.str(); }
+
+// Matches `program` against `text` from `start`: anchored to the whole
+// rest of the text when `whole`, else the first match at or after `start`.
+// Group bounds go in `bounds` (start and end, -1 when unset).
+bool karc_regex_run(const basic_regex_karc& program, const string& text, size_t start, bool whole, vector<long>& bounds);
+
+inline bool regex_match(const string& text, smatch& match, const regex& pattern, int flags = 0) {
+    vector<long> bounds;
+    if (!karc_regex_run(pattern.karc_program(), text, 0, true, bounds)) { return false; }
+    match.karc_set(text, bounds);
+    return true;
+}
+inline bool regex_match(const string& text, const regex& pattern, int flags = 0) {
+    vector<long> bounds;
+    return karc_regex_run(pattern.karc_program(), text, 0, true, bounds);
+}
+inline bool regex_match(const char* text, const regex& pattern, int flags = 0) { return regex_match(string(text), pattern, flags); }
+inline bool regex_search(const string& text, smatch& match, const regex& pattern, int flags = 0) {
+    vector<long> bounds;
+    if (!karc_regex_run(pattern.karc_program(), text, 0, false, bounds)) { return false; }
+    match.karc_set(text, bounds);
+    return true;
+}
+inline bool regex_search(const string& text, const regex& pattern, int flags = 0) {
+    vector<long> bounds;
+    return karc_regex_run(pattern.karc_program(), text, 0, false, bounds);
+}
+inline bool regex_search(const char* text, const regex& pattern, int flags = 0) { return regex_search(string(text), pattern, flags); }
+
+string regex_replace(const string& text, const regex& pattern, const string& format, int flags = 0);
+inline string regex_replace(const string& text, const regex& pattern, const char* format, int flags = 0) {
+    return regex_replace(text, pattern, string(format), flags);
+}
+
+// Iterates the non-overlapping matches of a pattern in a string.
+class sregex_iterator {
+public:
+    sregex_iterator() : pattern_(0), text_(0), next_(0), done_(true) {}
+    sregex_iterator(const string& text, const regex& pattern) : pattern_(&pattern), text_(&text), next_(0), done_(false) { advance(); }
+    // Also takes a string's begin and end, as the standard constructor does.
+    sregex_iterator(char* first, char* last, const regex& pattern) : pattern_(&pattern), text_(0), next_(0), done_(false) {
+        owned_ = string(first, last - first);
+        text_ = &owned_;
+        advance();
+    }
+    const smatch& operator*() const { return match_; }
+    const smatch* operator->() const { return &match_; }
+    sregex_iterator& operator++() {
+        advance();
+        return *this;
+    }
+    bool operator==(const sregex_iterator& other) const { return done_ && other.done_; }
+    bool operator!=(const sregex_iterator& other) const { return !(done_ && other.done_); }
+
+private:
+    void advance() {
+        if (done_ || next_ > text_->size()) {
+            done_ = true;
+            return;
+        }
+        vector<long> bounds;
+        if (!karc_regex_run(pattern_->karc_program(), *text_, next_, false, bounds)) {
+            done_ = true;
+            return;
+        }
+        match_.karc_set(*text_, bounds);
+        next_ = (size_t)bounds[1];
+        if (bounds[1] == bounds[0]) { next_++; }
+    }
+    const regex* pattern_;
+    const string* text_;
+    string owned_;
+    size_t next_;
+    bool done_;
+    smatch match_;
+};
+
+}
+
+#endif

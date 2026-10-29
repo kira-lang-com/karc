@@ -1,0 +1,74 @@
+struct SplicedSource {
+    let text: String
+    let boundaries: [Int]
+    let removed: [Int]
+}
+
+// Translation-phase line splicing precedes tokenization, including comments
+// and literals. Keep an offset map so diagnostics still name physical bytes.
+function spliceSource(source: String) -> SplicedSource {
+    var pieces: [String] = []
+    var boundaries: [Int] = []
+    var removed: [Int] = []
+    var start = 0
+    var i = 0
+    var skipped = 0
+    let size = utf8Count(source)
+    while i + 1 < size {
+        if utf8Byte(source, i) == 92 {
+            var length = 0
+            if utf8Byte(source, i + 1) == 10 { length = 2 }
+            if i + 2 < size && utf8Byte(source, i + 1) == 13 && utf8Byte(source, i + 2) == 10 { length = 3 }
+            if length > 0 {
+                pieces.append(utf8Slice(source, start, i))
+                boundaries.append(i - skipped)
+                skipped = skipped + length
+                removed.append(skipped)
+                i = i + length
+                start = i
+                continue
+            }
+        }
+        i = i + 1
+    }
+    if boundaries.count == 0 { return SplicedSource { text = source, boundaries = [], removed = [] } }
+    pieces.append(utf8Slice(source, start, size))
+    return SplicedSource { text = joinText(pieces), boundaries = boundaries, removed = removed }
+}
+
+function physicalOffset(source: SplicedSource, offset: Int, end: Bool) -> Int {
+    var low = 0
+    var high = source.boundaries.count
+    while low < high {
+        let middle = (low + high) / 2
+        let boundary = source.boundaries[middle]
+        if boundary < offset || (boundary == offset && !end) { low = middle + 1 }
+        else { high = middle }
+    }
+    if low == 0 { return offset }
+    return offset + source.removed[low - 1]
+}
+
+function lex(source: String) -> Lexed {
+    let spliced = spliceSource(source)
+    let result = lexUnspliced(spliced.text)
+    if spliced.boundaries.count == 0 { return result }
+    var tokens: [Token] = []
+    for t in result.tokens {
+        let start = physicalOffset(spliced, t.start, false)
+        var end = physicalOffset(spliced, t.end, true)
+        if t.start == t.end { end = start }
+        var text = t.text
+        var spelling = t.spelling
+        // C++ restores translation-phase changes inside raw string literals.
+        if t.kind == .Str && end > start + 2 && utf8Byte(source, start) == 82 && utf8Byte(source, start + 1) == 34 {
+            var opening = start + 2
+            while opening < end && utf8Byte(source, opening) != 40 { opening = opening + 1 }
+            let delimiterSize = opening - start - 2
+            text = utf8Slice(source, opening + 1, end - delimiterSize - 2)
+            spelling = utf8Slice(source, start, end)
+        }
+        tokens.append(Token { space = t.space, spelling = spelling, kind = t.kind, text = text, number = t.number, start = start, end = end, line = t.line })
+    }
+    return Lexed { tokens = tokens, error = result.error, errorOffset = physicalOffset(spliced, result.errorOffset, false) }
+}

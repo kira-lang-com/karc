@@ -1,0 +1,174 @@
+// Control-flow statement parsing.
+
+function parseTryStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    let body = controlBody(p)
+    var handlers: [CatchStatement] = []
+    while peekKind(p) == .Ident && peek(p).text == "catch" && p.error == "" {
+        let handlerStart = peek(p).start
+        consume(p)
+        expect(p, .LParen)
+        let parameter = parseParameter(p)
+        expect(p, .RParen)
+        var caught = parameter.declType
+        var reference = 0
+        if parameter.name == "..." { caught = "" }
+        if parameter.reference { reference = -1 }
+        let handlerBody = controlBody(p)
+        handlers.append(CatchStatement { name = parameter.name, declType = caught, reference = reference, body = handlerBody, span = spanFrom(p, handlerStart) })
+    }
+    return addStatement(p, sTry(body, handlers, spanFrom(p, start)))
+}
+
+function parseWhileStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    expect(p, .LParen)
+    var initializer: Optional<LocalDeclaration> = .None
+    var cond = noExpr()
+    if startsDeclaration(p) {
+        let baseType = parseBaseType(p)
+        var initType = baseType
+        while peekKind(p) == .Star {
+            consume(p)
+            initType = joinText(["*[0 x ", initType, "]"])
+        }
+        let initName = expect(p, .Ident).text
+        expect(p, .Assign)
+        let initValue = expression(p, 0)
+        initializer = .Some(LocalDeclaration { name = initName, declType = initType, reference = 0, initializer = initValue })
+        cond = eName(p, initName, spanFrom(p, start))
+    } else {
+        cond = fullExpression(p)
+    }
+    expect(p, .RParen)
+    let body = controlBody(p)
+    return addStatement(p, sWhile(cond, initializer, body, spanFrom(p, start)))
+}
+
+function parseDoWhileStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    let body = controlBody(p)
+    expect(p, .KwWhile)
+    expect(p, .LParen)
+    let cond = fullExpression(p)
+    expect(p, .RParen)
+    expect(p, .Semicolon)
+    return addStatement(p, sDoWhile(cond, body, spanFrom(p, start)))
+}
+
+function parseForStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    expect(p, .LParen)
+    if isRangeFor(p) {
+        return rangeFor(p, start)
+    }
+    var initIndex = noStmt()
+    if peekKind(p) == .Semicolon {
+        consume(p)
+        let initExpr = eNumber(p, 0, spanFrom(p, start))
+        initIndex = addStatement(p, sExpr(initExpr, spanFrom(p, start)))
+    } else {
+        initIndex = statement(p)
+    }
+    var cond = noExpr()
+    if peekKind(p) == .Semicolon {
+        cond = eNumber(p, 1, spanFrom(p, start))
+    } else {
+        cond = fullExpression(p)
+    }
+    expect(p, .Semicolon)
+    var stepIndex = noStmt()
+    if peekKind(p) == .RParen {
+        let stepExpr = eNumber(p, 0, spanFrom(p, start))
+        stepIndex = addStatement(p, sExpr(stepExpr, spanFrom(p, start)))
+    } else {
+        stepIndex = simpleStatement(p, peek(p).start)
+        if peekKind(p) == .Comma {
+            // `i++, j--`: the steps in order.
+            var steps: [StmtId] = [stepIndex]
+            while peekKind(p) == .Comma && p.error == "" {
+                consume(p)
+                steps.append(simpleStatement(p, peek(p).start))
+            }
+            stepIndex = addStatement(p, sGroup(steps, spanFrom(p, start)))
+        }
+    }
+    expect(p, .RParen)
+    let body = controlBody(p)
+    return addStatement(p, sFor(cond, body, [initIndex, stepIndex], spanFrom(p, start)))
+}
+
+function parseIfStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    // `if constexpr`: with a constant condition only the branch taken is
+    // kept, so the other may be code this instance cannot compile.
+    var compileTime = false
+    if peekKind(p) == .Ident && peek(p).text == "constexpr" {
+        consume(p)
+        compileTime = true
+    }
+    expect(p, .LParen)
+    var initializer: Optional<LocalDeclaration> = .None
+    var cond = noExpr()
+    if startsDeclaration(p) {
+        let initType = parseTypeToken(p)
+        let initName = expect(p, .Ident).text
+        if peekKind(p) == .Assign {
+            consume(p)
+            let initValue = expression(p, 0)
+            initializer = .Some(LocalDeclaration { name = initName, declType = initType, reference = 0, initializer = initValue })
+            if peekKind(p) == .Semicolon {
+                consume(p)
+                cond = fullExpression(p)
+            } else {
+                cond = eNumber(p, 1, spanFrom(p, start))
+            }
+        }
+    }
+    if cond.value < 0 { cond = fullExpression(p) }
+    expect(p, .RParen)
+    let body = controlBody(p)
+    var elseBody: [StmtId] = []
+    if peekKind(p) == .KwElse {
+        consume(p)
+        if peekKind(p) == .KwIf {
+            elseBody.append(statement(p))
+        } else if peekKind(p) == .LBrace {
+            elseBody = block(p)
+        } else {
+            elseBody = [statement(p)]
+        }
+    }
+    if compileTime && initializer.isNone() && isConstant(p, cond) {
+        var taken = elseBody
+        if constantExpression(p, cond) != 0 { taken = body }
+        return addStatement(p, sGroup(taken, spanFrom(p, start)))
+    }
+    return addStatement(p, sIf(cond, initializer, body, elseBody, spanFrom(p, start)))
+}
+
+function parseSwitchStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    consume(p)
+    expect(p, .LParen)
+    let scrutinee = fullExpression(p)
+    expect(p, .RParen)
+    expect(p, .LBrace)
+    var body: [StmtId] = []
+    while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+        let markerStart = peek(p).start
+        if peekKind(p) == .KwCase {
+            consume(p)
+            let caseValue = expression(p, 0)
+            expect(p, .Colon)
+            body.append(addStatement(p, sCase(caseValue, spanFrom(p, markerStart))))
+        } else if peekKind(p) == .KwDefault {
+            consume(p)
+            expect(p, .Colon)
+            body.append(addStatement(p, sDefault(spanFrom(p, markerStart))))
+        } else {
+            body.append(statement(p))
+        }
+    }
+    expect(p, .RBrace)
+    return addStatement(p, sSwitch(scrutinee, body, spanFrom(p, start)))
+}

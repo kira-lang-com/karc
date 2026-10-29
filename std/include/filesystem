@@ -1,0 +1,352 @@
+// <filesystem>: paths, file status and directory iteration over POSIX
+// (std/src/filesystem.cpp). A directory iterator reads the whole directory
+// when constructed.
+#ifndef KARC_STD_FILESYSTEM
+#define KARC_STD_FILESYSTEM
+
+#include <cstddef>
+#include <cstdio>
+#include <string>
+#include <vector>
+#include <exception>
+#include <algorithm>
+#include <__ostream>
+
+int karc_fs_status(const char* path, int follow, long* size, long* modified);
+void* karc_fs_open_directory(const char* path);
+int karc_fs_close_directory(void* directory);
+int karc_fs_next_entry(void* directory, char* name, int room);
+int karc_fs_make_directory(const char* path);
+int karc_fs_remove_directory(const char* path);
+int karc_fs_remove_file(const char* path);
+int karc_fs_rename(const char* from, const char* to);
+int karc_fs_current(char* buffer, int room);
+int karc_fs_change_directory(const char* path);
+int karc_fs_resolve(const char* path, char* buffer);
+
+namespace std {
+namespace filesystem {
+
+class path {
+public:
+    typedef char value_type;
+    static const char preferred_separator = '/';
+
+    path() {}
+    path(const char* text) : text_(text) {}
+    path(const string& text) : text_(text) {}
+    path(const path& other) : text_(other.text_) {}
+    path& operator=(const path& other) {
+        text_ = other.text_;
+        return *this;
+    }
+    path& operator=(const char* text) {
+        text_ = text;
+        return *this;
+    }
+    path& operator=(const string& text) {
+        text_ = text;
+        return *this;
+    }
+
+    const string& string() const { return text_; }
+    operator std::string() const { return text_; }
+    const string& native() const { return text_; }
+    const char* c_str() const { return text_.c_str(); }
+    std::string generic_string() const { return text_; }
+    std::string u8string() const { return text_; }
+    bool empty() const { return text_.empty(); }
+    void clear() { text_.clear(); }
+
+    path& operator/=(const path& more) {
+        if (more.is_absolute()) {
+            text_ = more.text_;
+        } else if (!text_.empty() && text_.back() != '/') {
+            text_ += '/';
+            text_ += more.text_;
+        } else {
+            text_ += more.text_;
+        }
+        return *this;
+    }
+    path& append(const path& more) { return *this /= more; }
+    path& operator+=(const path& more) {
+        text_ += more.text_;
+        return *this;
+    }
+    path& concat(const path& more) { return *this += more; }
+
+    path root_path() const { return is_absolute() ? path("/") : path(); }
+    path filename() const {
+        size_t slash = text_.rfind('/');
+        if (slash == std::string::npos) { return path(text_); }
+        return path(text_.substr(slash + 1));
+    }
+    path parent_path() const {
+        size_t slash = text_.rfind('/');
+        if (slash == std::string::npos) { return path(); }
+        if (slash == 0) { return path("/"); }
+        return path(text_.substr(0, slash));
+    }
+    path stem() const {
+        std::string name = filename().text_;
+        size_t dot = name.rfind('.');
+        if (dot == std::string::npos || dot == 0 || name == "..") { return path(name); }
+        return path(name.substr(0, dot));
+    }
+    path extension() const {
+        std::string name = filename().text_;
+        size_t dot = name.rfind('.');
+        if (dot == std::string::npos || dot == 0 || name == "..") { return path(); }
+        return path(name.substr(dot));
+    }
+    bool has_filename() const { return !filename().empty(); }
+    bool has_extension() const { return !extension().empty(); }
+    bool has_stem() const { return !stem().empty(); }
+    bool has_parent_path() const { return !parent_path().empty(); }
+    bool is_absolute() const { return !text_.empty() && text_[0] == '/'; }
+    bool is_relative() const { return !is_absolute(); }
+    path& replace_extension(const path& replacement = path()) {
+        std::string ext = extension().text_;
+        if (!ext.empty()) { text_.resize(text_.size() - ext.size()); }
+        if (!replacement.empty()) {
+            if (replacement.text_[0] != '.') { text_ += '.'; }
+            text_ += replacement.text_;
+        }
+        return *this;
+    }
+    path& replace_filename(const path& replacement) {
+        remove_filename();
+        return *this /= replacement;
+    }
+    path& remove_filename() {
+        size_t slash = text_.rfind('/');
+        if (slash == std::string::npos) {
+            text_.clear();
+        } else {
+            text_.resize(slash + 1);
+        }
+        return *this;
+    }
+    // `a/./b/../c` as `a/c`.
+    path lexically_normal() const {
+        std::vector<std::string> parts;
+        size_t start = 0;
+        while (start <= text_.size()) {
+            size_t slash = text_.find('/', start);
+            if (slash == std::string::npos) { slash = text_.size(); }
+            std::string part = text_.substr(start, slash - start);
+            if (part == "..") {
+                if (!parts.empty() && parts.back() != "..") { parts.pop_back(); } else if (!is_absolute()) { parts.push_back(part); }
+            } else if (!part.empty() && part != ".") {
+                parts.push_back(part);
+            }
+            start = slash + 1;
+        }
+        std::string out = is_absolute() ? "/" : "";
+        for (size_t i = 0; i < parts.size(); i++) {
+            if (i > 0) { out += '/'; }
+            out += parts[i];
+        }
+        if (out.empty()) { out = "."; }
+        return path(out);
+    }
+    int compare(const path& other) const { return text_.compare(other.text_); }
+    bool operator==(const path& other) const { return text_ == other.text_; }
+    bool operator!=(const path& other) const { return !(text_ == other.text_); }
+    bool operator<(const path& other) const { return text_ < other.text_; }
+
+private:
+    std::string text_;
+};
+
+inline path operator/(const path& a, const path& b) {
+    path joined(a);
+    joined /= b;
+    return joined;
+}
+
+class filesystem_error : public exception {
+public:
+    filesystem_error(const char* what, const path& subject) : message_(what), path1_(subject) {
+        message_ += ": ";
+        message_ += subject.string();
+    }
+    const char* what() const override { return message_.c_str(); }
+    const path& path1() const { return path1_; }
+
+private:
+    std::string message_;
+    path path1_;
+};
+
+enum class file_type { none, not_found, regular, directory, symlink, block, character, fifo, socket, unknown };
+
+class file_status {
+public:
+    file_status() : type_(file_type::none) {}
+    file_status(file_type type) : type_(type) {}
+    file_type type() const { return type_; }
+
+private:
+    file_type type_;
+};
+
+inline file_type karc_file_type(const path& subject, bool follow) {
+    long size = 0;
+    long modified = 0;
+    int kind = karc_fs_status(subject.c_str(), follow ? 1 : 0, &size, &modified);
+    if (kind == 0) { return file_type::not_found; }
+    if (kind == 1) { return file_type::regular; }
+    if (kind == 2) { return file_type::directory; }
+    if (kind == 3) { return file_type::symlink; }
+    return file_type::unknown;
+}
+inline file_status status(const path& subject) { return file_status(karc_file_type(subject, true)); }
+inline file_status symlink_status(const path& subject) { return file_status(karc_file_type(subject, false)); }
+inline bool exists(const path& subject) { return karc_file_type(subject, true) != file_type::not_found; }
+inline bool exists(file_status s) { return s.type() != file_type::not_found && s.type() != file_type::none; }
+inline bool is_regular_file(const path& subject) { return karc_file_type(subject, true) == file_type::regular; }
+inline bool is_directory(const path& subject) { return karc_file_type(subject, true) == file_type::directory; }
+inline bool is_symlink(const path& subject) { return karc_file_type(subject, false) == file_type::symlink; }
+inline bool is_regular_file(file_status s) { return s.type() == file_type::regular; }
+inline bool is_directory(file_status s) { return s.type() == file_type::directory; }
+
+inline unsigned long file_size(const path& subject) {
+    long size = 0;
+    long modified = 0;
+    if (karc_fs_status(subject.c_str(), 1, &size, &modified) != 1) { throw filesystem_error("file_size", subject); }
+    return (unsigned long)size;
+}
+
+class directory_entry {
+public:
+    directory_entry() {}
+    directory_entry(const path& where) : path_(where) {}
+    const path& path() const { return path_; }
+    operator const std::filesystem::path&() const { return path_; }
+    bool exists() const { return std::filesystem::exists(path_); }
+    bool is_regular_file() const { return std::filesystem::is_regular_file(path_); }
+    bool is_directory() const { return std::filesystem::is_directory(path_); }
+    unsigned long file_size() const { return std::filesystem::file_size(path_); }
+    bool operator<(const directory_entry& other) const { return path_ < other.path_; }
+    bool operator==(const directory_entry& other) const { return path_ == other.path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+inline void karc_list_directory(const path& where, bool recursive, vector<directory_entry>& out) {
+    void* directory = karc_fs_open_directory(where.c_str());
+    if (directory == 0) { throw filesystem_error("directory_iterator", where); }
+    char name[1024];
+    while (karc_fs_next_entry(directory, name, 1024)) {
+        path child = where / path(name);
+        out.push_back(directory_entry(child));
+        if (recursive && karc_file_type(child, false) == file_type::directory) { karc_list_directory(child, true, out); }
+    }
+    karc_fs_close_directory(directory);
+}
+
+class directory_iterator {
+public:
+    directory_iterator() : index_(0) {}
+    directory_iterator(const path& where) : index_(0) { karc_list_directory(where, false, entries_); }
+    directory_entry* begin() { return entries_.begin(); }
+    directory_entry* end() { return entries_.end(); }
+
+protected:
+    vector<directory_entry> entries_;
+    size_t index_;
+};
+
+class recursive_directory_iterator : public directory_iterator {
+public:
+    recursive_directory_iterator(const path& where) { karc_list_directory(where, true, entries_); }
+};
+
+inline bool create_directory(const path& where) {
+    if (is_directory(where)) { return false; }
+    if (karc_fs_make_directory(where.c_str()) != 0) { throw filesystem_error("create_directory", where); }
+    return true;
+}
+inline bool create_directories(const path& where) {
+    if (where.empty() || is_directory(where)) { return false; }
+    path parent = where.parent_path();
+    if (!parent.empty() && !exists(parent)) { create_directories(parent); }
+    return create_directory(where);
+}
+inline bool remove(const path& subject) {
+    file_type type = karc_file_type(subject, false);
+    if (type == file_type::not_found) { return false; }
+    int result = type == file_type::directory ? karc_fs_remove_directory(subject.c_str()) : karc_fs_remove_file(subject.c_str());
+    if (result != 0) { throw filesystem_error("remove", subject); }
+    return true;
+}
+inline unsigned long remove_all(const path& subject) {
+    file_type type = karc_file_type(subject, false);
+    if (type == file_type::not_found) { return 0; }
+    unsigned long count = 0;
+    if (type == file_type::directory) {
+        vector<directory_entry> children;
+        karc_list_directory(subject, false, children);
+        for (size_t i = 0; i < children.size(); i++) { count += remove_all(children[i].path()); }
+    }
+    remove(subject);
+    return count + 1;
+}
+inline void rename(const path& from, const path& to) {
+    if (karc_fs_rename(from.c_str(), to.c_str()) != 0) { throw filesystem_error("rename", from); }
+}
+inline path current_path() {
+    char buffer[4096];
+    if (!karc_fs_current(buffer, 4096)) { throw filesystem_error("current_path", path()); }
+    return path(buffer);
+}
+inline void current_path(const path& where) {
+    if (karc_fs_change_directory(where.c_str()) != 0) { throw filesystem_error("current_path", where); }
+}
+inline path absolute(const path& subject) {
+    if (subject.is_absolute()) { return subject; }
+    return current_path() / subject;
+}
+inline path canonical(const path& subject) {
+    char buffer[4096];
+    if (!karc_fs_resolve(subject.c_str(), buffer)) { throw filesystem_error("canonical", subject); }
+    return path(buffer);
+}
+inline path temp_directory_path() { return path("/tmp"); }
+inline bool copy_file(const path& from, const path& to) {
+    FILE* in = fopen(from.c_str(), "r");
+    if (in == 0) { throw filesystem_error("copy_file", from); }
+    FILE* out = fopen(to.c_str(), "w");
+    if (out == 0) {
+        fclose(in);
+        throw filesystem_error("copy_file", to);
+    }
+    char buffer[4096];
+    size_t got = fread(buffer, 1, 4096, in);
+    while (got > 0) {
+        fwrite(buffer, 1, got, out);
+        got = fread(buffer, 1, 4096, in);
+    }
+    fclose(in);
+    fclose(out);
+    return true;
+}
+
+// A path prints quoted, as std::quoted does.
+inline ostream& operator<<(ostream& out, const path& where) {
+    std::string text = "\"";
+    for (char c : where.string()) {
+        if (c == '"' || c == '\\') { text += '\\'; }
+        text += c;
+    }
+    text += '"';
+    return out << text;
+}
+
+}
+}
+
+#endif

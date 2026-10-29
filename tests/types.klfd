@@ -1,0 +1,78 @@
+import Testing
+
+@Test
+function acceptsCInputWithoutCppNewAndDeleteKeywords() {
+    expect!(runFiles([
+        TestSource { name = "main.c", text = """
+            int callback(int);
+            int main(void) {
+                int new = 19;
+                int delete = 23;
+                return callback(new + delete) == 42 && sizeof('a') == sizeof(int);
+            }
+            """ },
+        TestSource { name = "callback.c", text = "int callback(int value) { return value; }" }
+    ]) == 1)
+}
+
+@Test
+function acceptsCallbacksReturningFunctionPointers() {
+    expect!(run("int main() { return 6 & 3; }") == 2)
+    expect!(run("int main() { return 6 | 1; }") == 7)
+    expect!(run("int main() { return 6 ^ 3; }") == 5)
+    expect!(run("int main() { return 1 << 4; }") == 16)
+    expect!(run("int main() { return 240 >> 4; }") == 15)
+    expect!(run("int main() { return ~5 & 15; }") == 10)
+    expect!(run("int main() { return 1 | 2 & 2; }") == 3)
+    expect!(run("int main() { return 1 + 1 << 2; }") == 8)
+    expect!(run("int main() { int x = 0xF0; return (x >> 4) & 0xF; }") == 15)
+}
+
+@Test
+function compilesCasts() {
+    expect!(run("int main() { return (int)'A'; }") == 65)
+    expect!(run("int main() { return (char)300; }") == 44)
+    expect!(run("int main() { long n = 5; return (int)(n * 3); }") == 15)
+    expect!(run("int main() { int x = 7; return (long)x + 1; }") == 8)
+    expect!(run("""
+        int fill(char* p) { p[0] = 65; return 0; } int main() { char b[4]; fill((char*)b); return b[0]; }
+        """) == 65)
+    expect!(run("int main() { char* p = (char*)0; return p == 0 ? 1 : 0; }") == 1)
+    expect!(run("typedef int myint; int main() { char c = 66; return (myint)c; }") == 66)
+}
+
+@Test
+function compilesLargeIntegerLiterals() {
+    expect!(run("int main() { long x = 5000000000; return x / 1000000000; }") == 5)
+    expect!(run("int main() { long a = 10000000000; long b = a / 4; return b / 1000000000; }") == 2)
+    expect!(run("long big() { return 9000000000; } int main() { long v = big(); return v / 3000000000; }") == 3)
+    expect!(run("int main() { long m = 0x100000000; return m / 0x80000000; }") == 2)
+}
+
+@Test
+function compilesTypedTernary() {
+    expect!(run("""
+        int slen(char* s) { int n = 0; while (s[n]) { n = n + 1; } return n; } char* pick(int c) { return c ? "yes" : "no"; } int main() { return slen(pick(1)) * 10 + slen(pick(0)); }
+        """) == 32)
+    expect!(run("""
+        int main() { long a = 10000000000; long b = 5; long r = a > b ? a : b; return r / 1000000000; }
+        """) == 10)
+    expect!(run("int abs(int x) { return x < 0 ? 0 - x : x; } int main() { return abs(0 - 42); }") == 42)
+}
+
+@Test
+function compilesUnsignedIntegers() {
+    expect!(run("int main() { unsigned char c = 200; return c; }") == 200)
+    expect!(run("int main() { unsigned char c = 200; int x = c; return x; }") == 200)
+    expect!(run("int main() { unsigned char a = 250; unsigned char b = 10; return a + b; }") == 260)
+    expect!(run("int main() { unsigned char a = 250; a = a + 10; return a; }") == 4)
+    expect!(run("""
+        int first(unsigned char* p) { return p[0]; } int main() { unsigned char b[1]; b[0] = 250; return first(b); }
+        """) == 250)
+    expect!(run("int main() { unsigned int a = 17; unsigned int b = 5; return a / b; }") == 3)
+    expect!(run("int main() { unsigned int a = 17; unsigned int b = 5; return a % b; }") == 2)
+    expect!(run("""
+        unsigned int add(unsigned int a, unsigned int b) { return a + b; } int main() { return add(20, 22); }
+        """) == 42)
+    expect!(run("int main() { signed int x = 0 - 3; return x; }") == 4294967293)
+}

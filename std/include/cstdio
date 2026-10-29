@@ -1,0 +1,92 @@
+// <cstdio>: formatted and character I/O on the standard streams and on
+// files opened with fopen, and the scanf family.
+#ifndef KARC_STD_CSTDIO
+#define KARC_STD_CSTDIO
+
+#include <cstddef>
+#include <cstdarg>
+
+#define EOF (-1)
+
+// A stream: its descriptor, end-of-file and error flags, and one pushed-back
+// character (-1 for none).
+struct FILE {
+    int descriptor;
+    int eof;
+    int error;
+    int pushed;
+};
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#define BUFSIZ 1024
+#define FILENAME_MAX 4096
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+typedef long fpos_t;
+
+FILE* karc_stream(int descriptor);
+#define stdin karc_stream(0)
+#define stdout karc_stream(1)
+#define stderr karc_stream(2)
+
+int putchar(int c);
+int puts(const char* s);
+int getchar();
+int fputc(int c, FILE* stream);
+int putc(int c, FILE* stream);
+int fputs(const char* s, FILE* stream);
+int fgetc(FILE* stream);
+char* fgets(char* buffer, int size, FILE* stream);
+int fflush(FILE* stream);
+int ungetc(int c, FILE* stream);
+int getc(FILE* stream);
+
+FILE* fopen(const char* path, const char* mode);
+FILE* freopen(const char* path, const char* mode, FILE* stream);
+int fclose(FILE* stream);
+size_t fread(void* buffer, size_t size, size_t count, FILE* stream);
+size_t fwrite(const void* buffer, size_t size, size_t count, FILE* stream);
+int fseek(FILE* stream, long offset, int whence);
+long ftell(FILE* stream);
+void rewind(FILE* stream);
+int fgetpos(FILE* stream, fpos_t* position);
+int fsetpos(FILE* stream, const fpos_t* position);
+int feof(FILE* stream);
+int ferror(FILE* stream);
+void clearerr(FILE* stream);
+int fileno(FILE* stream);
+int setvbuf(FILE* stream, char* buffer, int mode, size_t size);
+void setbuf(FILE* stream, char* buffer);
+int remove(const char* path);
+int rename(const char* from, const char* to);
+void perror(const char* message);
+
+int scanf(const char* format, ...);
+int fscanf(FILE* stream, const char* format, ...);
+int sscanf(const char* text, const char* format, ...);
+int vscanf(const char* format, va_list arguments);
+int vfscanf(FILE* stream, const char* format, va_list arguments);
+int vsscanf(const char* text, const char* format, va_list arguments);
+
+int printf(const char* format, ...);
+// Empties the standard output buffer; main's return calls it.
+extern "C" void karc_output_flush();
+int fprintf(FILE* stream, const char* format, ...);
+int sprintf(char* buffer, const char* format, ...);
+int snprintf(char* buffer, size_t size, const char* format, ...);
+int vprintf(const char* format, va_list arguments);
+int vfprintf(FILE* stream, const char* format, va_list arguments);
+int vsprintf(char* buffer, const char* format, va_list arguments);
+int vsnprintf(char* buffer, size_t size, const char* format, va_list arguments);
+
+// Unformatted helpers kept from before `printf` existed.
+int print_string(const char* s);
+int print_int(long value);
+int print_unsigned(unsigned long value);
+int print_hex(unsigned long value);
+int eprint_string(const char* s);
+
+#endif

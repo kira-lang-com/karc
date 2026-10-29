@@ -1,0 +1,29 @@
+// `T<args>{...}` in an expression: a temporary of the class instance. A
+// class with an initializer_list constructor takes the elements as one list,
+// as `T x{...}` does; any other class takes them as constructor arguments.
+
+function bracedTemporary(p: borrow mut Parser, instance: String, start: Int) -> ExprId {
+    let open = peek(p).start
+    consume(p)
+    var elements: [ExprId] = []
+    while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+        elements.append(expression(p, 0))
+        if peekKind(p) == .Comma { consume(p) }
+    }
+    expect(p, .RBrace)
+    var arguments = elements
+    if hasListConstructor(p, instance) {
+        arguments = [eCall(p, "@braced", elements, spanFrom(p, open), spanFrom(p, open), noExpr())]
+    }
+    return eCall(p, instance, arguments, spanFrom(p, start), spanFrom(p, start), noExpr())
+}
+function hasListConstructor(p: borrow Parser, instance: String) -> Bool {
+    let prefix = joinText([instance, "::"])
+    let length = utf8Count(prefix)
+    for fn in p.tree.functions {
+        if utf8Count(fn.name) > length && utf8Slice(fn.name, 0, length) == prefix && fn.parameters.count == 1 {
+            if isInitializerList(parameterClassOf(fn.parameters[0])) { return true }
+        }
+    }
+    return false
+}

@@ -1,0 +1,98 @@
+// The elaboration phase: the unit-wide rules the per-function lowering assumes
+// hold. One definition per name, an `int main()` that takes no parameters, and
+// unique globals, reported from the phase that sees the whole unit before
+// anything is lowered.
+//
+function functionKey(fn: CppFunction) -> String {
+    var key = fn.name
+    key = joinText([key, "("])
+    for parameter in fn.parameters {
+        if parameter.rvalue && parameter.reference {
+            key = joinText([key, "&&"])
+        } else if parameter.reference {
+            key = joinText([key, "&"])
+        }
+        key = joinText([key, parameter.declType, ","])
+    }
+    if fn.isConst { return joinText([key, ") const"]) }
+    return joinText([key, ")"])
+}
+
+function checkTree(tree: CppTree) {
+    // Definitions hashed by key: each bucket's first, and each one's next.
+    var heads: [Int] = []
+    for _ in 0..declarationBucketCount() { heads.append(-1) }
+    var next: [Int] = []
+    var keys: [String] = []
+    for index in 0..tree.functions.count {
+        let fn = tree.functions[index]
+        var key = ""
+        if !fn.isProto {
+            key = functionKey(fn)
+            let bucket = sourceHash(key) % declarationBucketCount()
+            var other = heads[bucket]
+            while other >= 0 {
+                if keys[other] == key {
+                    reportAt(diagDuplicateFunction(), fn.nameSpan.start, diagnosticOffset(fn.nameSpan.start), diagnosticOffset(fn.nameSpan.end))
+                }
+                other = next[other]
+            }
+            next.append(heads[bucket])
+            heads[bucket] = index
+        } else {
+            next.append(-1)
+        }
+        keys.append(key)
+        if isMainName(fn.name) && !fn.isProto {
+            // `main()`, `main(argc, argv)` or `main(argc, argv, envp)`.
+            if fn.parameters.count == 1 || fn.parameters.count > 3 {
+                reportAt(diagInvalidMainParameters(), fn.nameSpan.start, diagnosticOffset(fn.nameSpan.start), diagnosticOffset(fn.nameSpan.end))
+            }
+        }
+    }
+    var globalHeads: [Int] = []
+    for _ in 0..declarationBucketCount() { globalHeads.append(-1) }
+    var globalNext: [Int] = []
+    for gi in 0..tree.globals.count {
+        let g = tree.globals[gi]
+        let bucket = sourceHash(g.name) % declarationBucketCount()
+        var earlier = globalHeads[bucket]
+        while earlier >= 0 {
+            if tree.globals[earlier].name == g.name {
+                reportAt(diagDuplicateGlobal(), g.nameSpan.start, diagnosticOffset(g.nameSpan.start), diagnosticOffset(g.nameSpan.end))
+            }
+            earlier = globalNext[earlier]
+        }
+        globalNext.append(globalHeads[bucket])
+        globalHeads[bucket] = gi
+    }
+}
+
+// Whether this compilation links an executable. As with clang, a library or
+// an intermediate output has no `main` to require.
+function linksProgram(session: Session) -> Bool {
+    match session.flag("emit") {
+        String(value) -> { return value == "bin" }
+        Boolean(value) -> { return value }
+        Integer(value) -> { return value != 0 }
+    }
+}
+
+// The program-wide main check runs in `units`, before per-unit parse calls.
+// Lexing is enough here because parse diagnostics belong to the parse phase.
+function checkProgram(session: Session, inputs: [SourceFile]) {
+    if !linksProgram(session) { return }
+    for file in inputs {
+        let lexed = lex(fileText(session, file))
+        if lexed.error != "" {
+            return
+        }
+        for i in 0..(lexed.tokens.count - 1) {
+            if lexed.tokens[i].kind == .Ident && lexed.tokens[i].text == "main" &&
+                lexed.tokens[i + 1].kind == .LParen {
+                return
+            }
+        }
+    }
+    diag_error_in(inputs[0], diagMissingMain(), 0, 0)
+}

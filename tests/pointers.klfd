@@ -1,0 +1,26 @@
+import Testing
+
+@Test
+function compilesFunctionPointers() {
+    expect!(run("""
+        typedef int (*binop)(int, int); int add(int a, int b) { return a + b; } int mul(int a, int b) { return a * b; } int apply(binop op, int x, int y) { return op(x, y); } int main() { return apply(add, 20, 22) + apply(mul, 3, 4); }
+        """) == 54)
+    expect!(run("""
+        typedef int (*fn)(int); int dbl(int x) { return x * 2; } int reduce(fn f, int n) { int s = 0; int i = 1; while (i <= n) { s = s + f(i); i = i + 1; } return s; } int main() { return reduce(dbl, 4); }
+        """) == 20)
+}
+
+@Test
+function compilesScalarPointers() {
+    expect!(run("""
+        int swap(int* a, int* b) { int t = *a; *a = *b; *b = t; return 0; } int main() { int x = 3; int y = 7; swap(&x, &y); return x * 10 + y; }
+        """) == 73)
+    expect!(run("int deref(int* p) { return *p; } int main() { int x = 42; return deref(&x); }") == 42)
+    expect!(run("""
+        int setTo(int* p, int v) { *p = v; return 0; } int main() { int x = 0; setTo(&x, 99); return x; }
+        """) == 99)
+    expect!(run("int fetch(char* p) { return *p; } int main() { char c = 65; return fetch(&c); }") == 65)
+    expect!(run("""
+        int bump(int* p) { *p = *p + 1; return 0; } int main() { int x = 41; bump(&x); return x; }
+        """) == 42)
+}

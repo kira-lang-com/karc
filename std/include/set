@@ -1,0 +1,204 @@
+// <set>: std::set and std::multiset over an AVL tree (<__tree>).
+#ifndef KARC_STD_SET
+#define KARC_STD_SET
+
+#include <exception>
+#include <__tree>
+
+namespace std {
+
+template <typename T, typename C = less<T>, typename A = allocator<T>>
+class set {
+public:
+    typedef A allocator_type;
+    typedef T key_type;
+    typedef T value_type;
+    typedef C key_compare;
+    typedef size_t size_type;
+    typedef karc_tree_iterator<T> iterator;
+    typedef karc_tree_iterator<T> const_iterator;
+
+    set() {}
+    explicit set(const C& less) : tree_(less) {}
+    explicit set(const A& alloc) : tree_(C(), alloc) {}
+    set(const C& less, const A& alloc) : tree_(less, alloc) {}
+    A get_allocator() const { return tree_.get_allocator(); }
+    set(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { tree_.insertUnique(*item); }
+    }
+    template <typename I>
+    set(I first, I last) {
+        for (; first != last; ++first) { tree_.insertUnique(*first); }
+    }
+
+    size_t size() const { return tree_.size(); }
+    bool empty() const { return tree_.empty(); }
+    size_t max_size() const { return 1152921504606846975ul; }
+    void clear() { tree_.clear(); }
+    void swap(set& other) { tree_.swap(other.tree_); }
+    C key_comp() const { return tree_.key_comp(); }
+    karc_tree_iterator<T> begin() const { return tree_.begin(); }
+    karc_tree_iterator<T> end() const { return tree_.end(); }
+    karc_tree_iterator<T> cbegin() const { return tree_.begin(); }
+    karc_tree_iterator<T> cend() const { return tree_.end(); }
+    reverse_iterator<karc_tree_iterator<T>> rbegin() const { return reverse_iterator<karc_tree_iterator<T>>(tree_.end()); }
+    reverse_iterator<karc_tree_iterator<T>> rend() const { return reverse_iterator<karc_tree_iterator<T>>(tree_.begin()); }
+
+    karc_tree_iterator<T> find(const T& key) const { return tree_.find(key); }
+    size_t count(const T& key) const { return tree_.count(key); }
+    bool contains(const T& key) const { return tree_.find(key) != tree_.end(); }
+    karc_tree_iterator<T> lower_bound(const T& key) const { return tree_.lower_bound(key); }
+    karc_tree_iterator<T> upper_bound(const T& key) const { return tree_.upper_bound(key); }
+    pair<karc_tree_iterator<T>, karc_tree_iterator<T>> equal_range(const T& key) const {
+        return pair<karc_tree_iterator<T>, karc_tree_iterator<T>>(tree_.lower_bound(key), tree_.upper_bound(key));
+    }
+
+    pair<karc_tree_iterator<T>, bool> insert(const T& value) { return tree_.insertUnique(value); }
+    karc_tree_iterator<T> insert(karc_tree_iterator<T> hint, const T& value) { return tree_.insertUnique(value).first; }
+    template <typename I>
+    void insert(I first, I last) {
+        for (; first != last; ++first) { tree_.insertUnique(*first); }
+    }
+    void insert(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { tree_.insertUnique(*item); }
+    }
+    template <typename... Args>
+    pair<karc_tree_iterator<T>, bool> emplace(Args&&... args) { return tree_.insertUnique(T(std::forward<Args>(args)...)); }
+    template <typename... Args>
+    karc_tree_iterator<T> emplace_hint(karc_tree_iterator<T> hint, Args&&... args) { return tree_.insertUnique(T(std::forward<Args>(args)...)).first; }
+    karc_tree_iterator<T> erase(karc_tree_iterator<T> position) { return tree_.erase(position); }
+    karc_tree_iterator<T> erase(karc_tree_iterator<T> first, karc_tree_iterator<T> last) {
+        while (first != last) { first = tree_.erase(first); }
+        return last;
+    }
+    size_t erase(const T& key) { return tree_.eraseKey(key); }
+    void merge(set& other) {
+        for (karc_tree_iterator<T> at = other.begin(); at != other.end(); ++at) { tree_.insertUnique(*at); }
+        other.clear();
+    }
+
+    bool operator==(const set& other) const {
+        if (size() != other.size()) { return false; }
+        karc_tree_iterator<T> mine = begin();
+        for (karc_tree_iterator<T> theirs = other.begin(); theirs != other.end(); ++theirs) {
+            if (!(*mine == *theirs)) { return false; }
+            ++mine;
+        }
+        return true;
+    }
+    bool operator!=(const set& other) const { return !(*this == other); }
+    bool operator<(const set& other) const {
+        karc_tree_iterator<T> mine = begin();
+        karc_tree_iterator<T> theirs = other.begin();
+        while (mine != end() && theirs != other.end()) {
+            if (*mine < *theirs) { return true; }
+            if (*theirs < *mine) { return false; }
+            ++mine;
+            ++theirs;
+        }
+        return mine == end() && theirs != other.end();
+    }
+
+private:
+    karc_tree<T, T, karc_set_key<T>, C, A> tree_;
+};
+
+template <typename T, typename C = less<T>, typename A = allocator<T>>
+class multiset {
+public:
+    typedef A allocator_type;
+    typedef T key_type;
+    typedef T value_type;
+    typedef C key_compare;
+    typedef size_t size_type;
+    typedef karc_tree_iterator<T> iterator;
+    typedef karc_tree_iterator<T> const_iterator;
+
+    multiset() {}
+    explicit multiset(const C& less) : tree_(less) {}
+    explicit multiset(const A& alloc) : tree_(C(), alloc) {}
+    multiset(const C& less, const A& alloc) : tree_(less, alloc) {}
+    A get_allocator() const { return tree_.get_allocator(); }
+    multiset(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { tree_.insertMulti(*item); }
+    }
+    template <typename I>
+    multiset(I first, I last) {
+        for (; first != last; ++first) { tree_.insertMulti(*first); }
+    }
+
+    size_t size() const { return tree_.size(); }
+    bool empty() const { return tree_.empty(); }
+    size_t max_size() const { return 1152921504606846975ul; }
+    void clear() { tree_.clear(); }
+    void swap(multiset& other) { tree_.swap(other.tree_); }
+    C key_comp() const { return tree_.key_comp(); }
+    karc_tree_iterator<T> begin() const { return tree_.begin(); }
+    karc_tree_iterator<T> end() const { return tree_.end(); }
+    karc_tree_iterator<T> cbegin() const { return tree_.begin(); }
+    karc_tree_iterator<T> cend() const { return tree_.end(); }
+    reverse_iterator<karc_tree_iterator<T>> rbegin() const { return reverse_iterator<karc_tree_iterator<T>>(tree_.end()); }
+    reverse_iterator<karc_tree_iterator<T>> rend() const { return reverse_iterator<karc_tree_iterator<T>>(tree_.begin()); }
+
+    karc_tree_iterator<T> find(const T& key) const { return tree_.find(key); }
+    size_t count(const T& key) const { return tree_.count(key); }
+    bool contains(const T& key) const { return tree_.find(key) != tree_.end(); }
+    karc_tree_iterator<T> lower_bound(const T& key) const { return tree_.lower_bound(key); }
+    karc_tree_iterator<T> upper_bound(const T& key) const { return tree_.upper_bound(key); }
+    pair<karc_tree_iterator<T>, karc_tree_iterator<T>> equal_range(const T& key) const {
+        return pair<karc_tree_iterator<T>, karc_tree_iterator<T>>(tree_.lower_bound(key), tree_.upper_bound(key));
+    }
+
+    karc_tree_iterator<T> insert(const T& value) { return tree_.insertMulti(value); }
+    karc_tree_iterator<T> insert(karc_tree_iterator<T> hint, const T& value) { return tree_.insertMulti(value); }
+    template <typename I>
+    void insert(I first, I last) {
+        for (; first != last; ++first) { tree_.insertMulti(*first); }
+    }
+    void insert(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { tree_.insertMulti(*item); }
+    }
+    template <typename... Args>
+    karc_tree_iterator<T> emplace(Args&&... args) { return tree_.insertMulti(T(std::forward<Args>(args)...)); }
+    template <typename... Args>
+    karc_tree_iterator<T> emplace_hint(karc_tree_iterator<T> hint, Args&&... args) { return tree_.insertMulti(T(std::forward<Args>(args)...)); }
+    karc_tree_iterator<T> erase(karc_tree_iterator<T> position) { return tree_.erase(position); }
+    karc_tree_iterator<T> erase(karc_tree_iterator<T> first, karc_tree_iterator<T> last) {
+        while (first != last) { first = tree_.erase(first); }
+        return last;
+    }
+    size_t erase(const T& key) { return tree_.eraseKey(key); }
+    void merge(multiset& other) {
+        for (karc_tree_iterator<T> at = other.begin(); at != other.end(); ++at) { tree_.insertMulti(*at); }
+        other.clear();
+    }
+
+    bool operator==(const multiset& other) const {
+        if (size() != other.size()) { return false; }
+        karc_tree_iterator<T> mine = begin();
+        for (karc_tree_iterator<T> theirs = other.begin(); theirs != other.end(); ++theirs) {
+            if (!(*mine == *theirs)) { return false; }
+            ++mine;
+        }
+        return true;
+    }
+    bool operator!=(const multiset& other) const { return !(*this == other); }
+    bool operator<(const multiset& other) const {
+        karc_tree_iterator<T> mine = begin();
+        karc_tree_iterator<T> theirs = other.begin();
+        while (mine != end() && theirs != other.end()) {
+            if (*mine < *theirs) { return true; }
+            if (*theirs < *mine) { return false; }
+            ++mine;
+            ++theirs;
+        }
+        return mine == end() && theirs != other.end();
+    }
+
+private:
+    karc_tree<T, T, karc_set_key<T>, C, A> tree_;
+};
+
+}
+
+#endif

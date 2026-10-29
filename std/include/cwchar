@@ -1,0 +1,224 @@
+// <cwchar>: wide-character strings. wchar_t is 32 bits; conversions to and
+// from multibyte text use UTF-8.
+#ifndef KARC_STD_CWCHAR
+#define KARC_STD_CWCHAR
+
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdarg>
+#include <cstring>
+
+#define WEOF (-1)
+#define WCHAR_MIN (-2147483647 - 1)
+#define WCHAR_MAX 2147483647
+typedef int wint_t;
+struct mbstate_t { int unused; };
+
+inline size_t wcslen(const wchar_t* s) {
+    size_t n = 0;
+    while (s[n] != 0) { n++; }
+    return n;
+}
+inline wchar_t* wcscpy(wchar_t* to, const wchar_t* from) {
+    size_t i = 0;
+    while (from[i] != 0) { to[i] = from[i]; i++; }
+    to[i] = 0;
+    return to;
+}
+inline wchar_t* wcsncpy(wchar_t* to, const wchar_t* from, size_t count) {
+    size_t i = 0;
+    while (i < count && from[i] != 0) { to[i] = from[i]; i++; }
+    while (i < count) { to[i] = 0; i++; }
+    return to;
+}
+inline wchar_t* wcscat(wchar_t* to, const wchar_t* from) {
+    wcscpy(to + wcslen(to), from);
+    return to;
+}
+inline int wcscmp(const wchar_t* a, const wchar_t* b) {
+    while (*a != 0 && *a == *b) { a++; b++; }
+    return *a < *b ? -1 : (*a > *b ? 1 : 0);
+}
+inline int wcsncmp(const wchar_t* a, const wchar_t* b, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1; }
+        if (a[i] == 0) { return 0; }
+    }
+    return 0;
+}
+inline wchar_t* wcschr(const wchar_t* s, wchar_t c) {
+    for (; *s != 0; s++) {
+        if (*s == c) { return (wchar_t*)s; }
+    }
+    return c == 0 ? (wchar_t*)s : 0;
+}
+inline wchar_t* wcsrchr(const wchar_t* s, wchar_t c) {
+    const wchar_t* found = 0;
+    for (; *s != 0; s++) {
+        if (*s == c) { found = s; }
+    }
+    return c == 0 ? (wchar_t*)s : (wchar_t*)found;
+}
+inline wchar_t* wcsstr(const wchar_t* haystack, const wchar_t* needle) {
+    size_t n = wcslen(needle);
+    for (; *haystack != 0; haystack++) {
+        if (wcsncmp(haystack, needle, n) == 0) { return (wchar_t*)haystack; }
+    }
+    return n == 0 ? (wchar_t*)haystack : 0;
+}
+inline wchar_t* wmemcpy(wchar_t* to, const wchar_t* from, size_t count) {
+    for (size_t i = 0; i < count; i++) { to[i] = from[i]; }
+    return to;
+}
+inline wchar_t* wmemmove(wchar_t* to, const wchar_t* from, size_t count) {
+    memmove(to, from, count * sizeof(wchar_t));
+    return to;
+}
+inline wchar_t* wmemset(wchar_t* to, wchar_t c, size_t count) {
+    for (size_t i = 0; i < count; i++) { to[i] = c; }
+    return to;
+}
+inline int wmemcmp(const wchar_t* a, const wchar_t* b, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1; }
+    }
+    return 0;
+}
+
+// One code point as UTF-8 into `out` (at least 4 bytes); its length.
+inline size_t karc_utf8_encode(unsigned int code, char* out) {
+    if (code < 128) { out[0] = (char)code; return 1; }
+    if (code < 2048) {
+        out[0] = (char)(192 | (code >> 6));
+        out[1] = (char)(128 | (code & 63));
+        return 2;
+    }
+    if (code < 65536) {
+        out[0] = (char)(224 | (code >> 12));
+        out[1] = (char)(128 | ((code >> 6) & 63));
+        out[2] = (char)(128 | (code & 63));
+        return 3;
+    }
+    out[0] = (char)(240 | (code >> 18));
+    out[1] = (char)(128 | ((code >> 12) & 63));
+    out[2] = (char)(128 | ((code >> 6) & 63));
+    out[3] = (char)(128 | (code & 63));
+    return 4;
+}
+// The code point the UTF-8 at `in` starts with, and its length in `used`.
+inline unsigned int karc_utf8_decode(const char* in, size_t* used) {
+    unsigned int b = (unsigned char)in[0];
+    unsigned int code = b;
+    size_t extra = 0;
+    if (b >= 240) { code = b & 7; extra = 3; }
+    else if (b >= 224) { code = b & 15; extra = 2; }
+    else if (b >= 192) { code = b & 31; extra = 1; }
+    for (size_t i = 1; i <= extra; i++) {
+        if (in[i] == 0) { *used = i; return code; }
+        code = (code << 6) | ((unsigned char)in[i] & 63);
+    }
+    *used = extra + 1;
+    return code;
+}
+inline size_t mbstowcs(wchar_t* out, const char* in, size_t room) {
+    size_t n = 0;
+    while (*in != 0 && (out == 0 || n < room)) {
+        size_t used = 0;
+        unsigned int code = karc_utf8_decode(in, &used);
+        if (out != 0) { out[n] = (wchar_t)code; }
+        in += used;
+        n++;
+    }
+    if (out != 0 && n < room) { out[n] = 0; }
+    return n;
+}
+inline size_t wcstombs(char* out, const wchar_t* in, size_t room) {
+    size_t n = 0;
+    char bytes[4];
+    for (; *in != 0; in++) {
+        size_t length = karc_utf8_encode((unsigned int)*in, bytes);
+        if (out != 0) {
+            if (n + length > room) { break; }
+            memcpy(out + n, bytes, length);
+        }
+        n += length;
+    }
+    if (out != 0 && n < room) { out[n] = 0; }
+    return n;
+}
+inline size_t wcrtomb(char* out, wchar_t c, mbstate_t* state) { return karc_utf8_encode((unsigned int)c, out); }
+inline size_t mbrtowc(wchar_t* out, const char* in, size_t count, mbstate_t* state) {
+    if (in == 0 || count == 0) { return 0; }
+    size_t used = 0;
+    unsigned int code = karc_utf8_decode(in, &used);
+    if (out != 0) { *out = (wchar_t)code; }
+    return code == 0 ? 0 : used;
+}
+inline int mblen(const char* in, size_t count) {
+    if (in == 0 || *in == 0) { return 0; }
+    size_t used = 0;
+    karc_utf8_decode(in, &used);
+    return (int)used;
+}
+inline wint_t btowc(int c) { return c < 128 ? c : WEOF; }
+inline int wctob(wint_t c) { return c < 128 ? c : EOF; }
+
+inline long wcstol(const wchar_t* s, wchar_t** end, int base) {
+    char narrow[128];
+    size_t n = 0;
+    while (s[n] != 0 && s[n] < 128 && n < 127) { narrow[n] = (char)s[n]; n++; }
+    narrow[n] = 0;
+    char* stop = 0;
+    long value = strtol(narrow, &stop, base);
+    if (end != 0) { *end = (wchar_t*)(s + (stop - narrow)); }
+    return value;
+}
+inline double wcstod(const wchar_t* s, wchar_t** end) {
+    char narrow[128];
+    size_t n = 0;
+    while (s[n] != 0 && s[n] < 128 && n < 127) { narrow[n] = (char)s[n]; n++; }
+    narrow[n] = 0;
+    char* stop = 0;
+    double value = strtod(narrow, &stop);
+    if (end != 0) { *end = (wchar_t*)(s + (stop - narrow)); }
+    return value;
+}
+
+inline wint_t putwchar(wchar_t c) {
+    char bytes[4];
+    fwrite(bytes, 1, karc_utf8_encode((unsigned int)c, bytes), stdout);
+    return c;
+}
+inline int fputws(const wchar_t* s, FILE* stream) {
+    for (; *s != 0; s++) {
+        char bytes[4];
+        fwrite(bytes, 1, karc_utf8_encode((unsigned int)*s, bytes), stream);
+    }
+    return 0;
+}
+// wprintf and fwprintf: the format as UTF-8, formatted as printf does.
+inline int vfwprintf(FILE* stream, const wchar_t* f, va_list arguments) {
+    size_t length = wcstombs(0, f, 0);
+    char* narrow = (char*)malloc(length + 1);
+    wcstombs(narrow, f, length + 1);
+    int written = vfprintf(stream, narrow, arguments);
+    free(narrow);
+    return written;
+}
+inline int wprintf(const wchar_t* f, ...) {
+    va_list arguments;
+    va_start(arguments, f);
+    int written = vfwprintf(stdout, f, arguments);
+    va_end(arguments);
+    return written;
+}
+inline int fwprintf(FILE* stream, const wchar_t* f, ...) {
+    va_list arguments;
+    va_start(arguments, f);
+    int written = vfwprintf(stream, f, arguments);
+    va_end(arguments);
+    return written;
+}
+
+#endif

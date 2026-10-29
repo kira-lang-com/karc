@@ -1,0 +1,34 @@
+// Unions. A union is parsed as a class and listed in the tree's `unions`;
+// its KIR record is one storage field as large and as aligned as its
+// largest member, every member lives at its start, and copying or zeroing
+// one works on the whole storage.
+
+function isUnionType(tree: CppTree, ty: String) -> Bool {
+    let name = nominalName(ty)
+    for union in tree.unions {
+        if union == name { return true }
+    }
+    return false
+}
+// The storage field: words of the union's alignment.
+function unionStorageType(tree: CppTree, ty: String) -> String {
+    let align = typeAlign(tree, ty)
+    var word = "i8"
+    if align == 2 { word = "i16" }
+    if align == 4 { word = "i32" }
+    if align >= 8 { word = "i64" }
+    var unit = align
+    if unit > 8 { unit = 8 }
+    if unit < 1 { unit = 1 }
+    return joinText(["[", decimalText((typeSize(tree, ty) + unit - 1) / unit), " x ", word, "]"])
+}
+// The address of member `index` of the `structType` object at `base`.
+function memberAddress(state: borrow mut Lowerer, base: KirAddress, structType: String, index: Int, fieldType: String) -> KirAddress {
+    if !isUnionType(state.tree, structType) { return kFieldAddr(state, base, index, fieldType) }
+    let storage = kFieldAddr(state, base, 0, unionStorageType(state.tree, structType))
+    return kAddrCast(state, storage, fieldType)
+}
+// The union's storage, for copying or zeroing it whole.
+function unionStorage(state: borrow mut Lowerer, base: KirAddress, structType: String) -> KirAddress {
+    return kFieldAddr(state, base, 0, unionStorageType(state.tree, structType))
+}

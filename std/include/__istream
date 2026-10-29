@@ -1,0 +1,398 @@
+// Part of <iostream>: std::istream. Input comes through karc_get, which
+// reads the descriptor one byte at a time; istringstream and ifstream
+// derive from it and read elsewhere.
+#ifndef KARC_STD_ISTREAM_CORE
+#define KARC_STD_ISTREAM_CORE
+
+#include <cctype>
+#include <__ostream>
+
+namespace std {
+
+class istream {
+public:
+    istream() : descriptor_(0), pending_(-2), state_(0), count_(0), flags_(ios_base::skipws), buffered_(0), at_(0) {}
+    istream(int descriptor) : descriptor_(descriptor), pending_(-2), state_(0), count_(0), flags_(ios_base::skipws), buffered_(0), at_(0) {}
+    // The read position, for a stream on a file; seeking clears eof.
+    istream& seekg(long position) { return seekg(position, ios_base::beg); }
+    istream& seekg(long offset, int direction) {
+        if (direction == ios_base::cur && pending_ >= 0) { offset = offset - 1; }
+        if (direction == ios_base::cur) { offset = offset - (buffered_ - at_); }
+        buffered_ = 0;
+        at_ = 0;
+        pending_ = -2;
+        state_ = state_ & ~ios_base::eofbit;
+        if (descriptor_ < 0 || ::lseek(descriptor_, offset, direction) < 0) { state_ = state_ | ios_base::failbit; }
+        return *this;
+    }
+    long tellg() {
+        if (descriptor_ < 0) { return -1; }
+        long at = ::lseek(descriptor_, 0, ios_base::cur) - (buffered_ - at_);
+        return pending_ >= 0 ? at - 1 : at;
+    }
+    ostream* tie() const { return 0; }
+    ostream* tie(ostream* other) { return 0; }
+    // A stream on the same file as another (fstream's reading side).
+    void karc_share(int descriptor) {
+        descriptor_ = descriptor;
+        buffered_ = 0;
+        at_ = 0;
+        pending_ = -2;
+        state_ = 0;
+    }
+    // hex, oct and dec for the integers read; skipws for characters.
+    istream& operator>>(format_flag_t manipulator) {
+        flags_ = (flags_ & ~manipulator.clear) | manipulator.set;
+        return *this;
+    }
+    // std::ws: skips whitespace.
+    istream& operator>>(ws_t manipulator) {
+        unget(skipSpace());
+        return *this;
+    }
+    int flags() const { return flags_; }
+    int flags(int value) {
+        int old = flags_;
+        flags_ = value;
+        return old;
+    }
+    int setf(int value) {
+        int old = flags_;
+        flags_ = flags_ | value;
+        return old;
+    }
+    void unsetf(int value) { flags_ = flags_ & ~value; }
+    virtual ~istream() {}
+
+    // The next byte of the source, or -1 at its end.
+    // The next byte of the file, read a buffer at a time.
+    virtual int karc_get() {
+        if (at_ < buffered_) { return (unsigned char)buffer_[at_++]; }
+        if (descriptor_ < 0) { return -1; }
+        karc_before_input(descriptor_);
+        long got = ::read(descriptor_, buffer_, sizeof(buffer_));
+        if (got <= 0) { return -1; }
+        buffered_ = got;
+        at_ = 1;
+        return (unsigned char)buffer_[0];
+    }
+
+    istream& operator>>(int& value) {
+        long wide = 0;
+        if (readInteger(wide)) { value = (int)wide; }
+        return *this;
+    }
+    istream& operator>>(long& value) {
+        readInteger(value);
+        return *this;
+    }
+    istream& operator>>(unsigned int& value) {
+        long wide = 0;
+        if (readInteger(wide)) { value = (unsigned int)wide; }
+        return *this;
+    }
+    istream& operator>>(unsigned long& value) {
+        long wide = 0;
+        if (readInteger(wide)) { value = (unsigned long)wide; }
+        return *this;
+    }
+    istream& operator>>(short& value) {
+        long wide = 0;
+        if (readInteger(wide)) { value = wide; }
+        return *this;
+    }
+    istream& operator>>(double& value) {
+        string word;
+        readNumberText(word);
+        if (word.empty()) {
+            state_ = state_ | ios_base::failbit;
+        } else {
+            value = strtod(word.c_str(), 0);
+        }
+        return *this;
+    }
+    istream& operator>>(bool& value) {
+        long wide = 0;
+        if (readInteger(wide)) { value = wide != 0; }
+        return *this;
+    }
+    istream& operator>>(char& c) {
+        int next = (flags_ & ios_base::skipws) ? skipSpace() : get();
+        if (next < 0) { state_ = state_ | ios_base::failbit | ios_base::eofbit; } else { c = (char)next; }
+        return *this;
+    }
+    istream& operator>>(string& word) {
+        word.clear();
+        int next = skipSpace();
+        if (next < 0) {
+            state_ = state_ | ios_base::failbit | ios_base::eofbit;
+            return *this;
+        }
+        while (next >= 0 && !isSpace(next)) {
+            word.push_back((char)next);
+            next = get();
+        }
+        unget(next);
+        return *this;
+    }
+
+    // One byte, or -1 (EOF) at the end of the input.
+    int get() {
+        if (pending_ != -2) {
+            int saved = pending_;
+            pending_ = -2;
+            if (saved < 0) { state_ = state_ | ios_base::eofbit; }
+            count_ = saved < 0 ? 0 : 1;
+            return saved;
+        }
+        int next = karc_get();
+        if (next < 0) { state_ = state_ | ios_base::eofbit; }
+        count_ = next < 0 ? 0 : 1;
+        return next;
+    }
+    istream& get(char& c) {
+        int next = get();
+        if (next < 0) { state_ = state_ | ios_base::failbit; } else { c = (char)next; }
+        return *this;
+    }
+    int peek() {
+        int next = get();
+        unget(next);
+        if (next < 0) { state_ = state_ | ios_base::eofbit; }
+        return next;
+    }
+    istream& unget(int c) {
+        pending_ = c;
+        if (c >= 0) { state_ = state_ & ~ios_base::eofbit; }
+        return *this;
+    }
+    istream& putback(char c) { return unget((unsigned char)c); }
+    istream& ignore(long count = 1, int delimiter = -1) {
+        for (long i = 0; i < count; i++) {
+            int next = get();
+            if (next < 0 || next == delimiter) { break; }
+        }
+        return *this;
+    }
+    istream& read(char* out, long count) {
+        long got = 0;
+        while (got < count) {
+            int next = get();
+            if (next < 0) {
+                state_ = state_ | ios_base::failbit;
+                break;
+            }
+            out[got] = (char)next;
+            got++;
+        }
+        count_ = got;
+        return *this;
+    }
+    istream& getline(char* out, long room, char delimiter = '\n') {
+        long got = 0;
+        int next = get();
+        if (next < 0) { state_ = state_ | ios_base::failbit; }
+        while (next >= 0 && next != delimiter && got + 1 < room) {
+            out[got] = (char)next;
+            got++;
+            next = get();
+        }
+        if (room > 0) { out[got] = 0; }
+        count_ = got;
+        return *this;
+    }
+    // A line without its delimiter; false (and failbit) at the end.
+    bool readLine(string& line, char delimiter = '\n') {
+        line.clear();
+        int next = get();
+        if (next < 0) {
+            state_ = state_ | ios_base::failbit;
+            return false;
+        }
+        while (next >= 0 && next != delimiter) {
+            line.push_back((char)next);
+            next = get();
+        }
+        if (next < 0) { state_ = state_ & ~ios_base::eofbit; pending_ = -1; }
+        return true;
+    }
+    long gcount() const { return count_; }
+    bool good() const { return state_ == 0; }
+    bool fail() const { return (state_ & (ios_base::failbit | ios_base::badbit)) != 0; }
+    bool bad() const { return (state_ & ios_base::badbit) != 0; }
+    bool eof() const { return (state_ & ios_base::eofbit) != 0; }
+    int rdstate() const { return state_; }
+    void clear(int state = 0) { state_ = state; }
+    void setstate(int state) { state_ = state_ | state; }
+    explicit operator bool() const { return !fail(); }
+    bool operator!() const { return fail(); }
+
+protected:
+    int descriptor_;
+    int pending_;
+    // Bytes read from the file ahead of use, and the next one to use.
+    char buffer_[1024];
+    long buffered_;
+    long at_;
+    int state_;
+    long count_;
+    int flags_;
+
+private:
+    static int digitValue(int c) {
+        if (c >= '0' && c <= '9') { return c - '0'; }
+        if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+        if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+        return -1;
+    }
+    bool isSpace(int c) const { return c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\f' || c == '\v'; }
+    int skipSpace() {
+        int next = get();
+        while (next >= 0 && isSpace(next)) { next = get(); }
+        return next;
+    }
+    void readNumberText(string& word) {
+        word.clear();
+        int next = skipSpace();
+        while (next >= 0 && (isdigit(next) || next == '-' || next == '+' || next == '.' || next == 'e' || next == 'E')) {
+            word.push_back((char)next);
+            next = get();
+        }
+        unget(next);
+    }
+    bool readInteger(long& value) {
+        int next = skipSpace();
+        bool negative = false;
+        if (next == '-' || next == '+') {
+            negative = next == '-';
+            next = get();
+        }
+        long base = 10;
+        if (flags_ & ios_base::hex) { base = 16; }
+        if (flags_ & ios_base::oct) { base = 8; }
+        if (base == 16 && next == '0') {
+            // An optional 0x before hexadecimal digits.
+            next = get();
+            if (next == 'x' || next == 'X') { next = get(); } else { unget(next); next = '0'; }
+        }
+        if (digitValue(next) < 0 || digitValue(next) >= base) {
+            state_ = state_ | ios_base::failbit;
+            unget(next);
+            return false;
+        }
+        long result = 0;
+        while (digitValue(next) >= 0 && digitValue(next) < base) {
+            result = result * base + digitValue(next);
+            next = get();
+        }
+        unget(next);
+        value = negative ? 0 - result : result;
+        return true;
+    }
+};
+
+inline istream& getline(istream& input, string& line, char delimiter = '\n') {
+    input.readLine(line, delimiter);
+    return input;
+}
+
+// Part of <iterator>: stream iterators, here where the streams are.
+template <typename T>
+class ostream_iterator {
+public:
+    ostream_iterator(ostream& out) : out_(&out), separator_(0) {}
+    ostream_iterator(ostream& out, const char* separator) : out_(&out), separator_(separator) {}
+    ostream_iterator& operator=(const T& value) {
+        *out_ << value;
+        if (separator_ != 0) { *out_ << separator_; }
+        return *this;
+    }
+    ostream_iterator& operator*() { return *this; }
+    ostream_iterator& operator++() { return *this; }
+    ostream_iterator& operator++(int) { return *this; }
+
+private:
+    ostream* out_;
+    const char* separator_;
+};
+
+// Reads T values until the stream fails; a default one is the end.
+template <typename T>
+class istream_iterator {
+public:
+    istream_iterator() : in_(0), value_(), done_(true) {}
+    istream_iterator(istream& in) : in_(&in), value_(), done_(false) { next(); }
+    const T& operator*() const { return value_; }
+    const T* operator->() const { return &value_; }
+    istream_iterator& operator++() {
+        next();
+        return *this;
+    }
+    istream_iterator operator++(int) {
+        istream_iterator old = *this;
+        next();
+        return old;
+    }
+    bool operator==(const istream_iterator& other) const { return done_ && other.done_; }
+    bool operator!=(const istream_iterator& other) const { return !(done_ && other.done_); }
+
+private:
+    void next() {
+        if (!(*in_ >> value_)) { done_ = true; }
+    }
+    istream* in_;
+    T value_;
+    bool done_;
+};
+
+// The characters of a stream, whitespace included.
+template <typename C>
+class istreambuf_iterator {
+public:
+    istreambuf_iterator() : in_(0), value_(0), done_(true) {}
+    istreambuf_iterator(istream& in) : in_(&in), value_(0), done_(false) { next(); }
+    C operator*() const { return value_; }
+    istreambuf_iterator& operator++() {
+        next();
+        return *this;
+    }
+    istreambuf_iterator operator++(int) {
+        istreambuf_iterator old = *this;
+        next();
+        return old;
+    }
+    bool operator==(const istreambuf_iterator& other) const { return done_ == other.done_; }
+    bool operator!=(const istreambuf_iterator& other) const { return done_ != other.done_; }
+
+private:
+    void next() {
+        int c = in_->get();
+        if (c < 0) {
+            done_ = true;
+        } else {
+            value_ = (C)c;
+        }
+    }
+    istream* in_;
+    C value_;
+    bool done_;
+};
+template <typename C>
+class ostreambuf_iterator {
+public:
+    ostreambuf_iterator(ostream& out) : out_(&out) {}
+    ostreambuf_iterator& operator=(C c) {
+        out_->put(c);
+        return *this;
+    }
+    ostreambuf_iterator& operator*() { return *this; }
+    ostreambuf_iterator& operator++() { return *this; }
+    ostreambuf_iterator& operator++(int) { return *this; }
+
+private:
+    ostream* out_;
+};
+
+}
+
+#endif

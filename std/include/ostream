@@ -1,0 +1,7 @@
+// <ostream>: the stream classes, which <iostream> defines.
+#ifndef KARC_STD_OSTREAM
+#define KARC_STD_OSTREAM
+
+#include <iostream>
+
+#endif

@@ -1,0 +1,313 @@
+function chooseMember(state: borrow mut Lowerer, owner: String, name: String, arguments: [ExprId]) -> Int {
+    var types: [String] = []
+    for argument in arguments { types.append(staticType(state, argument)) }
+    var best = -1
+    var bestScore = -100000
+    var bestExact = false
+    for i in functionsNamed(state, name) {
+        let fn = state.tree.functions[i]
+        if ownerOf(state.tree, i) == owner {
+            var score = 0
+            var exact = fn.parameters.count == arguments.count
+            if fn.parameters.count == arguments.count { score = 1 }
+            if fn.parameters.count < arguments.count { score = -50 }
+            // Fewer arguments rely on defaults; a member template taking
+            // exactly these is a better fit.
+            if fn.parameters.count > arguments.count { score = -20 }
+            for j in 0..arguments.count {
+                if j >= fn.parameters.count { continue }
+                var fit = argumentFit(state, fn.parameters[j], types[j])
+                if types[j] == "@braced" { fit = bracedFit(state, fn.parameters[j], arguments[j]) }
+                // Converting an argument to the class being constructed would
+                // construct it again through this same choice.
+                if fit == 1 && name == constructorName(owner) && parameterClassOf(fn.parameters[j]) == owner { fit = 0 }
+                if fit == 0 { score = -1000 }
+                if fit != 3 { exact = false }
+                score = score + fit * 4 + rvalueFit(state, fn.parameters[j], arguments[j])
+            }
+            if score > bestScore {
+                best = i
+                bestScore = score
+                bestExact = exact
+            }
+        }
+    }
+    // An instance of a member template that needs conversions: another
+    // instance may take the arguments as they are.
+    if best < 0 || bestScore < 0 || (!bestExact && isMemberInstance(state, best)) {
+        let instance = instantiateMember(state, owner, name, arguments)
+        if instance >= 0 { return instance }
+    }
+    if best >= 0 || name == constructorName(owner) || name == joinText(["~", constructorName(owner)]) { return best }
+    let record = structIndex(state, nominalName(owner))
+    if record < 0 { return -1 }
+    for field in state.tree.structs[record].fields {
+        if isBaseField(field) {
+            let inherited = chooseMember(state, field.declType, name, arguments)
+            if inherited >= 0 { return inherited }
+        }
+    }
+    return -1
+}
+// The function a call without a receiver names: among the functions whose
+// name matches, the best fit for the arguments. Inside a member function its
+// own class's members win, as they would by C++ name lookup.
+function chooseFunction(state: borrow mut Lowerer, name: String, arguments: [ExprId]) -> Int {
+    // A member of another class is not visible by its bare name.
+    let current = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    var candidates: [Int] = []
+    for i in functionsNamed(state, unqualifiedName(name)) {
+        let fn = state.tree.functions[i]
+        if qualifiedNamesMatch(fn.name, name) && visibleByName(state.tree, fn.name, name, current) { candidates.append(i) }
+    }
+    if candidates.count <= 1 {
+        if candidates.count == 1 { return candidates[0] }
+        return -1
+    }
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    var types: [String] = []
+    for argument in arguments { types.append(staticType(state, argument)) }
+    var best = -1
+    var bestScore = -100000
+    for i in candidates {
+        let fn = state.tree.functions[i]
+        var score = 0
+        if fn.parameters.count == arguments.count {
+            score = score + 1
+        } else if fn.parameters.count < arguments.count || !hasExpr(fn.parameters[arguments.count].fallback) {
+            score = score - 50
+        }
+        if owner != "" && methodOwnerType(state.tree, fn.name) == owner { score = score + 100 }
+        if !fn.isProto { score = score + 1 }
+        for j in 0..arguments.count {
+            if j < fn.parameters.count {
+                var fit = argumentFit(state, fn.parameters[j], types[j])
+                if types[j] == "@braced" { fit = bracedFit(state, fn.parameters[j], arguments[j]) }
+                if fit == 0 { score = score - 1000 }
+                score = score + fit * 4 + rvalueFit(state, fn.parameters[j], arguments[j])
+            }
+        }
+        if score > bestScore {
+            best = i
+            bestScore = score
+        }
+    }
+    return best
+}
+// The definition of the overload `index` names: itself, or the function with
+// the same name and parameters that has a body.
+function definitionOf(tree: CppTree, index: Int) -> Int {
+    if !tree.functions[index].isProto { return index }
+    let key = lowerFunctionKey(tree, tree.functions[index])
+    for i in 0..tree.functions.count {
+        if !tree.functions[i].isProto && tree.functions[i].name == tree.functions[index].name && lowerFunctionKey(tree, tree.functions[i]) == key {
+            return i
+        }
+    }
+    return index
+}
+function constructorName(structType: String) -> String {
+    return unqualifiedName(nominalName(structType))
+}
+function hasDestructor(state: Lowerer, structType: String) -> Bool {
+    return needsDestruction(state, structType)
+}
+// Calls function `index` of the tree with `object` (none, or `this`) and the
+// argument expressions. A reference parameter takes the argument's address; a
+// class result lands in a temporary this statement destroys unless it is
+// moved. `lastCallReference` tells the caller the result is an address.
+function callFunction(state: borrow mut Lowerer, index: Int, object: [KirValue], given: [ExprId]) -> Value {
+    if functionSlotForFunction(state, index) < 0 && isLambdaFunction(state.tree, state.tree.functions[index]) {
+        // A lambda's operator() called before the lambda is made, as a
+        // container's comparator: settled and declared here.
+        settleLambdaFunction(state, nominalName(methodOwnerType(state.tree, state.tree.functions[index].name)))
+    }
+    let fn = state.tree.functions[index]
+    let callee = functionSlotForFunction(state, index)
+    let dispatch = state.dispatchNext && object.count == 1 && isVirtualFunction(state, index)
+    state.dispatchNext = false
+    state.lastCallReference = false
+    if callee < 0 { return zeroValue(state) }
+    for deleted in state.tree.deletedNames {
+        if deleted == fn.name && fn.isProto && definitionOf(state.tree, index) == index {
+            // Template code is lowered whole, used or not; a use there that
+            // needs a deleted function is one no program reaches.
+            if inTemplateCode(state) { return zeroValue(state) }
+            lowerError(state, diagDeletedFunction(), state.tree.functions[state.functionIndex].nameSpan)
+        }
+    }
+    let parameters = state.functionSlots[callee].parameters
+    let arguments = bracedArguments(state, fn, withDefaults(state, fn, given))
+    let structResult = isClassType(fn.returnType)
+    var first = object.count
+    if structResult { first = first + 1 }
+    var values: [KirValue] = []
+    for i in 0..fn.parameters.count {
+        let parameterType = parameters[first + i]
+        let wanted = parameterClassOf(fn.parameters[i])
+        if i >= arguments.count {
+            values.append(coerceRef(state, zeroValue(state), parameterType))
+        } else if isClassType(wanted) && needsConversion(state, arguments[i], wanted) {
+            values.append(kBitcast(state, emitConvertedArgument(state, arguments[i], wanted), parameterType))
+        } else if fn.parameters[i].reference && isClassType(wanted) && isBaseOf(state, wanted, staticType(state, arguments[i])) {
+            let argumentType = staticType(state, arguments[i])
+            let derived = methodReceiver(state, arguments[i], argumentType)
+            values.append(kBitcast(state, upcast(state, derived, argumentType, wanted), parameterType))
+        } else if !fn.parameters[i].reference && isClassType(fn.parameters[i].declType) && needsCopy(state, fn.parameters[i].declType) {
+            values.append(emitByValueClassArgument(state, arguments[i], fn.parameters[i].declType))
+        } else if fn.parameters[i].reference && firstByte(elementOfPointer(parameterType)) != 37 {
+            values.append(emitReferenceArgument(state, arguments[i], parameterType))
+        } else {
+            values.append(emitArgument(state, arguments[i], parameterType))
+        }
+    }
+    var result = zeroValue(state)
+    if structResult {
+        let temporary = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), fn.returnType, "", fn.span)
+        zeroAggregate(state, state.slotsData[temporary].address, fn.returnType)
+        let pointer = slotPointer(state, state.slotsData[temporary].address, fn.returnType)
+        kArgument(state, pointer)
+        state.temporaries.append(temporary)
+        result = Value { reference = pointer, boolean = false, wide = true, pointer = joinText(["*[0 x ", fn.returnType, "]"]), unsigned = false, floating = false }
+    }
+    let resultType = state.functionSlots[callee].result
+    if dispatch {
+        let owner = methodOwnerType(state.tree, fn.name)
+        let target = virtualTarget(state, object[0], owner, slotKey(state, index), callee)
+        for parameter in parameters { kIndirectParameter(state, parameter) }
+        for value in object { kArgument(state, value) }
+        for value in values { kArgument(state, value) }
+        if structResult || resultType == "unit" {
+            kCallIndirectVoid(state, target)
+            afterCall(state, callee)
+            return result
+        }
+        let dispatched = kCallIndirect(state, target, resultType)
+        afterCall(state, callee)
+        state.lastCallReference = fn.refReturn
+        return promoteFromType(state, dispatched, resultType)
+    }
+    for value in object { kArgument(state, value) }
+    for value in values { kArgument(state, value) }
+    if structResult || resultType == "unit" {
+        kCallVoid(state, state.functionSlots[callee].handle)
+        afterCall(state, callee)
+        return result
+    }
+    let raw = kCall(state, state.functionSlots[callee].handle, resultType)
+    afterCall(state, callee)
+    state.lastCallReference = fn.refReturn
+    return promoteFromType(state, raw, resultType)
+}
+// `object.name(args)` resolved by the class of `object`, or -1 to leave the call
+// to the name-based lookup (unknown receiver, struct result).
+function resolveMethod(state: borrow mut Lowerer, call: CallExpression, name: String) -> Int {
+    if !hasExpr(call.receiver) { return -1 }
+    let owner = staticType(state, call.receiver)
+    if !isClassType(owner) { return -1 }
+    return chooseMember(state, owner, name, call.arguments)
+}
+function emitMethodCall(state: borrow mut Lowerer, call: CallExpression, index: Int) -> Value {
+    let owner = methodOwnerType(state.tree, state.tree.functions[index].name)
+    let object = methodReceiver(state, call.receiver, owner)
+    state.dispatchNext = true
+    return callFunction(state, index, [object], call.arguments)
+}
+// Runs the constructor that takes `arguments` on the zeroed object at `object`.
+// A class without constructors is initialized member by member instead.
+function emitConstruct(state: borrow mut Lowerer, object: KirValue, structType: String, given: [ExprId]) {
+    let arguments = designatedInOrder(state, structType, given)
+    if arguments.count == 1 && emitConversionInto(state, object, structType, arguments[0]) { return }
+    if arguments.count == 1 && emitBaseCopyInto(state, object, structType, arguments[0]) { return }
+    if arguments.count == 1 && copyConstructor(state, structType) < 0 && staticType(state, arguments[0]) == structType {
+        if isClassLvalue(state, arguments[0]) {
+            let source = methodReceiver(state, arguments[0], structType)
+            copyInto(state, object, source, structType)
+        } else {
+            moveClassValue(state, arguments[0], structBehindPointer(state, object, structType), structType)
+        }
+        return
+    }
+    let constructor = chooseMember(state, structType, constructorName(structType), arguments)
+    var skip: [String] = []
+    if constructor >= 0 { skip = explicitlyInitialized(state, constructor) }
+    constructMembers(state, object, structType, skip)
+    setVtable(state, object, structType)
+    if constructor >= 0 {
+        callFunction(state, constructor, [object], arguments)
+        return
+    }
+    let index = structIndex(state, nominalName(structType))
+    if index < 0 { return }
+    let storage = structBehindPointer(state, object, structType)
+    let fields = state.tree.structs[index].fields
+    // Argument i initializes member i: a field, or a bit-field (-2 - index).
+    let members = aggregateMembers(state, index)
+    for i in 0..arguments.count {
+        if !hasExpr(arguments[i]) || i >= members.count { continue }
+        if members[i] <= -2 {
+            storeToPlace(state, bitPlace(state, storage, structType, -2 - members[i]), emitExpression(state, arguments[i]))
+            continue
+        }
+        let f = members[i]
+        if isClassType(fields[f].declType) {
+            let address = memberAddress(state, storage, structType, f, fields[f].declType)
+            let constructor = copyConstructor(state, fields[f].declType)
+            let argumentType = staticType(state, arguments[i])
+            if argumentType != fields[f].declType && !isBaseOf(state, fields[f].declType, argumentType) {
+                // A member initialized from something else: constructed from
+                // it in place of the default the members got above.
+                let member = slotPointer(state, address, fields[f].declType)
+                destroyValue(state, member, fields[f].declType)
+                var memberArguments: [ExprId] = [arguments[i]]
+                var listed = false
+                if isBracedCall(state, arguments[i]) {
+                    memberArguments = bracedPayloadArguments(state.tree.expressions[arguments[i].value])
+                    listed = emitListConstruct(state, member, fields[f].declType, memberArguments)
+                }
+                if !listed { emitConstruct(state, member, fields[f].declType, memberArguments) }
+            } else if constructor >= 0 && isClassLvalue(state, arguments[i]) {
+                callFunction(state, constructor, [slotPointer(state, address, fields[f].declType)], [arguments[i]])
+            } else {
+                moveClassValue(state, arguments[i], address, fields[f].declType)
+            }
+        } else if !isArrayType(fields[f].declType) {
+            let address = memberAddress(state, storage, structType, f, fields[f].declType)
+            kStore(state, coerceRef(state, emitExpression(state, arguments[i]), fields[f].declType), address)
+        } else {
+            // An array member takes a braced list, or, as the only member,
+            // all the arguments: `std::array<int, 3> a = {1, 2, 3}`.
+            let address = memberAddress(state, storage, structType, f, fields[f].declType)
+            if isBracedCall(state, arguments[i]) {
+                emitArrayInit(state, address, fields[f].declType, arguments[i])
+            } else if fields.count == 1 {
+                let e = state.tree.expressions[arguments[i].value]
+                let all = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = "@braced", arguments = arguments, explicitArguments = 0, awaitTransform = false }), span = e.span, nameSpan = e.nameSpan })
+                emitArrayInit(state, address, fields[f].declType, all)
+                return
+            }
+        }
+    }
+}
+function emitDestroy(state: borrow mut Lowerer, object: KirValue, structType: String) {
+    destroyValue(state, object, structType)
+}
+function isCompilerTemporary(name: String) -> Bool {
+    return utf8Count(name) > 7 && utf8Slice(name, 0, 7) == "__karc_"
+}
+// Destroys the class locals bound since binding `from`, innermost first,
+// except slot `keep` (a local being returned).
+function destroyScope(state: borrow mut Lowerer, from: Int, keep: Int) {
+    if state.terminated { return }
+    var i = state.active
+    while i > from {
+        i = i - 1
+        let binding = state.bindings[i]
+        let slot = binding.slot
+        let ty = state.slotsData[slot].ty
+        if isClassType(ty) && !state.slotsData[slot].reference && state.slotsData[slot].global == "" &&
+            slot != keep && slot >= state.localsFrom && !isCompilerTemporary(binding.name) && hasDestructor(state, ty) {
+            emitDestroy(state, slotPointer(state, state.slotsData[slot].address, ty), ty)
+        }
+    }
+}

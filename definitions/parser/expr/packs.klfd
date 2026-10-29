@@ -1,0 +1,234 @@
+// Variadic templates. A template's last parameter may be a pack
+// (`typename... Ts`). An instance expands every `pattern...` in the template's
+// tokens once per element before the ordinary substitution: `Ts... xs`
+// declares `Ts__karc0 xs__karc0, Ts__karc1 xs__karc1`, `f(xs)...` becomes
+// `f(xs__karc0), f(xs__karc1)`, `sizeof...(Ts)` the element count, and a fold
+// `(xs + ...)` the elements joined by the operator. A pattern between `;`s,
+// which C++ does not allow, declares one member per element.
+
+function packElementName(name: String, index: Int) -> String {
+    return joinText([name, "__karc", decimalText(index)])
+}
+function packToken(kind: TokenKind, text: String, number: Int, at: Token) -> Token {
+    return Token { space = false, spelling = "", kind = kind, text = text, number = number, start = at.start, end = at.end, line = at.line }
+}
+// The tokens of `template` for `arguments`, packs expanded and parameters
+// substituted.
+function instantiateTokens(p: borrow mut Parser, template: CppTemplate, arguments: [String], tokens: [Token]) -> [Token] {
+    if template.pack < 0 || arguments.count < template.pack { return substituteTokens(p, template, arguments, tokens) }
+    let count = arguments.count - template.pack
+    let packName = template.params[template.pack]
+    let expanded = expandPacks(tokens, packName, count)
+    var params: [String] = []
+    var valueParams: [Bool] = []
+    for i in 0..template.pack {
+        params.append(template.params[i])
+        valueParams.append(template.valueParams[i])
+    }
+    for i in 0..count {
+        params.append(packElementName(packName, i))
+        valueParams.append(template.valueParams[template.pack])
+    }
+    let extended = CppTemplate { name = template.name, params = params, valueParams = valueParams, defaults = [], tokens = expanded, isClass = template.isClass, owner = template.owner, pack = -1 }
+    return substituteTokens(p, extended, arguments, expanded)
+}
+// The function parameter packs of `typePack` that `tokens` declare:
+// `... name` before `,`, `)` or `=`.
+function valuePackNames(tokens: [Token], typePack: String) -> [String] {
+    var names: [String] = []
+    for i in 0..tokens.count {
+        if tokens[i].kind == .Ellipsis && i + 2 < tokens.count && tokens[i + 1].kind == .Ident &&
+            mentionsPack(tokensBetween(tokens, patternStart(tokens, i, true), i), [typePack]) {
+            let after = tokens[i + 2].kind
+            // A member pack `Ts... name;` counts too.
+            if after == .Comma || after == .RParen || after == .Assign || after == .Semicolon { names.append(tokens[i + 1].text) }
+        }
+    }
+    return names
+}
+function mentionsPack(tokens: [Token], packs: [String]) -> Bool {
+    for t in tokens {
+        if t.kind == .Ident {
+            for name in packs {
+                if t.text == name { return true }
+            }
+        }
+    }
+    return false
+}
+function opensGroup(kind: TokenKind) -> Bool {
+    return kind == .LParen || kind == .LBracket || kind == .LBrace || kind == .Lt
+}
+function closesGroup(kind: TokenKind) -> Bool {
+    return kind == .RParen || kind == .RBracket || kind == .RBrace || kind == .Gt
+}
+function isFoldOperator(kind: TokenKind) -> Bool {
+    return kind == .Plus || kind == .Minus || kind == .Star || kind == .Slash || kind == .Percent || kind == .AndAnd || kind == .OrOr ||
+        kind == .Amp || kind == .Pipe || kind == .Caret || kind == .Comma || kind == .Shl || kind == .Shr
+}
+// Where the pattern ending at `end` (exclusive) begins in `tokens`: after the
+// nearest enclosing delimiter. With `commas` false only an opening bracket
+// ends it.
+function patternStart(tokens: [Token], end: Int, commas: Bool) -> Int {
+    var depth = 0
+    var i = end
+    while i > 0 {
+        let kind = tokens[i - 1].kind
+        if kind == .Shr {
+            depth = depth + 2
+        } else if closesGroup(kind) {
+            depth = depth + 1
+        } else if opensGroup(kind) {
+            if depth == 0 { return i }
+            depth = depth - 1
+        } else if depth == 0 && (kind == .Semicolon || (commas && kind == .Comma) || (kind == .Colon && !scopeColon(tokens, i - 1))) {
+            return i
+        }
+        i = i - 1
+    }
+    return 0
+}
+// Where the pattern starting at `start` ends: the next delimiter outside
+// brackets.
+function patternEnd(tokens: [Token], start: Int, commas: Bool) -> Int {
+    var depth = 0
+    var i = start
+    while i < tokens.count {
+        let kind = tokens[i].kind
+        if opensGroup(kind) {
+            depth = depth + 1
+        } else if closesGroup(kind) || kind == .Shr {
+            if depth == 0 { return i }
+            depth = depth - 1
+        } else if depth == 0 && (kind == .Semicolon || kind == .Assign || (commas && kind == .Comma)) {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+// Whether the `:` at `at` is half of a `::`.
+function scopeColon(tokens: [Token], at: Int) -> Bool {
+    return (at > 0 && tokens[at - 1].kind == .Colon) || (at + 1 < tokens.count && tokens[at + 1].kind == .Colon)
+}
+// `pattern` for element `index`: each pack name replaced by its element.
+function packElement(pattern: [Token], packs: [String], index: Int) -> [Token] {
+    var result: [Token] = []
+    for t in pattern {
+        var replaced = false
+        if t.kind == .Ident {
+            for name in packs {
+                if !replaced && t.text == name {
+                    replaced = true
+                    result.append(packToken(.Ident, packElementName(name, index), 0, t))
+                }
+            }
+        }
+        if !replaced { result.append(t) }
+    }
+    return result
+}
+// The elements of `pattern` joined by `separator`.
+function joinedElements(pattern: [Token], packs: [String], count: Int, separator: Token) -> [Token] {
+    var result: [Token] = []
+    for i in 0..count {
+        if i > 0 { result.append(separator) }
+        for t in packElement(pattern, packs, i) { result.append(t) }
+    }
+    return result
+}
+// The value of a fold over no elements.
+function emptyFold(operator: Token) -> Token {
+    if operator.kind == .AndAnd { return packToken(.Ident, "true", 0, operator) }
+    if operator.kind == .OrOr { return packToken(.Ident, "false", 0, operator) }
+    if operator.kind == .Star { return packToken(.Number, "1", 1, operator) }
+    return packToken(.Number, "0", 0, operator)
+}
+function tokensBetween(tokens: [Token], start: Int, end: Int) -> [Token] {
+    var result: [Token] = []
+    for i in start..end { result.append(tokens[i]) }
+    return result
+}
+function expandPacks(tokens: [Token], typePack: String, count: Int) -> [Token] {
+    var packs: [String] = [typePack]
+    for name in valuePackNames(tokens, typePack) { packs.append(name) }
+    var out: [Token] = []
+    var i = 0
+    while i < tokens.count {
+        let t = tokens[i]
+        if t.kind == .KwSizeof && i + 4 < tokens.count && tokens[i + 1].kind == .Ellipsis {
+            out.append(packToken(.Number, decimalText(count), count, t))
+            i = i + 5
+        } else if t.kind != .Ellipsis {
+            out.append(t)
+            i = i + 1
+        } else if out.count > 0 && isFoldOperator(out[out.count - 1].kind) && i + 1 < tokens.count && tokens[i + 1].kind == .RParen {
+            // `(pattern op ...)`, or `(init op ... op pattern)` read from the right.
+            let operator = out[out.count - 1]
+            let start = patternStart(out, out.count - 1, false)
+            let pattern = tokensBetween(out, start, out.count - 1)
+            var kept = tokensBetween(out, 0, start)
+            if count == 0 {
+                kept.append(emptyFold(operator))
+            } else {
+                for e in joinedElements(pattern, packs, count, operator) { kept.append(e) }
+            }
+            out = kept
+            i = i + 1
+        } else if i + 1 < tokens.count && isFoldOperator(tokens[i + 1].kind) && out.count > 0 &&
+            (out[out.count - 1].kind == .LParen || isFoldOperator(out[out.count - 1].kind)) {
+            // `(... op pattern)` or `(pattern op ... op init)`.
+            let operator = tokens[i + 1]
+            let end = patternEnd(tokens, i + 2, false)
+            let after = tokensBetween(tokens, i + 2, end)
+            if out[out.count - 1].kind == .LParen || mentionsPack(after, packs) {
+                // A left fold: an `init op` already written stays in front.
+                if count == 0 {
+                    if out[out.count - 1].kind == .LParen { out.append(emptyFold(operator)) } else { out = tokensBetween(out, 0, out.count - 1) }
+                } else {
+                    for e in joinedElements(after, packs, count, operator) { out.append(e) }
+                }
+                i = end
+            } else {
+                // A right fold with an initial value: `pattern op ... op init`.
+                let start = patternStart(out, out.count - 1, false)
+                let pattern = tokensBetween(out, start, out.count - 1)
+                var kept = tokensBetween(out, 0, start)
+                for e in joinedElements(pattern, packs, count, operator) { kept.append(e) }
+                out = kept
+                if count == 0 { i = i + 2 } else { i = i + 1 }
+            }
+        } else {
+            let start = patternStart(out, out.count, true)
+            let end = patternEnd(tokens, i + 1, true)
+            var pattern = tokensBetween(out, start, out.count)
+            for s in tokensBetween(tokens, i + 1, end) { pattern.append(s) }
+            if !mentionsPack(pattern, packs) {
+                out.append(t)
+                i = i + 1
+            } else {
+                // Between `;`s the elements are declarations, else a list.
+                var separator = packToken(.Comma, ",", 0, t)
+                let statement = end < tokens.count && tokens[end].kind == .Semicolon &&
+                    (start == 0 || out[start - 1].kind == .Semicolon || out[start - 1].kind == .LBrace || out[start - 1].kind == .Colon || out[start - 1].kind == .RBrace)
+                if statement { separator = packToken(.Semicolon, ";", 0, t) }
+                var kept = tokensBetween(out, 0, start)
+                var next = end
+                if count == 0 {
+                    if statement {
+                        next = end + 1
+                    } else if kept.count > 0 && kept[kept.count - 1].kind == .Comma {
+                        kept = tokensBetween(kept, 0, kept.count - 1)
+                    } else if end < tokens.count && tokens[end].kind == .Comma {
+                        next = end + 1
+                    }
+                } else {
+                    for e in joinedElements(pattern, packs, count, separator) { kept.append(e) }
+                }
+                out = kept
+                i = next
+            }
+        }
+    }
+    return out
+}

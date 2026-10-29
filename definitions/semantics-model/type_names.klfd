@@ -1,0 +1,157 @@
+// karc type and name spellings: pointer, array, function-pointer and nominal
+// types, and qualified names.
+
+function isClassType(t: String) -> Bool {
+    return utf8Count(t) > 0 && utf8Byte(t, 0) == 37
+}
+function isPointerType(t: String) -> Bool {
+    return utf8Count(t) > 0 && utf8Byte(t, 0) == 42
+}
+function isArrayType(t: String) -> Bool {
+    return utf8Count(t) > 0 && utf8Byte(t, 0) == 91
+}
+// Whether a scalar karc type is unsigned (its spelling starts with `u`).
+function isUnsignedType(t: String) -> Bool {
+    if t == "unit" { return false }
+    return utf8Byte(t, 0) == 117
+}
+// A function-pointer type is spelled `fn<ret|p1,p2>`.
+function isFnPtrType(t: String) -> Bool {
+    if utf8Count(t) < 3 { return false }
+    return utf8Slice(t, 0, 3) == "fn<"
+}
+function fnPtrSeparator(t: String) -> Int {
+    var depth = 0
+    for i in 3..utf8Count(t) {
+        let c = utf8Byte(t, i)
+        if c == 124 && depth == 0 { return i }
+        if c == 60 || c == 91 { depth = depth + 1 }
+        if c == 62 || c == 93 { depth = depth - 1 }
+    }
+    return utf8Count(t)
+}
+function fnPtrReturn(t: String) -> String {
+    return utf8Slice(t, 3, fnPtrSeparator(t))
+}
+function fnPtrParams(t: String) -> String {
+    let separator = fnPtrSeparator(t)
+    if separator >= utf8Count(t) { return "" }
+    return utf8Slice(t, separator + 1, utf8Count(t) - 1)
+}
+// A function-pointer type marks a reference parameter with a leading `&`,
+// which only the parameter's KIR type drops.
+function withoutReferenceMark(t: String) -> String {
+    if utf8Count(t) > 1 && utf8Byte(t, 0) == 38 { return utf8Slice(t, 1, utf8Count(t)) }
+    return t
+}
+// The KIR parameter types of a function-pointer type.
+function fnPtrParameterTypes(t: String) -> [String] {
+    var result: [String] = []
+    for p in splitCommas(fnPtrParams(t)) { result.append(withoutReferenceMark(p)) }
+    return result
+}
+// Split a comma-separated type list (empty list for "").
+function splitCommas(s: String) -> [String] {
+    var out: [String] = []
+    if utf8Count(s) == 0 { return out }
+    var start = 0
+    var depth = 0
+    for i in 0..utf8Count(s) {
+        let c = utf8Byte(s, i)
+        if c == 60 || c == 91 { depth = depth + 1 }
+        if c == 62 || c == 93 { depth = depth - 1 }
+        if c == 44 && depth == 0 {
+            out.append(utf8Slice(s, start, i))
+            start = i + 1
+        }
+    }
+    out.append(utf8Slice(s, start, utf8Count(s)))
+    return out
+}
+// "*[0 x T]" -> "T".
+function elementOfPointer(ptrType: String) -> String {
+    if utf8Count(ptrType) < 8 || !isPointerType(ptrType) { return "" }
+    return utf8Slice(ptrType, 6, utf8Count(ptrType) - 1)
+}
+// "*[0 x T]" -> "[0 x T]": the memory a pointer value addresses.
+function arrayOfPointer(ptrType: String) -> String {
+    return utf8Slice(ptrType, 1, utf8Count(ptrType))
+}
+// The element type of a KIR array type `[N x INNER]` is `INNER`.
+function arrayElementType(ty: String) -> String {
+    var digitsEnd = 1
+    for i in 1..utf8Count(ty) {
+        if !digit(utf8Byte(ty, i)) { break }
+        digitsEnd = i + 1
+    }
+    return utf8Slice(ty, digitsEnd + 3, utf8Count(ty) - 1)
+}
+// The bound of a KIR array type `[N x INNER]`.
+function arrayLength(ty: String) -> Int {
+    var n = 0
+    for i in 1..utf8Count(ty) {
+        if !digit(utf8Byte(ty, i)) { break }
+        n = n * 10 + (utf8Byte(ty, i) - 48)
+    }
+    return n
+}
+// "%Name" -> "Name".
+function nominalName(ty: String) -> String {
+    if utf8Count(ty) > 0 && isClassType(ty) {
+        return utf8Slice(ty, 1, utf8Count(ty))
+    }
+    return ty
+}
+// The class a member function `a::X::f` belongs to, `%a::X`; "" for a
+// function of a namespace.
+function methodOwnerType(tree: CppTree, name: String) -> String {
+    var owner = scopeOf(name)
+    while owner != "" {
+        if hasKind(entityKinds(tree, owner), .Class) { return joinText(["%", owner]) }
+        owner = scopeOf(owner)
+    }
+    return ""
+}
+function unqualifiedName(name: String) -> String {
+    var last = -1
+    for i in 0..(utf8Count(name) - 1) {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i + 1) == 58 { last = i }
+    }
+    if last < 0 { return name }
+    return utf8Slice(name, last + 2, utf8Count(name))
+}
+// What `name` is qualified by: "a::b" for "a::b::c", "" unqualified.
+function scopeOf(name: String) -> String {
+    var last = -1
+    for i in 0..(utf8Count(name) - 1) {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i + 1) == 58 { last = i }
+    }
+    if last < 0 { return "" }
+    return utf8Slice(name, 0, last)
+}
+function isMainName(name: String) -> Bool {
+    return name == "main" || unqualifiedName(name) == "main"
+}
+function qualifiedSuffix(name: String, suffix: String) -> Bool {
+    if name == suffix { return true }
+    let offset = utf8Count(name) - utf8Count(suffix)
+    if offset < 2 { return false }
+    if utf8Slice(name, offset, utf8Count(name)) != suffix { return false }
+    return utf8Byte(name, offset - 2) == 58 && utf8Byte(name, offset - 1) == 58
+}
+function qualifiedNamesMatch(left: String, right: String) -> Bool {
+    return qualifiedSuffix(left, right) || qualifiedSuffix(right, left)
+}
+// `auto` and `auto&`, whose type the initializer decides.
+function isDeducedSpelling(ty: String) -> Bool {
+    match ty {
+        "auto", "*[0 x auto]" -> return true
+        else -> return false
+    }
+}
+function isFloatSpelling(ty: String) -> Bool {
+    match ty {
+        "f32", "f64" -> return true
+        else -> return false
+    }
+}

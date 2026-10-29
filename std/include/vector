@@ -1,0 +1,302 @@
+// <vector>: std::vector, a growable array. Elements are constructed in
+// place and destroyed explicitly, so element types with constructors and
+// destructors work; growing moves elements bitwise. Iterators are element
+// pointers. Storage comes from the Allocator parameter.
+#ifndef KARC_STD_VECTOR
+#define KARC_STD_VECTOR
+
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <exception>
+#include <utility>
+#include <initializer_list>
+#include <iterator>
+#include <__allocator>
+
+namespace std {
+
+template <typename T, typename Allocator = allocator<T>>
+class vector {
+public:
+    typedef Allocator allocator_type;
+    typedef T* iterator;
+    typedef const T* const_iterator;
+    typedef T value_type;
+    typedef size_t size_type;
+    typedef T& reference;
+    typedef const T& const_reference;
+
+    vector() : items_(0), size_(0), room_(0) {}
+    explicit vector(const Allocator& alloc) : alloc_(alloc), items_(0), size_(0), room_(0) {}
+    vector(size_t count) : items_(0), size_(0), room_(0) { resize(count); }
+    vector(size_t count, const T& value) : items_(0), size_(0), room_(0) { assign(count, value); }
+    vector(initializer_list<T> list) : items_(0), size_(0), room_(0) {
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+    }
+    vector(initializer_list<T> list, const Allocator& alloc) : alloc_(alloc), items_(0), size_(0), room_(0) {
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+    }
+    template <typename I>
+    vector(I first, I last) : items_(0), size_(0), room_(0) {
+        for (; first != last; ++first) { push_back(*first); }
+    }
+    vector(const vector& other) : alloc_(other.alloc_), items_(0), size_(0), room_(0) {
+        reserve(other.size_);
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.items_[i]); }
+    }
+    vector(vector&& other) : alloc_(other.alloc_), items_(other.items_), size_(other.size_), room_(other.room_) {
+        other.items_ = 0;
+        other.size_ = 0;
+        other.room_ = 0;
+    }
+    ~vector() {
+        clear();
+        if (items_ != 0) { alloc_.deallocate(items_, room_); }
+    }
+    Allocator get_allocator() const { return alloc_; }
+
+    vector& operator=(const vector& other) {
+        if (this == &other) { return *this; }
+        clear();
+        reserve(other.size_);
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.items_[i]); }
+        return *this;
+    }
+    vector& operator=(vector&& other) {
+        swap(other);
+        return *this;
+    }
+    vector& operator=(initializer_list<T> list) {
+        clear();
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+        return *this;
+    }
+    void assign(size_t count, const T& value) {
+        clear();
+        reserve(count);
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+    }
+    void assign(initializer_list<T> list) {
+        clear();
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+    }
+    template <typename R>
+    void assign_range(R&& range) {
+        clear();
+        for (auto&& item : range) { push_back(item); }
+    }
+    template <typename R>
+    void append_range(R&& range) {
+        for (auto&& item : range) { push_back(item); }
+    }
+    template <typename R>
+    T* insert_range(T* position, R&& range) {
+        size_t index = position - items_;
+        size_t count = 0;
+        for (auto&& item : range) {
+            push_back(item);
+            count++;
+        }
+        rotateBack(index, count);
+        return items_ + index;
+    }
+    template <typename I>
+    void assign(I first, I last) {
+        clear();
+        for (; first != last; ++first) { push_back(*first); }
+    }
+
+    T& operator[](size_t index) { return items_[index]; }
+    T& at(size_t index) {
+        if (index >= size_) { karc_throw_out_of_range("vector::at"); }
+        return items_[index];
+    }
+    T& front() { return items_[0]; }
+    T& back() { return items_[size_ - 1]; }
+    T* data() { return items_; }
+    T* begin() { return items_; }
+    T* end() { return items_ + size_; }
+    const T* cbegin() const { return items_; }
+    const T* cend() const { return items_ + size_; }
+    reverse_iterator<T*> rbegin() { return reverse_iterator<T*>(items_ + size_); }
+    reverse_iterator<T*> rend() { return reverse_iterator<T*>(items_); }
+    reverse_iterator<T*> crbegin() const { return reverse_iterator<T*>(items_ + size_); }
+    reverse_iterator<T*> crend() const { return reverse_iterator<T*>(items_); }
+
+    size_t size() const { return size_; }
+    size_t capacity() const { return room_; }
+    size_t max_size() const { return 1152921504606846975ul / sizeof(T); }
+    bool empty() const { return size_ == 0; }
+
+    void reserve(size_t wanted) {
+        if (wanted <= room_) { return; }
+        T* grown = alloc_.allocate(wanted);
+        memset(grown, 0, wanted * sizeof(T));
+        if (items_ != 0) {
+            memcpy(grown, items_, size_ * sizeof(T));
+            alloc_.deallocate(items_, room_);
+        }
+        items_ = grown;
+        room_ = wanted;
+    }
+    void shrink_to_fit() {}
+    void push_back(const T& value) {
+        if (size_ == room_) { grow(); }
+        new (&items_[size_]) T(value);
+        size_++;
+    }
+    void push_back(T&& value) {
+        if (size_ == room_) { grow(); }
+        new (&items_[size_]) T(std::move(value));
+        size_++;
+    }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        if (size_ == room_) { grow(); }
+        new (&items_[size_]) T(std::forward<Args>(args)...);
+        size_++;
+        return items_[size_ - 1];
+    }
+    void pop_back() {
+        if (size_ == 0) { return; }
+        size_--;
+        items_[size_].~T();
+    }
+    // Destroys the elements first to last, as libstdc++ does.
+    void clear() {
+        for (size_t i = 0; i < size_; i++) { items_[i].~T(); }
+        size_ = 0;
+    }
+    void resize(size_t count) {
+        while (size_ > count) { pop_back(); }
+        reserve(count);
+        while (size_ < count) {
+            new (&items_[size_]) T();
+            size_++;
+        }
+    }
+    void resize(size_t count, const T& value) {
+        while (size_ > count) { pop_back(); }
+        reserve(count);
+        while (size_ < count) { push_back(value); }
+    }
+
+    T* insert(T* position, const T& value) {
+        size_t index = position - items_;
+        push_back(value);
+        rotateBack(index, 1);
+        return items_ + index;
+    }
+    T* insert(T* position, size_t count, const T& value) {
+        size_t index = position - items_;
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+        rotateBack(index, count);
+        return items_ + index;
+    }
+    T* insert(T* position, initializer_list<T> list) {
+        size_t index = position - items_;
+        size_t count = 0;
+        for (const T* item = list.begin(); item != list.end(); item++) {
+            push_back(*item);
+            count++;
+        }
+        rotateBack(index, count);
+        return items_ + index;
+    }
+    template <typename I>
+    T* insert(T* position, I first, I last) {
+        size_t index = position - items_;
+        size_t count = 0;
+        for (; first != last; ++first) {
+            push_back(*first);
+            count++;
+        }
+        rotateBack(index, count);
+        return items_ + index;
+    }
+    template <typename... Args>
+    T* emplace(T* position, Args&&... args) {
+        size_t index = position - items_;
+        emplace_back(std::forward<Args>(args)...);
+        rotateBack(index, 1);
+        return items_ + index;
+    }
+    T* erase(T* position) { return erase(position, position + 1); }
+    T* erase(T* first, T* last) {
+        size_t index = first - items_;
+        size_t count = last - first;
+        if (count == 0) { return first; }
+        for (size_t i = index; i + count < size_; i++) { items_[i] = items_[i + count]; }
+        for (size_t i = 0; i < count; i++) { pop_back(); }
+        return items_ + index;
+    }
+    void swap(vector& other) {
+        Allocator alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+        T* items = items_;
+        size_t size = size_;
+        size_t room = room_;
+        items_ = other.items_;
+        size_ = other.size_;
+        room_ = other.room_;
+        other.items_ = items;
+        other.size_ = size;
+        other.room_ = room;
+    }
+
+    bool operator==(const vector& other) const {
+        if (size_ != other.size_) { return false; }
+        for (size_t i = 0; i < size_; i++) {
+            if (!(items_[i] == other.items_[i])) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const vector& other) const { return !(*this == other); }
+    bool operator<(const vector& other) const {
+        for (size_t i = 0; i < size_ && i < other.size_; i++) {
+            if (items_[i] < other.items_[i]) { return true; }
+            if (other.items_[i] < items_[i]) { return false; }
+        }
+        return size_ < other.size_;
+    }
+    bool operator>(const vector& other) const { return other < *this; }
+    bool operator<=(const vector& other) const { return !(other < *this); }
+    bool operator>=(const vector& other) const { return !(*this < other); }
+
+private:
+    void grow() {
+        size_t wanted = room_ * 2;
+        if (wanted < 4) { wanted = 4; }
+        reserve(wanted);
+    }
+    // Moves the last `count` elements to `index`, shifting the rest back.
+    void rotateBack(size_t index, size_t count) {
+        size_t start = size_ - count;
+        if (index >= start) { return; }
+        reverseRange(index, start);
+        reverseRange(start, size_);
+        reverseRange(index, size_);
+    }
+    void reverseRange(size_t first, size_t last) {
+        while (first + 1 < last) {
+            last--;
+            std::swap(items_[first], items_[last]);
+            first++;
+        }
+    }
+
+    Allocator alloc_;
+    T* items_;
+    size_t size_;
+    size_t room_;
+};
+
+template <typename T, typename A>
+void swap(vector<T, A>& a, vector<T, A>& b) { a.swap(b); }
+
+}
+
+#endif

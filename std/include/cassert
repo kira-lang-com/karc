@@ -1,0 +1,15 @@
+// <cassert>: `assert` stops the program when its condition is false, unless
+// NDEBUG is defined.
+#ifndef KARC_STD_CASSERT
+#define KARC_STD_CASSERT
+
+void karc_assert(int holds, const char* condition, const char* file, int line);
+
+#endif
+
+#undef assert
+#ifdef NDEBUG
+#define assert(condition)
+#else
+#define assert(condition) karc_assert((condition) != 0, "assertion failed", "", 0)
+#endif

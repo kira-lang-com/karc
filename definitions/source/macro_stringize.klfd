@@ -1,0 +1,25 @@
+function macroArgument(arguments: Arguments, parameter: Int) -> [Token] {
+    var slice: [Token] = []
+    for i in 0..arguments.lengths[parameter] {
+        slice.append(arguments.values[arguments.starts[parameter] + i])
+    }
+    return slice
+}
+
+function stringizeArgument(arguments: Arguments, parameter: Int, at: Token) -> Token {
+    let source = macroArgument(arguments, parameter)
+    var pieces: [String] = []
+    var first = true
+    for t in source {
+        if !first && t.space { pieces.append(" ") }
+        let spelling = sourceSpelling(t)
+        for i in 0..utf8Count(spelling) {
+            let c = utf8Byte(spelling, i)
+            if c == 92 || c == 34 { pieces.append("\\") }
+            pieces.append(utf8Slice(spelling, i, i + 1))
+        }
+        first = false
+    }
+    let raw = joinText(pieces)
+    return Token { space = false, spelling = joinText(["\"", raw, "\""]), kind = .Str, text = raw, number = 0, start = at.start, end = at.end, line = false }
+}

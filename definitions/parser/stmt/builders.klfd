@@ -1,0 +1,61 @@
+function sDeclare(name: String, declType: String, reference: Int, initializer: ExprId, span: Span) -> Statement {
+    return Statement { kind = .Declare(LocalDeclaration { name = name, declType = declType, reference = reference, initializer = initializer }), span = span }
+}
+function sAssignment(place: ExprId, value: ExprId, span: Span) -> Statement {
+    return Statement { kind = .Assignment(AssignmentStatement { place = place, value = value }), span = span }
+}
+function sArrayDecl(name: String, elementType: String, size: Int, initializer: ExprId, span: Span) -> Statement {
+    return Statement { kind = .ArrayDecl(ArrayDeclaration { name = name, elementType = elementType, size = size, initializer = initializer }), span = span }
+}
+function sStructDecl(name: String, declType: String, initializer: ExprId, span: Span) -> Statement {
+    return Statement { kind = .StructDecl(StructDeclaration { name = name, declType = declType, initializer = initializer }), span = span }
+}
+function sGroup(body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .Group(body), span = span }
+}
+function sDeclGroup(body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .DeclGroup(body), span = span }
+}
+function sExpr(expression: ExprId, span: Span) -> Statement {
+    return Statement { kind = .ExprStmt(expression), span = span }
+}
+function sReturn(marker: String, value: ExprId, span: Span) -> Statement {
+    return Statement { kind = .Return(ReturnStatement { marker = marker, value = value }), span = span }
+}
+function sWhile(condition: ExprId, initializer: Optional<LocalDeclaration>, body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .While(WhileStatement { condition = condition, body = body, initializer = initializer }), span = span }
+}
+function sDoWhile(condition: ExprId, body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .DoWhile(WhileStatement { condition = condition, body = body, initializer = .None }), span = span }
+}
+function sFor(condition: ExprId, body: [StmtId], control: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .For(ForStatement { condition = condition, body = body, control = control }), span = span }
+}
+function sIf(condition: ExprId, initializer: Optional<LocalDeclaration>, body: [StmtId], elseBody: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .If(IfStatement { condition = condition, initializer = initializer, body = body, elseBody = elseBody }), span = span }
+}
+function sSwitch(expression: ExprId, body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .Switch(SwitchStatement { expression = expression, body = body }), span = span }
+}
+function sCase(expression: ExprId, span: Span) -> Statement {
+    return Statement { kind = .Case(expression), span = span }
+}
+function sDefault(span: Span) -> Statement {
+    return Statement { kind = .Default, span = span }
+}
+function sBreak(span: Span) -> Statement {
+    return Statement { kind = .Break, span = span }
+}
+function sContinue(span: Span) -> Statement {
+    return Statement { kind = .Continue, span = span }
+}
+function sRangeFor(name: String, declType: String, reference: Int, range: ExprId, body: [StmtId], span: Span) -> Statement {
+    return Statement { kind = .RangeFor(RangeForStatement { name = name, declType = declType, reference = reference, range = range, body = body }), span = span }
+}
+function sGlobalInit(name: String, declType: String, arraySize: Int, initializer: ExprId, span: Span) -> Statement {
+    return Statement { kind = .GlobalInit(GlobalInitialization { name = name, declType = declType, arraySize = arraySize, initializer = initializer }), span = span }
+}
+function sTry(body: [StmtId], handlers: [CatchStatement], span: Span) -> Statement {
+    return Statement { kind = .Try(TryStatement { body = body, handlers = handlers }), span = span }
+}
+// Expression node builders. Unused child slots use `noExpr` and unused text is "".

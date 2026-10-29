@@ -1,0 +1,205 @@
+// The one declaration extending Language required by KLF-RIDL section 7.5
+// rule 1. It declares the KArc C++ subset: the metadata the kernel uses to
+// discover the language and route commands, the codes it reports, and the four
+// phases.
+//
+// The phases divide the frontend the way section 7.2 describes: `parse` lexes
+// and parses one translation unit, `elaborate` runs the whole-program checks
+// over the tree it produced, and `lower` only lowers. The tree travels between
+// them as a definition-owned artifact.
+
+function diagnosticOffset(value: Int) -> Int {
+    var raw = value
+    if raw < 0 { raw = 0 - raw }
+    return raw % 4294967296
+}
+
+// A token spliced in from an included header carries the header's content
+// hash in its encoded start, so the error is reported in that header.
+function reportAt(code: Int, encodedStart: Int, start: Int, end: Int) {
+    if encodedStart < 0 {
+        diag_error_origin((0 - encodedStart) / 4294967296, code, start, end)
+    } else {
+        diag_error(code, start, end)
+    }
+}
+
+construct KArc() extends Language<Tree, Program> {
+    let name: String = "karc"
+    let driver: String = "karc"
+    let version: String = "1.0.0"
+    let extensions: [String] = ["c", "cpp", "cc", "cxx", "h", "hpp", "inl", "krc", "krch"]
+    let memory: MemoryModel = .Unmanaged
+    let exclusivity: Exclusivity = .None
+    let convention: DefaultConvention = .Ridl
+    let stdRoot: String = "std"
+    // A C++ program is a C process: `main`'s value is the exit status.
+    let entry: EntryConvention = .Process
+
+    // Section 28.1: `.cpp` is clang's C++, so the package default is manual
+    // memory. `.krc` is the dialect where reference counting is mandatory, and
+    // it is the extension that puts a file in that mode — the `arc` pragma and
+    // flag exist to migrate a `.cpp` tree without renaming it.
+    let fileModes: [FileMode] = [FileMode {
+        name = "c",
+        pragma = "",
+        flag = "",
+        extensions = ["c"],
+        memory = .Some(.Unmanaged),
+        convention = .Some(.Platform)
+    }, FileMode {
+        name = "arc",
+        pragma = "karc arc",
+        flag = "-fkarc-arc",
+        extensions = ["krc", "krch"],
+        memory = .Some(.Counted),
+        convention = .None
+    }]
+
+    // Every numeric code karc reports, per section 31.4. The kernel renders the
+    // title and the explanation at the span the phase reported.
+    let diagnostics: [DiagnosticSpec] = [
+        DiagnosticSpec { code = 1001, severity = .Error, title = "lex error",
+            explanation = "the lexer rejected the source at this byte" },
+        DiagnosticSpec { code = 1002, severity = .Error, title = "parse error",
+            explanation = "the parser rejected this token" },
+        DiagnosticSpec { code = 1003, severity = .Error, title = "duplicate local",
+            explanation = "a local with this name is already visible" },
+        DiagnosticSpec { code = 1010, severity = .Error, title = "unsupported pointer operation",
+            explanation = "this pointer operation is outside the subset" },
+        DiagnosticSpec { code = 1018, severity = .Error, title = "call to main",
+            explanation = "`main` cannot be called" },
+        DiagnosticSpec { code = 1021, severity = .Error, title = "unknown name",
+            explanation = "this name is not declared" },
+        DiagnosticSpec { code = 1022, severity = .Error, title = "unsupported expression",
+            explanation = "this expression form is outside the subset" },
+        DiagnosticSpec { code = 1027, severity = .Error, title = "break outside a loop",
+            explanation = "`break` outside a loop or switch" },
+        DiagnosticSpec { code = 1028, severity = .Error, title = "continue outside a loop",
+            explanation = "`continue` outside a loop" },
+        DiagnosticSpec { code = 1029, severity = .Error, title = "missing final return",
+            explanation = "a non-void function must end in `return`" },
+        DiagnosticSpec { code = 1030, severity = .Error, title = "duplicate function",
+            explanation = "this function is defined twice" },
+        DiagnosticSpec { code = 1031, severity = .Error, title = "invalid main parameters",
+            explanation = "`main` takes no parameters, `(int argc, char** argv)`, or those and `char** envp`" },
+        DiagnosticSpec { code = 1033, severity = .Error, title = "missing main",
+            explanation = "the program has no `main`" },
+        DiagnosticSpec { code = 1034, severity = .Error, title = "duplicate global",
+            explanation = "this global is declared twice" },
+        DiagnosticSpec { code = 1035, severity = .Error, title = "wrong builtin argument count",
+            explanation = "`__builtin_klf_alloc` takes a size and an alignment, `__builtin_klf_free` one pointer, `__builtin_klf_va_start` none and only in a variadic function" },
+        DiagnosticSpec { code = 1036, severity = .Error, title = "template instance does not parse",
+            explanation = "substituting the deduced arguments into this function template does not give a declaration the subset accepts" },
+        DiagnosticSpec { code = 1037, severity = .Error, title = "deleted function",
+            explanation = "this call chooses a function declared `= delete`" },
+        DiagnosticSpec { code = 1038, severity = .Error, title = "undefined label",
+            explanation = "the goto target is not defined in this function" },
+        DiagnosticSpec { code = 1039, severity = .Error, title = "duplicate label",
+            explanation = "this label is defined twice in one function" },
+        DiagnosticSpec { code = 1040, severity = .Error, title = "case outside switch",
+            explanation = "a case or default label must belong to a switch" },
+        DiagnosticSpec { code = 1101, severity = .Error, title = "malformed directive",
+            explanation = "this preprocessing directive is not well formed" },
+        DiagnosticSpec { code = 1102, severity = .Error, title = "unknown directive",
+            explanation = "this preprocessing directive is not recognised" },
+        DiagnosticSpec { code = 1103, severity = .Error, title = "unbalanced conditional",
+            explanation = "a conditional directive has no matching #if or #endif" },
+        DiagnosticSpec { code = 1104, severity = .Error, title = "wrong macro argument count",
+            explanation = "this function-like macro was invoked with the wrong number of arguments" },
+        DiagnosticSpec { code = 1105, severity = .Error, title = "invalid token paste",
+            explanation = "token pasting did not produce one valid token" },
+        DiagnosticSpec { code = 1106, severity = .Error, title = "include source is not found",
+            explanation = "the requested header is not a registered source" },
+        DiagnosticSpec { code = 1107, severity = .Error, title = "preprocessor error",
+            explanation = "the source requested a preprocessing error" },
+        DiagnosticSpec { code = 1200, severity = .Error, title = "parse reached end of file",
+            explanation = "the parser expected another token" },
+        DiagnosticSpec { code = 1201, severity = .Error, title = "parse expected a closing brace",
+            explanation = "the parser expected `}`" },
+        DiagnosticSpec { code = 1202, severity = .Error, title = "parse expected a semicolon",
+            explanation = "the parser expected `;`" },
+        DiagnosticSpec { code = 1203, severity = .Error, title = "parse expected a closing parenthesis",
+            explanation = "the parser expected `)`" },
+        DiagnosticSpec { code = 1204, severity = .Error, title = "parse expected a closing bracket",
+            explanation = "the parser expected `]`" },
+        DiagnosticSpec { code = 1205, severity = .Error, title = "parse expected an identifier",
+            explanation = "the parser expected an identifier" },
+        DiagnosticSpec { code = 1206, severity = .Error, title = "parse expected a closing angle",
+            explanation = "the parser expected `>`" },
+        DiagnosticSpec { code = 1207, severity = .Error, title = "parse expected an opening parenthesis",
+            explanation = "the parser expected `(`" },
+        DiagnosticSpec { code = 1208, severity = .Error, title = "parse expected an assignment or call",
+            explanation = "the statement was not an assignment or call" },
+        DiagnosticSpec { code = 1209, severity = .Error, title = "parse expected an expression",
+            explanation = "the parser expected an expression" },
+        DiagnosticSpec { code = 1210, severity = .Error, title = "parse expected a call name",
+            explanation = "the call target was not a name" },
+        DiagnosticSpec { code = 1211, severity = .Error, title = "parse expected a colon",
+            explanation = "the parser expected `:`" },
+        DiagnosticSpec { code = 1212, severity = .Error, title = "parse expected a type",
+            explanation = "the parser expected a type" }
+    ]
+
+    // One translation unit per source file, as the KArc profile requires.
+    // This is the only call that sees the whole program, so the rules that
+    // span units are checked here.
+    function units(session: Session, inputs: [SourceFile]) -> [Unit] {
+        checkProgram(session, inputs)
+        var result: [Unit] = []
+        for file in inputs {
+            let name = fileName(session, file)
+            let size = utf8Count(name)
+            let header = (size >= 2 && utf8Slice(name, size - 2, size) == ".h") ||
+                (size >= 4 && utf8Slice(name, size - 4, size) == ".hpp") ||
+                (size >= 4 && utf8Slice(name, size - 4, size) == ".inl")
+            if !header {
+                result.append(definition_unit(session, file))
+            }
+        }
+        return result
+    }
+
+    function parse(session: Session, unit: Unit) -> Tree {
+        let source = sourceText()
+        let lexed = lex(source)
+        if lexed.error != "" {
+            let offset = diagnosticOffset(lexed.errorOffset)
+            diag_error(diagLexError(), offset, offset + 1)
+            return definition_tree(session, unit, 0)
+        }
+        let processed = preprocessForTarget(lexed.tokens, sourceName(), targetTriple(session))
+        if processed.code != 0 {
+            let start = diagnosticOffset(processed.errorOffset)
+            let end = diagnosticOffset(processed.errorEnd)
+            reportAt(processed.code, processed.errorOffset, start, end)
+            return definition_tree(session, unit, 0)
+        }
+        let parsed = parseTokens(rewriteConstraints(processed.tokens), sourceName())
+        if parsed.error != "" {
+            var code = diagParseDetail(parsed.error)
+            if parsed.expected != .End || parsed.error == "Unexpected token ``" {
+                code = diagParseEnd(parsed.expected)
+            }
+            var offset = diagnosticOffset(parsed.errorOffset)
+            if parsed.errorOffset >= 0 && offset >= source_len() && source_len() > 0 { offset = source_len() - 1 }
+            reportAt(code, parsed.errorOffset, offset, offset + 1)
+            return definition_tree(session, unit, 0)
+        }
+        return definition_tree(session, unit, artifactHandle(parsed.tree))
+    }
+
+    // This subset resolves names while lowering, so elaboration is the
+    // whole-program pass: it checks the rules the lowering assumes hold and
+    // carries the tree through.
+    function elaborate(session: Session, unit: Unit, tree: Tree) -> Program {
+        let payload = definition_tree_payload(session, tree)
+        let parsed: CppTree = artifactValue(payload)
+        checkTree(parsed)
+        return definition_program(session, unit, payload)
+    }
+
+    function lower(session: Session, unit: Unit, program: Program) -> KirModule {
+        return lowerModule(session, unit, program)
+    }
+}

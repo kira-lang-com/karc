@@ -1,0 +1,99 @@
+// <utility>: swap, move, forward and pair. move and forward name their
+// argument as an rvalue, which picks `&&` overloads such as move
+// constructors.
+#ifndef KARC_STD_UTILITY
+#define KARC_STD_UTILITY
+
+#include <cstddef>
+#include <cstdlib>
+#include <type_traits>
+
+namespace std {
+
+template <typename T>
+T&& move(T& value) { return value; }
+
+template <typename T>
+T&& forward(T& value) { return value; }
+
+template <typename T>
+void swap(T& a, T& b) {
+    T saved = std::move(a);
+    a = std::move(b);
+    b = std::move(saved);
+}
+
+template <typename A, typename B>
+struct pair {
+    A first;
+    B second;
+    pair() : first(), second() {}
+    pair(const A& a, const B& b) : first(a), second(b) {}
+    // From a pair of other types, each member converted.
+    template <typename C, typename D>
+    pair(const pair<C, D>& other) : first(other.first), second(other.second) {}
+    bool operator==(const pair<A, B>& other) const { return first == other.first && second == other.second; }
+    bool operator!=(const pair<A, B>& other) const { return !(first == other.first && second == other.second); }
+    bool operator<(const pair<A, B>& other) const {
+        if (first < other.first) { return true; }
+        if (other.first < first) { return false; }
+        return second < other.second;
+    }
+    bool operator>(const pair<A, B>& other) const { return other < *this; }
+    bool operator<=(const pair<A, B>& other) const { return !(other < *this); }
+    bool operator>=(const pair<A, B>& other) const { return !(*this < other); }
+    void swap(pair<A, B>& other) {
+        std::swap(first, other.first);
+        std::swap(second, other.second);
+    }
+};
+
+template <typename T, typename U>
+T exchange(T& target, const U& replacement) {
+    T old = std::move(target);
+    target = replacement;
+    return old;
+}
+template <typename T>
+const T& as_const(T& value) { return value; }
+template <typename A, typename B>
+bool cmp_equal(A a, B b) { return (a < 0) == (b < 0) && (long)a == (long)b; }
+template <typename A, typename B>
+bool cmp_not_equal(A a, B b) { return !cmp_equal(a, b); }
+template <typename A, typename B>
+bool cmp_less(A a, B b) {
+    if ((a < 0) != (b < 0)) { return a < 0; }
+    return (unsigned long)a < (unsigned long)b;
+}
+template <typename A, typename B>
+bool cmp_greater(A a, B b) { return cmp_less(b, a); }
+template <typename A, typename B>
+bool cmp_less_equal(A a, B b) { return !cmp_less(b, a); }
+template <typename A, typename B>
+bool cmp_greater_equal(A a, B b) { return !cmp_less(a, b); }
+template <typename T>
+int to_underlying(T value) { return (int)value; }
+inline void unreachable() { abort(); }
+
+struct piecewise_construct_t { int unused; };
+static piecewise_construct_t piecewise_construct;
+struct in_place_t { int unused; };
+static in_place_t in_place;
+
+template <typename T, T... Values>
+struct integer_sequence {
+    static size_t size() { return sizeof...(Values); }
+    int unused;
+};
+template <size_t... Values>
+using index_sequence = integer_sequence<size_t, Values...>;
+
+template <typename A, typename B>
+pair<A, B> make_pair(A a, B b) {
+    pair<A, B> result{a, b};
+    return result;
+}
+
+}
+
+#endif

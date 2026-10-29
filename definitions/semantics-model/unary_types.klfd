@@ -1,0 +1,6 @@
+function promotedUnaryType(ty: String) -> String {
+    match ty {
+        "i1", "i8", "u8", "i16", "u16" -> return "i32"
+        else -> return ty
+    }
+}

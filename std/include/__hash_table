@@ -1,0 +1,259 @@
+// Part of <unordered_map> and <unordered_set>: a chained hash table. Every
+// node is also on one doubly linked list, which iterators walk; equal keys
+// sit next to each other on it. The buckets chain the nodes by hash. The
+// key readers come from <__tree>. Nodes and buckets come from the
+// container's allocator, as runs of its values.
+#ifndef KARC_STD_HASH_TABLE
+#define KARC_STD_HASH_TABLE
+
+#include <cstddef>
+#include <cstdlib>
+#include <new>
+#include <utility>
+#include <functional>
+#include <initializer_list>
+#include <__tree>
+#include <cstring>
+#include <__allocator>
+
+namespace std {
+
+template <typename V>
+struct karc_hash_node {
+    karc_hash_node<V>* next;
+    karc_hash_node<V>* previous;
+    karc_hash_node<V>* chain;
+    size_t hash;
+    V value;
+};
+
+template <typename V>
+class karc_hash_iterator {
+public:
+    karc_hash_iterator() : node_(0) {}
+    karc_hash_iterator(karc_hash_node<V>* node) : node_(node) {}
+    V& operator*() const { return node_->value; }
+    V* operator->() const { return &node_->value; }
+    karc_hash_iterator& operator++() {
+        node_ = node_->next;
+        return *this;
+    }
+    karc_hash_iterator operator++(int) {
+        karc_hash_iterator old(node_);
+        node_ = node_->next;
+        return old;
+    }
+    bool operator==(const karc_hash_iterator& other) const { return node_ == other.node_; }
+    bool operator!=(const karc_hash_iterator& other) const { return node_ != other.node_; }
+    karc_hash_node<V>* node_;
+};
+
+// Values V keyed by K, which KeyOf reads, hashed by H and compared by E.
+template <typename K, typename V, typename KeyOf, typename H, typename E, typename A>
+class karc_hash_table {
+public:
+    karc_hash_table() : sentinel_(0), buckets_(0), bucketCount_(0), size_(0), maxLoad_(1.0f) { init(8); }
+    karc_hash_table(const A& alloc) : sentinel_(0), buckets_(0), bucketCount_(0), size_(0), maxLoad_(1.0f), alloc_(alloc) { init(8); }
+    karc_hash_table(const karc_hash_table& other) : sentinel_(0), buckets_(0), bucketCount_(0), size_(0), maxLoad_(other.maxLoad_), hash_(other.hash_), equal_(other.equal_), alloc_(other.alloc_) {
+        init(other.bucketCount_);
+        copyFrom(other);
+    }
+    karc_hash_table(karc_hash_table&& other) : sentinel_(0), buckets_(0), bucketCount_(0), size_(0), maxLoad_(other.maxLoad_), alloc_(other.alloc_) {
+        init(8);
+        swap(other);
+    }
+    ~karc_hash_table() {
+        clear();
+        freeNode(sentinel_);
+        freeBuckets(buckets_, bucketCount_);
+    }
+    A get_allocator() const { return alloc_; }
+    karc_hash_table& operator=(const karc_hash_table& other) {
+        if (this == &other) { return *this; }
+        clear();
+        copyFrom(other);
+        return *this;
+    }
+    karc_hash_table& operator=(karc_hash_table&& other) {
+        swap(other);
+        return *this;
+    }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    karc_hash_iterator<V> begin() const { return karc_hash_iterator<V>(sentinel_->next); }
+    karc_hash_iterator<V> end() const { return karc_hash_iterator<V>(sentinel_); }
+    size_t bucket_count() const { return bucketCount_; }
+    size_t bucket(const K& key) const { return hash_(key) % bucketCount_; }
+    float load_factor() const { return (float)size_ / (float)bucketCount_; }
+    float max_load_factor() const { return maxLoad_; }
+    void max_load_factor(float value) {
+        maxLoad_ = value;
+        grow(size_);
+    }
+    void rehash(size_t count) {
+        if (count < 8) { count = 8; }
+        if ((float)size_ / (float)count > maxLoad_) { count = (size_t)((float)size_ / maxLoad_) + 1; }
+        rebuild(count);
+    }
+    void reserve(size_t count) { grow(count); }
+    H hash_function() const { return hash_; }
+    E key_eq() const { return equal_; }
+
+    karc_hash_iterator<V> find(const K& key) const {
+        size_t hash = hash_(key);
+        for (karc_hash_node<V>* at = buckets_[hash % bucketCount_]; at != 0; at = at->chain) {
+            if (at->hash == hash && equal_(key_(at->value), key)) {
+                // The first of equal keys in list order.
+                while (at->previous != sentinel_ && equal_(key_(at->previous->value), key)) { at = at->previous; }
+                return karc_hash_iterator<V>(at);
+            }
+        }
+        return end();
+    }
+    size_t count(const K& key) const {
+        size_t total = 0;
+        karc_hash_iterator<V> at = find(key);
+        while (at.node_ != sentinel_ && equal_(key_(at.node_->value), key)) {
+            total++;
+            ++at;
+        }
+        return total;
+    }
+    pair<karc_hash_iterator<V>, karc_hash_iterator<V>> equal_range(const K& key) const {
+        karc_hash_iterator<V> first = find(key);
+        karc_hash_iterator<V> last = first;
+        while (last.node_ != sentinel_ && equal_(key_(last.node_->value), key)) { ++last; }
+        return pair<karc_hash_iterator<V>, karc_hash_iterator<V>>(first, last);
+    }
+
+    pair<karc_hash_iterator<V>, bool> insertUnique(const V& value) {
+        karc_hash_iterator<V> found = find(key_(value));
+        if (found.node_ != sentinel_) { return pair<karc_hash_iterator<V>, bool>(found, false); }
+        return pair<karc_hash_iterator<V>, bool>(karc_hash_iterator<V>(link(value, sentinel_)), true);
+    }
+    // After the equal keys already there, or at the end.
+    karc_hash_iterator<V> insertMulti(const V& value) {
+        return karc_hash_iterator<V>(link(value, equal_range(key_(value)).second.node_));
+    }
+    karc_hash_iterator<V> erase(karc_hash_iterator<V> position) {
+        karc_hash_node<V>* doomed = position.node_;
+        karc_hash_node<V>* next = doomed->next;
+        karc_hash_node<V>** link = &buckets_[doomed->hash % bucketCount_];
+        while (*link != doomed) { link = &(*link)->chain; }
+        *link = doomed->chain;
+        doomed->previous->next = next;
+        next->previous = doomed->previous;
+        doomed->value.~V();
+        freeNode(doomed);
+        size_--;
+        return karc_hash_iterator<V>(next);
+    }
+    size_t eraseKey(const K& key) {
+        size_t total = 0;
+        karc_hash_iterator<V> at = find(key);
+        while (at.node_ != sentinel_ && equal_(key_(at.node_->value), key)) {
+            at = erase(at);
+            total++;
+        }
+        return total;
+    }
+    void clear() {
+        while (size_ > 0) { erase(begin()); }
+    }
+    void swap(karc_hash_table& other) {
+        karc_hash_node<V>* sentinel = sentinel_;
+        sentinel_ = other.sentinel_;
+        other.sentinel_ = sentinel;
+        karc_hash_node<V>** buckets = buckets_;
+        buckets_ = other.buckets_;
+        other.buckets_ = buckets;
+        size_t bucketCount = bucketCount_;
+        bucketCount_ = other.bucketCount_;
+        other.bucketCount_ = bucketCount;
+        size_t size = size_;
+        size_ = other.size_;
+        other.size_ = size;
+        float maxLoad = maxLoad_;
+        maxLoad_ = other.maxLoad_;
+        other.maxLoad_ = maxLoad;
+        A alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+    }
+
+private:
+    void init(size_t count) {
+        sentinel_ = newNode();
+        sentinel_->next = sentinel_;
+        sentinel_->previous = sentinel_;
+        bucketCount_ = count;
+        buckets_ = newBuckets(count);
+    }
+    typedef typename A::value_type Unit;
+    static size_t unitsFor(size_t bytes) { return (bytes + sizeof(Unit) - 1) / sizeof(Unit); }
+    karc_hash_node<V>* newNode() {
+        size_t units = unitsFor(sizeof(karc_hash_node<V>));
+        Unit* raw = alloc_.allocate(units);
+        memset(raw, 0, units * sizeof(Unit));
+        return (karc_hash_node<V>*)raw;
+    }
+    void freeNode(karc_hash_node<V>* node) { alloc_.deallocate((Unit*)node, unitsFor(sizeof(karc_hash_node<V>))); }
+    karc_hash_node<V>** newBuckets(size_t count) {
+        size_t units = unitsFor(count * sizeof(karc_hash_node<V>*));
+        Unit* raw = alloc_.allocate(units);
+        memset(raw, 0, units * sizeof(Unit));
+        return (karc_hash_node<V>**)raw;
+    }
+    void freeBuckets(karc_hash_node<V>** buckets, size_t count) { alloc_.deallocate((Unit*)buckets, unitsFor(count * sizeof(karc_hash_node<V>*))); }
+    void copyFrom(const karc_hash_table& other) {
+        for (karc_hash_iterator<V> at = other.begin(); at != other.end(); ++at) { link(*at, sentinel_); }
+    }
+    // A new node for `value` on the list before `before`, in its bucket.
+    karc_hash_node<V>* link(const V& value, karc_hash_node<V>* before) {
+        grow(size_ + 1);
+        karc_hash_node<V>* added = newNode();
+        new (&added->value) V(value);
+        added->hash = hash_(key_(value));
+        added->next = before;
+        added->previous = before->previous;
+        before->previous->next = added;
+        before->previous = added;
+        size_t index = added->hash % bucketCount_;
+        added->chain = buckets_[index];
+        buckets_[index] = added;
+        size_++;
+        return added;
+    }
+    void grow(size_t count) {
+        if ((float)count <= maxLoad_ * (float)bucketCount_) { return; }
+        size_t buckets = bucketCount_ * 2;
+        while ((float)count > maxLoad_ * (float)buckets) { buckets = buckets * 2; }
+        rebuild(buckets);
+    }
+    // Rechains every node into `count` buckets.
+    void rebuild(size_t count) {
+        freeBuckets(buckets_, bucketCount_);
+        bucketCount_ = count;
+        buckets_ = newBuckets(count);
+        for (karc_hash_node<V>* at = sentinel_->previous; at != sentinel_; at = at->previous) {
+            size_t index = at->hash % count;
+            at->chain = buckets_[index];
+            buckets_[index] = at;
+        }
+    }
+
+    karc_hash_node<V>* sentinel_;
+    karc_hash_node<V>** buckets_;
+    size_t bucketCount_;
+    size_t size_;
+    float maxLoad_;
+    H hash_;
+    E equal_;
+    KeyOf key_;
+    A alloc_;
+};
+
+}
+
+#endif

@@ -1,0 +1,24 @@
+// <source_location>: std::source_location. KArc has no builtin for the
+// caller's position, so current() reports an unknown location.
+#ifndef KARC_STD_SOURCE_LOCATION
+#define KARC_STD_SOURCE_LOCATION
+
+namespace std {
+
+class source_location {
+public:
+    source_location() : line_(0), column_(0) {}
+    static source_location current() { return source_location(); }
+    unsigned int line() const { return line_; }
+    unsigned int column() const { return column_; }
+    const char* file_name() const { return "unknown"; }
+    const char* function_name() const { return "unknown"; }
+
+private:
+    unsigned int line_;
+    unsigned int column_;
+};
+
+}
+
+#endif

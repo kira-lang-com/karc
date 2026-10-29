@@ -1,0 +1,136 @@
+// Part of <string>: basic_string over wide characters, which wstring,
+// u16string and u32string name. std::string itself is the separate,
+// narrow class.
+#ifndef KARC_STD_WIDE_STRING
+#define KARC_STD_WIDE_STRING
+
+#include <cstddef>
+#include <vector>
+#include <initializer_list>
+
+namespace std {
+
+template <typename C>
+class basic_string {
+public:
+    typedef C value_type;
+    typedef C* iterator;
+    static const size_t npos = -1;
+
+    basic_string() { items_.push_back(0); }
+    basic_string(const C* text) {
+        for (size_t i = 0; text[i] != 0; i++) { items_.push_back(text[i]); }
+        items_.push_back(0);
+    }
+    basic_string(const C* text, size_t count) {
+        for (size_t i = 0; i < count; i++) { items_.push_back(text[i]); }
+        items_.push_back(0);
+    }
+    basic_string(size_t count, C c) {
+        for (size_t i = 0; i < count; i++) { items_.push_back(c); }
+        items_.push_back(0);
+    }
+    basic_string(initializer_list<C> list) {
+        for (const C* item = list.begin(); item != list.end(); item++) { items_.push_back(*item); }
+        items_.push_back(0);
+    }
+
+    size_t size() const { return items_.size() - 1; }
+    size_t length() const { return items_.size() - 1; }
+    bool empty() const { return items_.size() == 1; }
+    const C* c_str() const { return items_.data(); }
+    const C* data() const { return items_.data(); }
+    C& operator[](size_t index) { return items_[index]; }
+    C& at(size_t index) {
+        if (index >= size()) { karc_throw_out_of_range("basic_string::at"); }
+        return items_[index];
+    }
+    C& front() { return items_[0]; }
+    C& back() { return items_[size() - 1]; }
+    C* begin() { return items_.data(); }
+    C* end() { return items_.data() + size(); }
+    void clear() {
+        items_.clear();
+        items_.push_back(0);
+    }
+    void push_back(C c) {
+        items_.back() = c;
+        items_.push_back(0);
+    }
+    void pop_back() {
+        if (size() > 0) {
+            items_.pop_back();
+            items_.back() = 0;
+        }
+    }
+    void resize(size_t count, C c = 0) {
+        items_.pop_back();
+        items_.resize(count, c);
+        items_.push_back(0);
+    }
+    basic_string& append(const basic_string& other) {
+        for (size_t i = 0; i < other.size(); i++) { push_back(other.items_[i]); }
+        return *this;
+    }
+    basic_string& operator+=(const basic_string& other) { return append(other); }
+    basic_string& operator+=(const C* text) { return append(basic_string(text)); }
+    basic_string& operator+=(C c) {
+        push_back(c);
+        return *this;
+    }
+    basic_string operator+(const basic_string& other) const {
+        basic_string joined(*this);
+        joined.append(other);
+        return joined;
+    }
+    basic_string substr(size_t position, size_t count = npos) const {
+        if (position > size()) { position = size(); }
+        if (count == npos || position + count > size()) { count = size() - position; }
+        return basic_string(items_.data() + position, count);
+    }
+    size_t find(C c, size_t from = 0) const {
+        for (size_t i = from; i < size(); i++) {
+            if (items_[i] == c) { return i; }
+        }
+        return npos;
+    }
+    size_t find(const basic_string& needle, size_t from = 0) const {
+        if (needle.size() == 0) { return from <= size() ? from : npos; }
+        for (size_t i = from; i + needle.size() <= size(); i++) {
+            size_t k = 0;
+            while (k < needle.size() && items_[i + k] == needle.items_[k]) { k++; }
+            if (k == needle.size()) { return i; }
+        }
+        return npos;
+    }
+    int compare(const basic_string& other) const {
+        size_t n = size() < other.size() ? size() : other.size();
+        for (size_t i = 0; i < n; i++) {
+            if (items_[i] != other.items_[i]) { return items_[i] < other.items_[i] ? -1 : 1; }
+        }
+        if (size() == other.size()) { return 0; }
+        return size() < other.size() ? -1 : 1;
+    }
+    bool operator==(const basic_string& other) const { return compare(other) == 0; }
+    bool operator!=(const basic_string& other) const { return compare(other) != 0; }
+    bool operator<(const basic_string& other) const { return compare(other) < 0; }
+
+private:
+    vector<C> items_;
+};
+
+typedef basic_string<wchar_t> wstring;
+typedef basic_string<char16_t> u16string;
+typedef basic_string<char32_t> u32string;
+
+inline wstring to_wstring(long value) {
+    char digits[24];
+    snprintf(digits, 24, "%ld", value);
+    wstring out;
+    for (size_t i = 0; digits[i] != 0; i++) { out.push_back(digits[i]); }
+    return out;
+}
+
+}
+
+#endif

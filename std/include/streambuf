@@ -1,0 +1,7 @@
+// <streambuf>: the stream classes, which <iostream> defines.
+#ifndef KARC_STD_STREAMBUF
+#define KARC_STD_STREAMBUF
+
+#include <iostream>
+
+#endif

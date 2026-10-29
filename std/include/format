@@ -1,0 +1,356 @@
+// <format>: std::format and format_to over `{}` replacement fields. A field
+// is `{}`, `{N}` or either with `:spec`, where spec is
+// [[fill]align][sign][#][0][width][.precision][type], width and precision
+// also `{}` or `{N}` taking an argument; `{{` and `}}` are literal braces.
+// Arguments are integers, floating-point values, characters, booleans,
+// strings and pointers, and any class with a std::formatter
+// specialization, which renders it through format_context.
+#ifndef KARC_STD_FORMAT
+#define KARC_STD_FORMAT
+
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <iterator>
+#include <exception>
+
+namespace std {
+
+class format_error : public exception {
+public:
+    format_error(const char* message) : message_(message) {}
+    const char* what() const override { return message_; }
+private:
+    const char* message_;
+};
+
+// One argument, type-erased: its kind and value.
+class karc_format_arg {
+public:
+    karc_format_arg() : kind_(0), integer_(0), real_(0.0), text_(0) {}
+    karc_format_arg(int value) : kind_(1), integer_(value), real_(0.0), text_(0) {}
+    karc_format_arg(long value) : kind_(1), integer_(value), real_(0.0), text_(0) {}
+    karc_format_arg(unsigned int value) : kind_(2), integer_(value), real_(0.0), text_(0) {}
+    karc_format_arg(unsigned long value) : kind_(2), integer_((long)value), real_(0.0), text_(0) {}
+    karc_format_arg(double value) : kind_(3), integer_(0), real_(value), text_(0) {}
+    karc_format_arg(char value) : kind_(4), integer_(value), real_(0.0), text_(0) {}
+    karc_format_arg(bool value) : kind_(5), integer_(value ? 1 : 0), real_(0.0), text_(0) {}
+    karc_format_arg(const char* value) : kind_(6), integer_(0), real_(0.0), text_(value) {}
+    karc_format_arg(const string& value) : kind_(6), integer_(0), real_(0.0), text_(0), owned_(value) { text_ = 0; }
+    karc_format_arg(string_view value) : kind_(6), integer_(0), real_(0.0), text_(0), owned_(value.data(), value.size()) {}
+    karc_format_arg(const void* value) : kind_(7), integer_((long)value), real_(0.0), text_(0) {}
+    const char* text() const {
+        if (text_ != 0) { return text_; }
+        return owned_.c_str();
+    }
+    int kind_;
+    long integer_;
+    double real_;
+    const char* text_;
+    string owned_;
+};
+
+struct karc_format_spec {
+    char fill;
+    char align;
+    char sign;
+    bool alternate;
+    int width;
+    int precision;
+    char type;
+};
+
+inline void karc_format_pad(string& out, const string& body, const karc_format_spec& spec, char defaultAlign) {
+    int padding = spec.width - (int)body.size();
+    if (padding <= 0) {
+        out += body;
+        return;
+    }
+    char align = spec.align ? spec.align : defaultAlign;
+    int before = 0;
+    if (align == '>') { before = padding; }
+    if (align == '^') { before = padding / 2; }
+    out.append((size_t)before, spec.fill);
+    out += body;
+    out.append((size_t)(padding - before), spec.fill);
+}
+
+inline string karc_format_integer(unsigned long magnitude, bool negative, const karc_format_spec& spec) {
+    unsigned long base = 10;
+    const char* digits = "0123456789abcdef";
+    const char* prefix = "";
+    if (spec.type == 'x') { base = 16; prefix = "0x"; }
+    if (spec.type == 'X') { base = 16; digits = "0123456789ABCDEF"; prefix = "0X"; }
+    if (spec.type == 'o') { base = 8; prefix = "0"; }
+    if (spec.type == 'b') { base = 2; prefix = "0b"; }
+    char reversed[72];
+    int count = 0;
+    do {
+        reversed[count] = digits[magnitude % base];
+        count++;
+        magnitude = magnitude / base;
+    } while (magnitude != 0);
+    string body;
+    if (negative) { body += '-'; }
+    else if (spec.sign == '+') { body += '+'; }
+    else if (spec.sign == ' ') { body += ' '; }
+    if (spec.alternate) { body += prefix; }
+    string number;
+    for (int i = count - 1; i >= 0; i--) { number += reversed[i]; }
+    if (spec.align == 0 && spec.fill == '0') {
+        int zeros = spec.width - (int)body.size() - (int)number.size();
+        if (zeros > 0) { body.append((size_t)zeros, '0'); }
+    }
+    body += number;
+    return body;
+}
+
+inline void karc_format_one(string& out, const karc_format_arg& arg, const karc_format_spec& spec) {
+    if (arg.kind_ == 6) {
+        string body(arg.text());
+        if (spec.precision >= 0 && (size_t)spec.precision < body.size()) { body.resize((size_t)spec.precision); }
+        karc_format_pad(out, body, spec, '<');
+        return;
+    }
+    if (arg.kind_ == 4 && (spec.type == 0 || spec.type == 'c')) {
+        karc_format_pad(out, string(1, (char)arg.integer_), spec, '<');
+        return;
+    }
+    if (arg.kind_ == 5 && spec.type == 0) {
+        karc_format_pad(out, string(arg.integer_ ? "true" : "false"), spec, '<');
+        return;
+    }
+    if (arg.kind_ == 3) {
+        char pattern[16];
+        char text[512];
+        char type = spec.type ? spec.type : 'g';
+        int precision = spec.precision;
+        if (spec.type == 0 && precision < 0) { precision = 17; }
+        if (precision < 0) { precision = 6; }
+        snprintf(pattern, sizeof(pattern), "%%%s.%d%c", spec.sign == '+' ? "+" : "", precision, type);
+        snprintf(text, sizeof(text), pattern, arg.real_);
+        string body(text);
+        if (spec.type == 0 && spec.precision < 0) {
+            // Shortest form that reads back: trim %.17g where %g round-trips.
+            for (int p = 1; p <= 17; p++) {
+                snprintf(pattern, sizeof(pattern), "%%%s.%dg", spec.sign == '+' ? "+" : "", p);
+                snprintf(text, sizeof(text), pattern, arg.real_);
+                if (strtod(text, 0) == arg.real_) {
+                    body = text;
+                    break;
+                }
+            }
+        }
+        if (spec.align == 0 && spec.fill == '0' && (int)body.size() < spec.width) {
+            size_t at = (body[0] == '-' || body[0] == '+') ? 1 : 0;
+            body.insert(at, string((size_t)(spec.width - (int)body.size()), '0'));
+        }
+        karc_format_pad(out, body, spec, '>');
+        return;
+    }
+    if (arg.kind_ == 7) {
+        karc_format_spec hex = spec;
+        hex.type = 'x';
+        hex.alternate = true;
+        karc_format_pad(out, karc_format_integer((unsigned long)arg.integer_, false, hex), spec, '>');
+        return;
+    }
+    bool negative = arg.kind_ != 2 && arg.integer_ < 0;
+    unsigned long magnitude = negative ? (unsigned long)(0 - arg.integer_) : (unsigned long)arg.integer_;
+    if (spec.type == 'c') {
+        karc_format_pad(out, string(1, (char)arg.integer_), spec, '<');
+        return;
+    }
+    karc_format_pad(out, karc_format_integer(magnitude, negative, spec), spec, '>');
+}
+
+// A nested `{}` or `{N}` width or precision: the argument's value.
+inline const char* karc_format_nested(const char* f, int& value, const karc_format_arg* args, size_t count, size_t& next) {
+    f++;
+    size_t index = next;
+    if (*f >= '0' && *f <= '9') {
+        index = 0;
+        while (*f >= '0' && *f <= '9') { index = index * 10 + (size_t)(*f - '0'); f++; }
+    } else {
+        next++;
+    }
+    if (*f == '}') { f++; }
+    if (index >= count) { throw format_error("argument index out of range"); }
+    value = (int)args[index].integer_;
+    return f;
+}
+
+// Parses a spec from `f` up to its closing `}`; returns the position after.
+inline const char* karc_format_parse_spec(const char* f, karc_format_spec& spec, const karc_format_arg* args, size_t count, size_t& next) {
+    spec.fill = ' ';
+    spec.align = 0;
+    spec.sign = 0;
+    spec.alternate = false;
+    spec.width = 0;
+    spec.precision = -1;
+    spec.type = 0;
+    if (f[0] != 0 && f[0] != '}' && (f[1] == '<' || f[1] == '>' || f[1] == '^')) {
+        spec.fill = f[0];
+        spec.align = f[1];
+        f += 2;
+    } else if (*f == '<' || *f == '>' || *f == '^') {
+        spec.align = *f;
+        f++;
+    }
+    if (*f == '+' || *f == '-' || *f == ' ') { spec.sign = *f; f++; }
+    if (*f == '#') { spec.alternate = true; f++; }
+    if (*f == '0') {
+        if (spec.align == 0) { spec.fill = '0'; }
+        f++;
+    }
+    if (*f == '{') { f = karc_format_nested(f, spec.width, args, count, next); }
+    while (*f >= '0' && *f <= '9') { spec.width = spec.width * 10 + (*f - '0'); f++; }
+    if (*f == '.') {
+        f++;
+        spec.precision = 0;
+        if (*f == '{') { f = karc_format_nested(f, spec.precision, args, count, next); }
+        while (*f >= '0' && *f <= '9') { spec.precision = spec.precision * 10 + (*f - '0'); f++; }
+    }
+    if (*f != '}' && *f != 0) { spec.type = *f; f++; }
+    if (*f == '}') { f++; }
+    return f;
+}
+
+inline string karc_vformat(const char* f, const karc_format_arg* args, size_t count) {
+    string out;
+    size_t next = 0;
+    while (*f != 0) {
+        if (*f == '{' && f[1] == '{') { out += '{'; f += 2; continue; }
+        if (*f == '}' && f[1] == '}') { out += '}'; f += 2; continue; }
+        if (*f != '{') { out += *f; f++; continue; }
+        f++;
+        size_t index = next;
+        if (*f >= '0' && *f <= '9') {
+            index = 0;
+            while (*f >= '0' && *f <= '9') { index = index * 10 + (size_t)(*f - '0'); f++; }
+        } else {
+            next++;
+        }
+        karc_format_spec spec;
+        if (*f == ':') { f = karc_format_parse_spec(f + 1, spec, args, count, next); }
+        else {
+            karc_format_parse_spec(f, spec, args, count, next);
+            if (*f == '}') { f++; }
+        }
+        if (index >= count) { throw format_error("argument index out of range"); }
+        karc_format_one(out, args[index], spec);
+    }
+    return out;
+}
+
+// Where a formatter writes: the text being built.
+class format_context {
+public:
+    format_context(string& text) : text_(&text) {}
+    back_insert_iterator<string> out() { return back_insert_iterator<string>(*text_); }
+    void advance_to(back_insert_iterator<string> position) {}
+
+private:
+    string* text_;
+};
+// What a formatter's parse reads: the field's spec, which KArc's
+// formatters for classes receive empty.
+class format_parse_context {
+public:
+    format_parse_context() : begin_("}"), end_(begin_ + 1) {}
+    const char* begin() const { return begin_; }
+    const char* end() const { return end_; }
+    void advance_to(const char* position) { begin_ = position; }
+
+private:
+    const char* begin_;
+    const char* end_;
+};
+
+inline karc_format_arg karc_arg(int value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(long value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(unsigned int value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(unsigned long value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(double value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(char value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(bool value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(const char* value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(const string& value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(string_view value) { return karc_format_arg(value); }
+inline karc_format_arg karc_arg(const void* value) { return karc_format_arg(value); }
+// The formatter for the built-in argument kinds, which a class's formatter
+// may derive from and call.
+template <typename T>
+struct formatter {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const T& value, format_context& context) const {
+        karc_format_arg items[] = {karc_arg(value)};
+        string text = karc_vformat("{}", items, 1);
+        back_insert_iterator<string> out = context.out();
+        for (size_t i = 0; i < text.size(); i++) {
+            *out = text[i];
+            ++out;
+        }
+        return out;
+    }
+    int unused;
+};
+
+// Any other class: its std::formatter renders it.
+template <typename T>
+karc_format_arg karc_arg(const T& value) {
+    formatter<T> renderer;
+    format_parse_context parse;
+    renderer.parse(parse);
+    string text;
+    format_context context(text);
+    renderer.format(value, context);
+    return karc_format_arg(text);
+}
+
+template <typename... Args>
+string format(const char* f, const Args&... args) {
+    karc_format_arg items[] = {karc_format_arg(), karc_arg(args)...};
+    return karc_vformat(f, items + 1, sizeof...(Args));
+}
+template <typename... Args>
+string format(const string& f, const Args&... args) {
+    karc_format_arg items[] = {karc_format_arg(), karc_arg(args)...};
+    return karc_vformat(f.c_str(), items + 1, sizeof...(Args));
+}
+template <typename O, typename... Args>
+O format_to(O out, const char* f, const Args&... args) {
+    string text = format(f, args...);
+    for (size_t i = 0; i < text.size(); i++) {
+        *out = text[i];
+        ++out;
+    }
+    return out;
+}
+template <typename O>
+struct format_to_n_result {
+    O out;
+    long size;
+};
+template <typename O, typename... Args>
+format_to_n_result<O> format_to_n(O out, long limit, const char* f, const Args&... args) {
+    string text = format(f, args...);
+    for (long i = 0; i < (long)text.size() && i < limit; i++) {
+        *out = text[i];
+        ++out;
+    }
+    format_to_n_result<O> result{out, (long)text.size()};
+    return result;
+}
+template <typename... Args>
+size_t formatted_size(const char* f, const Args&... args) { return format(f, args...).size(); }
+template <typename... Args>
+string vformat(const char* f, const Args&... args) { return format(f, args...); }
+
+}
+
+#include <__format_ranges>
+
+#endif

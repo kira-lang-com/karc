@@ -1,0 +1,93 @@
+// Bit-fields (parser/parser_bits.klfd lays them out). A bit-field is a Place on
+// its unit with the bits it occupies; reading shifts and masks the unit,
+// sign-extending a signed one, and writing replaces those bits of it.
+
+// The bit-field `name` of class `owner` (without `%`), or -1.
+function bitFieldOf(tree: CppTree, owner: String, name: String) -> Int {
+    if name == "" { return -1 }
+    for i in 0..tree.bitFields.count {
+        if tree.bitFields[i].owner == owner && tree.bitFields[i].name == name { return i }
+    }
+    return -1
+}
+// The place of bit-field `index` of the `structType` object at `base`.
+function bitPlace(state: borrow mut Lowerer, base: KirAddress, structType: String, index: Int) -> Place {
+    let bit = state.tree.bitFields[index]
+    let unit = bitUnitType(bit.declType)
+    let record = structIndex(state, nominalName(structType))
+    let storageIndex = fieldIndexOf(state.tree.structs[record], bit.storage)
+    let storageType = state.tree.structs[record].fields[storageIndex].declType
+    let storage = memberAddress(state, base, structType, storageIndex, storageType)
+    // From the run's first byte to the unit's, which may come before it.
+    let bytes = kAddressOf(state, slotPointer(state, storage, "u8"), "[0 x u8]")
+    let unitByte = kElemAddr(state, bytes, kConstInt(state, "i64", bit.unitOffset), "u8")
+    let typed = kAddressOf(state, slotPointer(state, unitByte, unit), joinText(["[0 x ", unit, "]"]))
+    let address = kElemAddr(state, typed, kConstInt(state, "i64", 0), unit)
+    return Place { address = address, ty = unit, unsigned = isUnsignedType(unit), bitOffset = bit.offset, bitWidth = bit.width }
+}
+// The `width` low bits set, as a constant of the `unitBits`-wide unit type
+// (wrapped to its signed range).
+function lowBits(width: Int, unitBits: Int) -> Int {
+    if width >= unitBits || width >= 64 { return -1 }
+    var mask = 1
+    for _ in 0..width { mask = mask * 2 }
+    return mask - 1
+}
+function loadBits(state: borrow mut Lowerer, place: Place) -> Value {
+    let unit = place.ty
+    let unitBits = typeSize(state.tree, unit) * 8
+    let loaded = kLoad(state, place.address)
+    var result = loaded
+    if place.unsigned {
+        let shifted = kBinary(state, "lshr", false, false, loaded, kConstInt(state, unit, place.bitOffset))
+        result = kBinary(state, "and", false, false, shifted, kConstInt(state, unit, lowBits(place.bitWidth, unitBits)))
+    } else {
+        // Up to the top, then back down with the sign.
+        let raised = kBinary(state, "shl", false, true, loaded, kConstInt(state, unit, unitBits - place.bitOffset - place.bitWidth))
+        result = kBinary(state, "ashr", false, true, raised, kConstInt(state, unit, unitBits - place.bitWidth))
+    }
+    return promoteFromType(state, result, unit)
+}
+// Writes `value` into the bits `place` names, keeping the unit's others.
+function storeBits(state: borrow mut Lowerer, place: Place, value: Value) {
+    let unit = place.ty
+    let unitBits = typeSize(state.tree, unit) * 8
+    let offset = kConstInt(state, unit, place.bitOffset)
+    let mask = kBinary(state, "shl", false, false, kConstInt(state, unit, lowBits(place.bitWidth, unitBits)), offset)
+    let moved = kBinary(state, "shl", false, false, coerceRef(state, value, unit), offset)
+    let inside = kBinary(state, "and", false, false, moved, mask)
+    let others = kBinary(state, "xor", false, false, mask, kConstInt(state, unit, -1))
+    let kept = kBinary(state, "and", false, false, kLoad(state, place.address), others)
+    kStore(state, kBinary(state, "or", false, false, kept, inside), place.address)
+}
+// A store to any scalar place, bit-fields included.
+function storeToPlace(state: borrow mut Lowerer, place: Place, value: Value) {
+    if place.bitWidth > 0 {
+        storeBits(state, place, value)
+        return
+    }
+    kStore(state, coerceRef(state, value, place.ty), place.address)
+}
+function aggregateMemberName(state: Lowerer, record: Int, member: Int) -> String {
+    if member <= -2 { return state.tree.bitFields[-2 - member].name }
+    return state.tree.structs[record].fields[member].name
+}
+// The members a braced list initializes in order: each field, with a run
+// of bit-fields standing for its named bit-fields. A bit-field is -2 - its
+// index; padding runs and the alignment member take none.
+function aggregateMembers(state: Lowerer, record: Int) -> [Int] {
+    var members: [Int] = []
+    let s = state.tree.structs[record]
+    for f in 0..s.fields.count {
+        let name = s.fields[f].name
+        if isBitStorage(name) {
+            for b in 0..state.tree.bitFields.count {
+                let bit = state.tree.bitFields[b]
+                if bit.owner == s.name && bit.storage == name && bit.name != "" { members.append(-2 - b) }
+            }
+        } else if name != "__karc_bit_align" {
+            members.append(f)
+        }
+    }
+    return members
+}

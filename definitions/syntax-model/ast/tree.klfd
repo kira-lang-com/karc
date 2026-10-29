@@ -1,0 +1,125 @@
+function symbolBucketCount() -> Int {
+    return 8192
+}
+function declarationBucketCount() -> Int {
+    return 4096
+}
+enum EntityKind {
+    Class
+    Typedef
+    ClassTemplate
+    Namespace
+    Function
+    Variable
+    Enumerator
+    FunctionTemplate
+    Using
+}
+struct EntityKinds {
+    let bits: Int
+}
+struct EntityEntry {
+    let name: String
+    let kinds: EntityKinds
+    let target: String
+    let next: Int
+}
+struct NamespaceAlias {
+    let name: String
+    let target: String
+}
+struct FunctionIndexEntry {
+    let bare: String
+    let owner: String
+    let nameNext: Int
+    let ownerNext: Int
+}
+struct StructIndexEntry {
+    let next: Int
+}
+struct CppTree {
+    let sourceName: String
+    let cInput: Bool
+    var coroutineBodies: [Int]
+    // Functions indexed by bare name and owner class. Each entry corresponds
+    // to the function at the same index; later functions are not indexed yet.
+    var functionIndex: [FunctionIndexEntry]
+    var nameHeads: [Int]
+    var ownerHeads: [Int]
+    // Structs indexed by name. Each entry corresponds to the struct at the same index.
+    var structHeads: [Int]
+    var structIndex: [StructIndexEntry]
+    // The classes declared `union` (lowering/lower_union.klfd).
+    var unions: [String]
+    var bitFields: [CppBitField]
+    var expressions: [Expr]
+    var statements: [Statement]
+    var functions: [CppFunction]
+    var globals: [CppGlobal]
+    var structs: [CppStruct]
+    var strings: [String]
+    var typedefs: [CppTypedef]
+    var enumConstants: [CppEnumConstant]
+    var templates: [CppTemplate]
+    // Explicit template argument lists of calls; a call's `number` is one past
+    // its index here, or 0.
+    var explicitArguments: [[String]]
+    // The member functions declared `virtual`.
+    var virtualNames: [String]
+    // Each class template instance, the template it came from and its
+    // arguments, for deducing `T` from a `vector<T>` parameter.
+    var instances: [CppInstance]
+    // The initializations of globals that need code, in declaration order.
+    var globalInits: [StmtId]
+    // Class template specializations (parser/expr/special.klfd).
+    var specializations: [CppSpecialization]
+    // Namespace aliases visible to expression parsing.
+    var namespaceAliases: [NamespaceAlias]
+    // Functions declared `= delete`, which a call may not choose.
+    var deletedNames: [String]
+    // Every declared name, fully qualified, with the kinds of entity it
+    // names and, for a using-declaration, what it stands for; hashed by name.
+    var entities: [EntityEntry]
+    var entityHeads: [Int]
+    // Namespace-scope `using namespace T;` directives and the parse order at
+    // which each became visible.
+    var usingDirectives: [UsingDirective]
+    // Direct class bases, by qualified class name.
+    var baseRelations: [BaseRelation]
+}
+function newCppTree(sourceName: String) -> CppTree {
+    let size = utf8Count(sourceName)
+    let cInput = size >= 2 && utf8Slice(sourceName, size - 2, size) == ".c"
+    return CppTree {
+        sourceName = sourceName,
+        cInput = cInput,
+        coroutineBodies = [],
+        functionIndex = [],
+        nameHeads = [],
+        ownerHeads = [],
+        structHeads = [],
+        structIndex = [],
+        unions = [],
+        bitFields = [],
+        expressions = [],
+        statements = [],
+        functions = [],
+        globals = [],
+        structs = [],
+        strings = [],
+        typedefs = [],
+        enumConstants = [],
+        templates = [],
+        explicitArguments = [],
+        virtualNames = [],
+        instances = [],
+        globalInits = [],
+        specializations = [],
+        namespaceAliases = [],
+        deletedNames = [],
+        entities = [],
+        entityHeads = [],
+        usingDirectives = [],
+        baseRelations = []
+    }
+}

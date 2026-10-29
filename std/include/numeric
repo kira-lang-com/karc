@@ -1,0 +1,210 @@
+// <numeric>: accumulate, reduce, iota, inner_product, partial_sum,
+// adjacent_difference, exclusive_scan, inclusive_scan, gcd and lcm, over any
+// iterator.
+#ifndef KARC_STD_NUMERIC
+#define KARC_STD_NUMERIC
+
+namespace std {
+
+template <typename I, typename V>
+V accumulate(I first, I last, V initial) {
+    for (; first != last; ++first) { initial = initial + *first; }
+    return initial;
+}
+template <typename I, typename V, typename F>
+V accumulate(I first, I last, V initial, F combine) {
+    for (; first != last; ++first) { initial = combine(initial, *first); }
+    return initial;
+}
+template <typename I>
+auto reduce(I first, I last) {
+    __karc_element(I) zero{};
+    return accumulate(first, last, zero);
+}
+template <typename I, typename V>
+V reduce(I first, I last, V initial) { return accumulate(first, last, initial); }
+template <typename I, typename V, typename F>
+V reduce(I first, I last, V initial, F combine) { return accumulate(first, last, initial, combine); }
+template <typename I, typename V, typename F, typename G>
+V transform_reduce(I first, I last, V initial, F combine, G transform) {
+    for (; first != last; ++first) { initial = combine(initial, transform(*first)); }
+    return initial;
+}
+// The two-range forms: combine over the pairs `transform(a, b)`, `a * b`
+// by default.
+template <typename I, typename J, typename V>
+V transform_reduce(I first, I last, J other, V initial) {
+    for (; first != last; ++first) {
+        initial = initial + *first * *other;
+        ++other;
+    }
+    return initial;
+}
+template <typename I, typename J, typename V, typename F, typename G>
+V transform_reduce(I first, I last, J other, V initial, F combine, G transform) {
+    for (; first != last; ++first) {
+        initial = combine(initial, transform(*first, *other));
+        ++other;
+    }
+    return initial;
+}
+template <typename I, typename V>
+void iota(I first, I last, V value) {
+    for (; first != last; ++first) {
+        *first = value;
+        value = value + 1;
+    }
+}
+template <typename I, typename J, typename V>
+V inner_product(I first, I last, J other, V initial) {
+    for (; first != last; ++first) {
+        initial = initial + *first * *other;
+        ++other;
+    }
+    return initial;
+}
+template <typename I, typename J, typename V, typename F, typename G>
+V inner_product(I first, I last, J other, V initial, F combine, G multiply) {
+    for (; first != last; ++first) {
+        initial = combine(initial, multiply(*first, *other));
+        ++other;
+    }
+    return initial;
+}
+template <typename I, typename O, typename F>
+O partial_sum(I first, I last, O out, F combine) {
+    if (first == last) { return out; }
+    auto sum = *first;
+    *out = sum;
+    ++out;
+    for (++first; first != last; ++first) {
+        sum = combine(sum, *first);
+        *out = sum;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename O, typename F, typename V>
+O inclusive_scan(I first, I last, O out, F combine, V initial) {
+    for (; first != last; ++first) {
+        initial = combine(initial, *first);
+        *out = initial;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename O, typename V, typename F>
+O exclusive_scan(I first, I last, O out, V initial, F combine) {
+    for (; first != last; ++first) {
+        V next = combine(initial, *first);
+        *out = initial;
+        ++out;
+        initial = next;
+    }
+    return out;
+}
+template <typename I, typename O, typename F>
+O adjacent_difference(I first, I last, O out, F difference) {
+    if (first == last) { return out; }
+    auto previous = *first;
+    *out = previous;
+    ++out;
+    for (++first; first != last; ++first) {
+        auto current = *first;
+        *out = difference(current, previous);
+        ++out;
+        previous = current;
+    }
+    return out;
+}
+template <typename I, typename O>
+O partial_sum(I first, I last, O out) {
+    if (first == last) { return out; }
+    auto sum = *first;
+    *out = sum;
+    ++out;
+    for (++first; first != last; ++first) {
+        sum = sum + *first;
+        *out = sum;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename O>
+O inclusive_scan(I first, I last, O out) { return partial_sum(first, last, out); }
+template <typename I, typename O, typename F>
+O inclusive_scan(I first, I last, O out, F combine) { return partial_sum(first, last, out, combine); }
+template <typename I, typename O, typename V>
+O exclusive_scan(I first, I last, O out, V initial) {
+    for (; first != last; ++first) {
+        V next = initial + *first;
+        *out = initial;
+        ++out;
+        initial = next;
+    }
+    return out;
+}
+template <typename I, typename O>
+O adjacent_difference(I first, I last, O out) {
+    if (first == last) { return out; }
+    auto previous = *first;
+    *out = previous;
+    ++out;
+    for (++first; first != last; ++first) {
+        auto current = *first;
+        *out = current - previous;
+        ++out;
+        previous = current;
+    }
+    return out;
+}
+
+inline long gcd(long a, long b) {
+    if (a < 0) { a = 0 - a; }
+    if (b < 0) { b = 0 - b; }
+    while (b != 0) {
+        long rest = a % b;
+        a = b;
+        b = rest;
+    }
+    return a;
+}
+
+inline long lcm(long a, long b) {
+    if (a == 0 || b == 0) { return 0; }
+    long divisor = gcd(a, b);
+    long product = a / divisor * b;
+    if (product < 0) { return 0 - product; }
+    return product;
+}
+
+template <typename T>
+T midpoint(T a, T b) { return a + (b - a) / 2; }
+
+template <typename I, typename O, typename V, typename F, typename G>
+O transform_exclusive_scan(I first, I last, O out, V initial, F combine, G transform) {
+    V total = initial;
+    for (; first != last; ++first) {
+        V next = combine(total, transform(*first));
+        *out = total;
+        ++out;
+        total = next;
+    }
+    return out;
+}
+template <typename I, typename O, typename F, typename G>
+O transform_inclusive_scan(I first, I last, O out, F combine, G transform) {
+    if (first == last) { return out; }
+    auto total = transform(*first);
+    *out = total;
+    ++out;
+    for (++first; first != last; ++first) {
+        total = combine(total, transform(*first));
+        *out = total;
+        ++out;
+    }
+    return out;
+}
+}
+
+#endif

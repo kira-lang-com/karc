@@ -1,0 +1,11 @@
+// <new>: the allocation functions `new` and `delete` expressions call. They
+// hand out zeroed storage from the KLF runtime's heap through malloc.
+#ifndef KARC_STD_NEW
+#define KARC_STD_NEW
+
+extern "C" {
+char* karc_operator_new(long size);
+void karc_operator_delete(char* pointer);
+}
+
+#endif

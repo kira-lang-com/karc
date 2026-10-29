@@ -1,0 +1,52 @@
+// <spanstream>: streams over a caller's character buffer: ospanstream
+// writes into it until it is full, ispanstream reads it.
+#ifndef KARC_STD_SPANSTREAM
+#define KARC_STD_SPANSTREAM
+
+#include <iostream>
+#include <span>
+
+namespace std {
+
+class ospanstream : public ostream {
+public:
+    ospanstream(span<char> buffer) : ostream(-1), buffer_(buffer.data()), room_(buffer.size()), used_(0) {}
+    void karc_put(const char* data, size_t count) override {
+        for (size_t i = 0; i < count; i++) {
+            if (used_ == room_) {
+                state_ = state_ | ios_base::badbit;
+                return;
+            }
+            buffer_[used_] = data[i];
+            used_++;
+        }
+    }
+    // What has been written.
+    std::span<char> span() const { return std::span<char>(buffer_, used_); }
+
+private:
+    char* buffer_;
+    size_t room_;
+    size_t used_;
+};
+
+class ispanstream : public istream {
+public:
+    ispanstream(span<char> buffer) : istream(-1), buffer_(buffer.data()), size_(buffer.size()), position_(0) {}
+    ispanstream(const char* text, size_t size) : istream(-1), buffer_((char*)text), size_(size), position_(0) {}
+    int karc_get() override {
+        if (position_ >= size_) { return -1; }
+        int c = (unsigned char)buffer_[position_];
+        position_++;
+        return c;
+    }
+
+private:
+    char* buffer_;
+    size_t size_;
+    size_t position_;
+};
+
+}
+
+#endif

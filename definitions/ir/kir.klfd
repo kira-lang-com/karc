@@ -1,0 +1,302 @@
+// KIR builder: the one module that maps karc's operations onto the kernel's
+// structural KIR services.
+//
+// Every function here is the single place that knows which service builds one
+// KIR construct. Lowering calls these constructors, never a `klf.kir.*` service
+// directly, so a change to the service surface touches one module.
+//
+// The constructors accumulate into the same `Lowerer` the rest of lowering
+// uses. `kirType` (the karc-type to `KirType` bridge) is defined in
+// lowering/lower_core.klfd.
+
+// Stack slots and global addresses are emitted into the function's entry block
+// so they dominate every use, then the cursor returns to the block being built.
+function kEnterEntry(state: borrow mut Lowerer) {
+    kir_block_switch(state.functionHandle.unwrap(), state.entryBlock.unwrap())
+}
+function kLeaveEntry(state: borrow mut Lowerer) {
+    kir_block_switch(state.functionHandle.unwrap(), state.currentBlock.unwrap())
+}
+
+function kConstInt(state: borrow mut Lowerer, ty: String, value: Int) -> KirValue {
+    let t = kirType(state, ty)
+    return kir_value_integer(state.functionHandle.unwrap(), t, value)
+}
+function kConstFloat(state: borrow mut Lowerer, literal: String) -> KirValue {
+    let value = parseFloatLiteral(literal)
+    let bits = floatToBits(value)
+    return kir_value_const_f64(state.functionHandle.unwrap(), bits)
+}
+// A null pointer of the given karc pointer type.
+function kNull(state: borrow mut Lowerer, ty: String) -> KirValue {
+    let t = kirType(state, ty)
+    return kir_value_null(state.functionHandle.unwrap(), t)
+}
+function kBitcast(state: borrow mut Lowerer, source: KirValue, ty: String) -> KirValue {
+    let t = kirType(state, ty)
+    return kir_value_convert(state.functionHandle.unwrap(), 3, source, t)
+}
+function kTrunc(state: borrow mut Lowerer, value: KirValue, ty: String) -> KirValue {
+    let t = kirType(state, ty)
+    return kir_value_convert(state.functionHandle.unwrap(), 0, value, t)
+}
+// A sign or zero extension (`op` is "sext" or "zext").
+function kExtend(state: borrow mut Lowerer, op: String, value: KirValue, ty: String) -> KirValue {
+    let t = kirType(state, ty)
+    var kind = 2
+    if op == "zext" { kind = 1 }
+    return kir_value_convert(state.functionHandle.unwrap(), kind, value, t)
+}
+function kLoad(state: borrow mut Lowerer, address: KirAddress) -> KirValue {
+    return kir_value_load(state.functionHandle.unwrap(), address)
+}
+function kStore(state: borrow mut Lowerer, value: KirValue, address: KirAddress) {
+    kir_value_store(state.functionHandle.unwrap(), value, address)
+}
+function kStackAlloc(state: borrow mut Lowerer, ty: String) -> KirAddress {
+    if state.coroutineFrame.isSome() { return frameAddress(state, ty) }
+    let t = kirType(state, ty)
+    kEnterEntry(state)
+    let address = kir_value_stack_alloc(state.functionHandle.unwrap(), t)
+    kLeaveEntry(state)
+    return address
+}
+function kStackDealloc(state: borrow mut Lowerer, address: KirAddress) {
+    if state.coroutineFrame.isSome() { return }
+    kir_value_stack_dealloc(state.functionHandle.unwrap(), address)
+}
+function kGlobalAddr(state: borrow mut Lowerer, global: KirGlobal) -> KirAddress {
+    kEnterEntry(state)
+    let address = kir_value_global_address(state.functionHandle.unwrap(), global)
+    kLeaveEntry(state)
+    return address
+}
+function kFieldAddr(state: borrow mut Lowerer, base: KirAddress, index: Int, fieldType: String) -> KirAddress {
+    let t = kirType(state, fieldType)
+    return kir_value_field_address(state.functionHandle.unwrap(), base, index, t)
+}
+function kElemAddr(state: borrow mut Lowerer, base: KirAddress, index: KirValue, elementType: String) -> KirAddress {
+    let t = kirType(state, elementType)
+    return kir_value_element_address(state.functionHandle.unwrap(), base, index, t)
+}
+// Cross between the two handle spaces: a value that holds an address, viewed as
+// memory of `arrayType`, and an address viewed as the value it already is.
+function kAddressOf(state: borrow mut Lowerer, value: KirValue, arrayType: String) -> KirAddress {
+    let t = kirType(state, arrayType)
+    return kir_address_from_value(state.functionHandle.unwrap(), value, t)
+}
+function kAddrCast(state: borrow mut Lowerer, address: KirAddress, ty: String) -> KirAddress {
+    let t = kirType(state, ty)
+    return kir_address_cast(state.functionHandle.unwrap(), address, t)
+}
+function kValueOf(state: borrow mut Lowerer, address: KirAddress) -> KirValue {
+    return kir_value_from_address(state.functionHandle.unwrap(), address)
+}
+function kI64ToF64(state: borrow mut Lowerer, value: KirValue) -> KirValue {
+    return kir_value_i64_to_f64(state.functionHandle.unwrap(), value)
+}
+function kF64ToI64(state: borrow mut Lowerer, value: KirValue) -> KirValue {
+    return kir_value_f64_to_i64(state.functionHandle.unwrap(), value)
+}
+function kFloatBinary(state: borrow mut Lowerer, operator: String, lhs: KirValue, rhs: KirValue) -> KirValue {
+    match operator {
+        "add" -> return kir_value_add_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "sub" -> return kir_value_sub_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "mul" -> return kir_value_mul_f64(state.functionHandle.unwrap(), lhs, rhs)
+        else -> return kir_value_div_f64(state.functionHandle.unwrap(), lhs, rhs)
+    }
+}
+function kFloatUnary(state: borrow mut Lowerer, builtin: String, value: KirValue) -> KirValue {
+    let f = state.functionHandle.unwrap()
+    match builtin {
+        "__builtin_sqrt" -> return kir_value_sqrt_f64(f, value)
+        "__builtin_fabs" -> return kir_value_abs_f64(f, value)
+        "__builtin_floor" -> return kir_value_floor_f64(f, value)
+        "__builtin_ceil" -> return kir_value_ceil_f64(f, value)
+        "__builtin_trunc" -> return kir_value_trunc_f64(f, value)
+        else -> return kir_value_round_f64(f, value)
+    }
+}
+function kFcmp(state: borrow mut Lowerer, predicate: String, lhs: KirValue, rhs: KirValue) -> KirValue {
+    match predicate {
+        "eq" -> return kir_value_eq_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "ne" -> return kir_value_ne_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "lt", "slt", "ult" -> return kir_value_lt_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "le", "sle", "ule" -> return kir_value_le_f64(state.functionHandle.unwrap(), lhs, rhs)
+        "gt", "sgt", "ugt" -> return kir_value_gt_f64(state.functionHandle.unwrap(), lhs, rhs)
+        else -> return kir_value_ge_f64(state.functionHandle.unwrap(), lhs, rhs)
+    }
+}
+function kFneg(state: borrow mut Lowerer, value: KirValue) -> KirValue {
+    return kir_value_neg_f64(state.functionHandle.unwrap(), value)
+}
+function predicateCode(predicate: String) -> Int {
+    match predicate {
+        "eq" -> return 0
+        "ne" -> return 1
+        "slt" -> return 2
+        "sle" -> return 3
+        "sgt" -> return 4
+        "sge" -> return 5
+        "ult" -> return 6
+        "ule" -> return 7
+        "ugt" -> return 8
+        else -> return 9
+    }
+}
+function kIcmp(state: borrow mut Lowerer, predicate: String, lhs: KirValue, rhs: KirValue) -> KirValue {
+    return kir_value_compare(state.functionHandle.unwrap(), predicateCode(predicate), lhs, rhs)
+}
+function binaryCode(operator: String) -> Int {
+    match operator {
+        "add" -> return 0
+        "sub" -> return 1
+        "mul" -> return 2
+        "sdiv" -> return 3
+        "udiv" -> return 4
+        "srem" -> return 5
+        "urem" -> return 6
+        "and" -> return 7
+        "or" -> return 8
+        "xor" -> return 9
+        "shl" -> return 10
+        "lshr" -> return 11
+        else -> return 12
+    }
+}
+// `trap` selects trapping overflow, `isSigned` the signed form of the operator.
+function kBinary(state: borrow mut Lowerer, operator: String, trap: Bool, isSigned: Bool, lhs: KirValue, rhs: KirValue) -> KirValue {
+    var overflow = 0
+    if trap { overflow = 1 }
+    var sign = 0
+    if isSigned { sign = 1 }
+    return kir_value_binary(state.functionHandle.unwrap(), binaryCode(operator), overflow, sign, lhs, rhs)
+}
+// One pending call or edge argument. The service that commits next drains them.
+function kArgument(state: borrow mut Lowerer, value: KirValue) {
+    kir_value_argument(state.functionHandle.unwrap(), value)
+}
+function kElseArgument(state: borrow mut Lowerer, value: KirValue) {
+    kir_block_else_argument(state.functionHandle.unwrap(), value)
+}
+function kCall(state: borrow mut Lowerer, callee: KirFunctionBuilder, returnType: String) -> KirValue {
+    let t = kirType(state, returnType)
+    return kir_value_call(state.functionHandle.unwrap(), callee, t)
+}
+function kCallVoid(state: borrow mut Lowerer, callee: KirFunctionBuilder) {
+    kir_value_call_void(state.functionHandle.unwrap(), callee)
+}
+function kFuncRef(state: borrow mut Lowerer, callee: KirFunctionBuilder) -> KirValue {
+    return kir_value_function_reference(state.functionHandle.unwrap(), callee)
+}
+function kIndirectParameter(state: borrow mut Lowerer, ty: String) {
+    let t = kirType(state, ty)
+    kir_value_indirect_parameter(state.functionHandle.unwrap(), t)
+}
+function kCallIndirect(state: borrow mut Lowerer, target: KirValue, returnType: String) -> KirValue {
+    let t = kirType(state, returnType)
+    return kir_value_call_indirect(state.functionHandle.unwrap(), target, t)
+}
+function kCallIndirectVoid(state: borrow mut Lowerer, target: KirValue) {
+    kir_value_call_indirect_void(state.functionHandle.unwrap(), target)
+}
+function kBr(state: borrow mut Lowerer, target: KirBlockBuilder) {
+    kir_block_branch(state.functionHandle.unwrap(), target)
+}
+function kCondBr(state: borrow mut Lowerer, condition: KirValue, thenTarget: KirBlockBuilder, elseTarget: KirBlockBuilder) {
+    kir_block_conditional_branch(state.functionHandle.unwrap(), condition, thenTarget, elseTarget)
+}
+function kReturnVoid(state: borrow mut Lowerer) {
+    kir_function_result_void(state.functionHandle.unwrap())
+}
+function kReturn(state: borrow mut Lowerer, value: KirValue) {
+    kir_function_result(state.functionHandle.unwrap(), value)
+}
+// A block parameter, declared before the block that carries it.
+function kBlockParameter(state: borrow mut Lowerer, ty: String) {
+    let t = kirType(state, ty)
+    kir_block_parameter(state.functionHandle.unwrap(), t)
+}
+function kBlock(state: borrow mut Lowerer) -> KirBlockBuilder {
+    return kir_block_define(state.functionHandle.unwrap())
+}
+function kBlockValue(state: borrow mut Lowerer, block: KirBlockBuilder, index: Int) -> KirValue {
+    return kir_block_value(state.functionHandle.unwrap(), block, index)
+}
+// Move the cursor to `block` and make it the block later emission appends to.
+function kSwitchTo(state: borrow mut Lowerer, block: KirBlockBuilder) {
+    kir_block_switch(state.functionHandle.unwrap(), block)
+    state.currentBlock = .Some(block)
+}
+
+// Module-scope declarations.
+function kRecord(state: borrow mut Lowerer, nameSpan: Span) -> KirType {
+    return kir_type_record(state.builder, nameSpan.start, nameSpan.end, 1)
+}
+// A record private to this unit, named apart from any other unit's record of
+// the same source name.
+function kRecordNamed(state: borrow mut Lowerer, nameSpan: Span, suffix: Int) -> KirType {
+    return kir_type_record_named(state.builder, nameSpan.start, nameSpan.end, 1, suffix)
+}
+function kRecordField(state: borrow mut Lowerer, record: KirType, nameSpan: Span, fieldType: String) {
+    let t = kirType(state, fieldType)
+    kir_type_record_field(record, nameSpan.start, nameSpan.end, t)
+}
+function kGlobal(state: borrow mut Lowerer, nameSpan: Span, ty: String) -> KirGlobal {
+    let t = kirType(state, ty)
+    return kir_global_new(state.builder, nameSpan.start, nameSpan.end, t, 1)
+}
+// A global private to this unit, named apart from other units' globals.
+function kGlobalNamed(state: borrow mut Lowerer, nameSpan: Span, ty: String, suffix: Int) -> KirGlobal {
+    let t = kirType(state, ty)
+    return kir_global_new_named(state.builder, nameSpan.start, nameSpan.end, t, 1, suffix)
+}
+// Storage the source has no name for, such as a string literal's bytes.
+function kAnonymousGlobal(state: borrow mut Lowerer, ty: String) -> KirGlobal {
+    let t = kirType(state, ty)
+    return kir_global_anonymous(state.builder, t, 1)
+}
+function kGlobalByte(global: KirGlobal, byte: Int) {
+    kir_global_byte(global, byte)
+}
+function kGlobalInt(global: KirGlobal, value: Int) {
+    kir_global_integer(global, value)
+}
+function kSignature(state: borrow mut Lowerer, nameSpan: Span, returnType: String) -> KirSignature {
+    let t = kirType(state, returnType)
+    return kir_signature_new(state.builder, nameSpan.start, nameSpan.end, t)
+}
+function kSignatureNamed(state: borrow mut Lowerer, nameSpan: Span, name: String, returnType: String, suffix: Int) -> KirSignature {
+    let t = kirType(state, returnType)
+    let signature = kir_signature_new_named(state.builder, nameSpan.start, nameSpan.end, t, suffix)
+    let qualified = joinText([name, "#", decimalText(suffix)])
+    for i in 0..utf8Count(qualified) {
+        kir_signature_name_byte(signature, utf8Byte(qualified, i))
+    }
+    return signature
+}
+// A platform C symbol: the identifier alone, with no signature suffix.
+function kSignatureC(state: borrow mut Lowerer, nameSpan: Span, name: String, returnType: String) -> KirSignature {
+    let t = kirType(state, returnType)
+    let signature = kir_signature_new_named(state.builder, nameSpan.start, nameSpan.end, t, 0)
+    for i in 0..utf8Count(name) {
+        kir_signature_name_byte(signature, utf8Byte(name, i))
+    }
+    return signature
+}
+function kSignatureParameter(state: borrow mut Lowerer, signature: KirSignature, ty: String) {
+    let t = kirType(state, ty)
+    kir_signature_parameter(signature, t)
+}
+function kDeclareFunction(signature: KirSignature) -> KirFunctionBuilder {
+    return kir_signature_declare(signature)
+}
+function kOpenBody(handle: KirFunctionBuilder) {
+    kir_function_body(handle)
+}
+function kEntryBlock(handle: KirFunctionBuilder) -> KirBlockBuilder {
+    return kir_block_entry(handle)
+}
+function kParameter(handle: KirFunctionBuilder, index: Int) -> KirValue {
+    return kir_function_parameter(handle, index)
+}

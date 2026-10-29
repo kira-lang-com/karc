@@ -1,0 +1,247 @@
+// `auto` declarations and range-based for loops.
+
+// `auto x = init` takes the initializer's type; `auto& x = lvalue` binds it.
+function emitAutoDeclare(state: borrow mut Lowerer, decl: LocalDeclaration, span: Span) {
+    var ty = staticType(state, decl.initializer)
+    if decl.declType == "*[0 x auto]" && ty != "" && isClassLvalue(state, decl.initializer) {
+        let place = emitPlace(state, decl.initializer)
+        let pointerType = joinText(["*[0 x ", ty, "]"])
+        let slot = declare(state, decl.name, pointerType, ty, span)
+        state.slotsData[slot].reference = true
+        kStore(state, slotPointer(state, place.address, place.ty), state.slotsData[slot].address)
+        return
+    }
+    if decl.declType == "*[0 x auto]" && ty != "" && !isClassType(ty) && isLvalueExpression(state.tree.expressions[decl.initializer.value]) {
+        // `auto& x = lvalue` of a scalar or array type refers to it.
+        let typed = joinText(["*[0 x ", ty, "]"])
+        emitReferenceDeclare(state, LocalDeclaration { name = decl.name, declType = typed, reference = -1, initializer = decl.initializer }, span)
+        return
+    }
+    if isLambdaType(ty) {
+        // The lambda settles its capture types when created, so create it
+        // before its variable's storage is laid out.
+        let mark = state.temporaries.count
+        let value = emitExpression(state, decl.initializer)
+        let slot = declare(state, decl.name, ty, "", span)
+        copyAggregate(state, structBehindPointer(state, value.reference, ty), state.slotsData[slot].address, ty)
+        consumeTemporary(state, mark)
+        return
+    }
+    if isClassType(ty) {
+        emitStructDeclare(state, StructDeclaration { name = decl.name, declType = ty, initializer = decl.initializer }, span)
+        return
+    }
+    let value = emitExpression(state, decl.initializer)
+    if ty == "" || isArrayType(ty) { ty = valueType(value) }
+    var element: String = ""
+    if isPointerType(ty) { element = elementOfPointer(ty) }
+    let slot = declare(state, decl.name, ty, element, span)
+    storeLocal(state, slot, value)
+}
+// `for (T x : range)` over an array, a braced list or a class with
+// `begin()` and `end()` returning pointers. `T&` binds each element; `T`
+// copies it.
+function emitRangeFor(state: borrow mut Lowerer, loop: RangeForStatement, span: Span) {
+    let scope = state.active
+    let rangeType = staticType(state, loop.range)
+    var first = zeroValue(state)
+    var last = zeroValue(state)
+    let items = bracedPayloadArguments(state.tree.expressions[loop.range.value])
+    if isBracedCall(state, loop.range) && items.count > 0 {
+        // `for (x : {a, b})`: over a stack array of the elements.
+        let element = staticType(state, items[0])
+        let arrayType = joinText(["[", decimalText(items.count), " x ", element, "]"])
+        let storage = declare(state, joinText(["__karc_range_", decimalText(state.slots)]), arrayType, element, span)
+        zeroAggregate(state, state.slotsData[storage].address, arrayType)
+        emitArrayInit(state, state.slotsData[storage].address, arrayType, loop.range)
+        first = Value { reference = slotPointer(state, state.slotsData[storage].address, element), boolean = false, wide = true, pointer = joinText(["*[0 x ", element, "]"]), unsigned = false, floating = false }
+        last = pointerOffset(state, first, kConstInt(state, "i64", items.count))
+    } else if isArrayType(rangeType) {
+        let element = arrayElementType(rangeType)
+        let place = emitPlace(state, loop.range)
+        let pointerType = joinText(["*[0 x ", element, "]"])
+        first = Value { reference = slotPointer(state, place.address, element), boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false }
+        last = pointerOffset(state, first, kConstInt(state, "i64", arrayLength(rangeType)))
+    } else if isClassType(rangeType) {
+        let begin = findMember(state.tree, rangeType, "begin", 0)
+        let end = findMember(state.tree, rangeType, "end", 0)
+        if begin < 0 || end < 0 {
+            lowerError(state, diagUnsupportedExpression(), span)
+            return
+        }
+        let range = rangeObject(state, loop, span, rangeType)
+        if isClassType(state.tree.functions[begin].returnType) {
+            emitIteratorFor(state, loop, span, rangeType, range, begin, end, scope)
+            return
+        }
+        first = callFunction(state, begin, [memberReceiver(state, range, rangeType, begin)], [])
+        last = callFunction(state, end, [memberReceiver(state, range, rangeType, end)], [])
+    } else {
+        lowerError(state, diagUnsupportedExpression(), span)
+        return
+    }
+    if first.pointer == "" || last.pointer == "" { return }
+    let element = elementOfPointer(first.pointer)
+    let cursor = declare(state, joinText(["__karc_range_", decimalText(state.slots)]), first.pointer, element, span)
+    kStore(state, first.reference, state.slotsData[cursor].address)
+    let limit = declare(state, joinText(["__karc_range_", decimalText(state.slots)]), first.pointer, element, span)
+    kStore(state, last.reference, state.slotsData[limit].address)
+    let conditionBlock = kBlock(state)
+    let bodyBlock = kBlock(state)
+    let stepBlock = kBlock(state)
+    let afterBlock = kBlock(state)
+    kBr(state, conditionBlock)
+    kSwitchTo(state, conditionBlock)
+    let current = loadLocal(state, cursor)
+    let done = kIcmp(state, "ne", toAddr64(state, current), toAddr64(state, loadLocal(state, limit)))
+    kCondBr(state, done, bodyBlock, afterBlock)
+    kSwitchTo(state, bodyBlock)
+    let bodyScope = state.active
+    bindRangeElement(state, loop, span, loadLocal(state, cursor), element)
+    emitLoopBody(state, loop.body, afterBlock, stepBlock)
+    destroyScope(state, bodyScope, -1)
+    state.active = bodyScope
+    if !state.terminated { kBr(state, stepBlock) }
+    state.terminated = false
+    kSwitchTo(state, stepBlock)
+    let stepped = pointerOffset(state, loadLocal(state, cursor), kConstInt(state, "i64", 1))
+    kStore(state, stepped.reference, state.slotsData[cursor].address)
+    kBr(state, conditionBlock)
+    kSwitchTo(state, afterBlock)
+    state.active = scope
+}
+function bindRangeElement(state: borrow mut Lowerer, loop: RangeForStatement, span: Span, cursor: Value, element: String) {
+    var declared = loop.declType
+    if declared == "auto" || declared == "" { declared = element }
+    let place = placeFromPointer(state, cursor)
+    if loop.reference == 1 {
+        let slot = declare(state, loop.name, cursor.pointer, element, span)
+        state.slotsData[slot].reference = true
+        kStore(state, cursor.reference, state.slotsData[slot].address)
+        return
+    }
+    if isClassType(declared) {
+        let slot = declare(state, loop.name, declared, "", span)
+        zeroAggregate(state, state.slotsData[slot].address, declared)
+        copyInto(state, slotPointer(state, state.slotsData[slot].address, declared), cursor.reference, declared)
+        return
+    }
+    let slot = declare(state, loop.name, declared, "", span)
+    storeLocal(state, slot, rvalueFromPlace(state, place))
+}
+// `T c{a, b, c}` where T has a constructor taking std::initializer_list<E>:
+// the elements go in a stack array the list points at. False when T has no
+// such constructor.
+function emitListConstruct(state: borrow mut Lowerer, object: KirValue, structType: String, arguments: [ExprId]) -> Bool {
+    var constructor = -1
+    for i in 0..state.tree.functions.count {
+        let fn = state.tree.functions[i]
+        if unqualifiedName(fn.name) == constructorName(structType) && methodOwnerType(state.tree, fn.name) == structType &&
+            fn.parameters.count == 1 && isInitializerList(parameterClassOf(fn.parameters[0])) {
+            constructor = i
+        }
+    }
+    if constructor < 0 { return false }
+    let listType = parameterClassOf(state.tree.functions[constructor].parameters[0])
+    if !listElementsFit(state, listType, arguments) { return false }
+    let list = emitInitializerList(state, listType, arguments, state.tree.functions[constructor].span)
+    constructMembers(state, object, structType, [])
+    setVtable(state, object, structType)
+    callWithValues(state, constructor, [object, list])
+    return true
+}
+// Whether each braced element can become an element of initializer_list
+// type `listType`; `T x{alloc}` is not a list of one T.
+function listElementsFit(state: borrow mut Lowerer, listType: String, arguments: [ExprId]) -> Bool {
+    let record = structIndex(state, nominalName(listType))
+    if record < 0 { return true }
+    let element = elementOfPointer(state.tree.structs[record].fields[0].declType)
+    for argument in arguments {
+        let actual = staticType(state, argument)
+        if actual != element && actual != "" && !isBracedCall(state, argument) {
+            if isClassType(element) {
+                if isClassType(actual) && !isBaseOf(state, element, actual) && !convertsFrom(state, element, actual) { return false }
+                if !isClassType(actual) && !convertsFrom(state, element, actual) { return false }
+            } else {
+                if isClassType(actual) { return false }
+                let pointerWanted = isPointerType(element)
+                let pointerGiven = isPointerType(actual)
+                if pointerWanted != pointerGiven { return false }
+            }
+        }
+    }
+    return true
+}
+function isInitializerList(ty: String) -> Bool {
+    let name = nominalName(ty)
+    return utf8Count(name) > 23 && utf8Slice(name, 0, 23) == "std::initializer_list__"
+}
+// Range-for over class iterators: operator!=, operator* and operator++.
+// The range of a range-for, evaluated once: an lvalue in place, anything
+// else in a local that lives as long as the loop.
+function rangeObject(state: borrow mut Lowerer, loop: RangeForStatement, span: Span, rangeType: String) -> KirValue {
+    if isClassLvalue(state, loop.range) { return methodReceiver(state, loop.range, rangeType) }
+    let slot = declare(state, joinText(["range@", decimalText(state.slots)]), rangeType, "", span)
+    zeroAggregate(state, state.slotsData[slot].address, rangeType)
+    emitClassInit(state, slot, rangeType, loop.range)
+    return slotPointer(state, state.slotsData[slot].address, rangeType)
+}
+// `object` as the `this` of member `index`, upcast when a base declares it.
+function memberReceiver(state: borrow mut Lowerer, object: KirValue, objectType: String, index: Int) -> KirValue {
+    let owner = methodOwnerType(state.tree, state.tree.functions[index].name)
+    if owner != "" && owner != objectType && isBaseOf(state, owner, objectType) { return upcast(state, object, objectType, owner) }
+    return object
+}
+function emitIteratorFor(state: borrow mut Lowerer, loop: RangeForStatement, span: Span, rangeType: String, range: KirValue, begin: Int, end: Int, scope: Int) {
+    let iterator = state.tree.functions[begin].returnType
+    let differs = findMember(state.tree, iterator, "operator!=", 1)
+    let deref = findMember(state.tree, iterator, "operator*", 0)
+    let step = findMember(state.tree, iterator, "operator++", 0)
+    if differs < 0 || deref < 0 || step < 0 {
+        lowerError(state, diagUnsupportedExpression(), span)
+        return
+    }
+    let first = callFunction(state, begin, [memberReceiver(state, range, rangeType, begin)], [])
+    let cursor = declare(state, joinText(["__karc_range_", decimalText(state.slots)]), iterator, "", span)
+    copyInto(state, slotPointer(state, state.slotsData[cursor].address, iterator), first.reference, iterator)
+    // end() may give a sentinel of another type.
+    let sentinel = state.tree.functions[end].returnType
+    let last = callFunction(state, end, [memberReceiver(state, range, rangeType, end)], [])
+    let limit = declare(state, joinText(["__karc_range_", decimalText(state.slots)]), sentinel, "", span)
+    copyInto(state, slotPointer(state, state.slotsData[limit].address, sentinel), last.reference, sentinel)
+    let conditionBlock = kBlock(state)
+    let bodyBlock = kBlock(state)
+    let stepBlock = kBlock(state)
+    let afterBlock = kBlock(state)
+    kBr(state, conditionBlock)
+    kSwitchTo(state, conditionBlock)
+    let differsSlot = functionSlotForFunction(state, differs)
+    kArgument(state, kBitcast(state, slotPointer(state, state.slotsData[cursor].address, iterator), state.functionSlots[differsSlot].parameters[0]))
+    kArgument(state, kBitcast(state, slotPointer(state, state.slotsData[limit].address, sentinel), state.functionSlots[differsSlot].parameters[1]))
+    let more = kCall(state, state.functionSlots[differsSlot].handle, state.functionSlots[differsSlot].result)
+    let moreValue = promoteFromType(state, more, state.functionSlots[differsSlot].result)
+    kCondBr(state, asBool(state, moreValue).reference, bodyBlock, afterBlock)
+    kSwitchTo(state, bodyBlock)
+    let bodyScope = state.active
+    let element = callFunction(state, deref, [slotPointer(state, state.slotsData[cursor].address, iterator)], [])
+    let byReference = state.lastCallReference
+    state.lastCallReference = false
+    if byReference {
+        bindRangeElement(state, loop, span, element, elementOfPointer(element.pointer))
+    } else {
+        var declared = loop.declType
+        if declared == "auto" || declared == "" { declared = state.tree.functions[deref].returnType }
+        let slot = declare(state, loop.name, declared, "", span)
+        storeLocal(state, slot, element)
+    }
+    emitLoopBody(state, loop.body, afterBlock, stepBlock)
+    destroyScope(state, bodyScope, -1)
+    state.active = bodyScope
+    if !state.terminated { kBr(state, stepBlock) }
+    state.terminated = false
+    kSwitchTo(state, stepBlock)
+    callWithValues(state, step, [slotPointer(state, state.slotsData[cursor].address, iterator)])
+    kBr(state, conditionBlock)
+    kSwitchTo(state, afterBlock)
+    state.active = scope
+}

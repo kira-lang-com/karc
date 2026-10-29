@@ -1,0 +1,11 @@
+// Declaration initializers and call arguments stop at commas; conditions,
+// returns and parenthesized expressions include the comma operator.
+function fullExpression(p: borrow mut Parser) -> ExprId {
+    let start = peek(p).start
+    var result = expression(p, 0)
+    while peekKind(p) == .Comma && p.error == "" {
+        consume(p)
+        result = eBinary(p, ",", result, expression(p, 0), spanFrom(p, start))
+    }
+    return result
+}

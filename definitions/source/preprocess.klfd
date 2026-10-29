@@ -1,0 +1,384 @@
+// KArc's token-level preprocessor. Macro expansions retain the invocation span
+// so diagnostics still point into the original translation unit.
+
+struct Macro {
+    let name: String
+    let isFunction: Bool
+    let parameters: [String]
+    let body: [Token]
+    let live: Bool
+}
+struct Preprocessed {
+    let tokens: [Token]
+    let code: Int
+    let errorOffset: Int
+    let errorEnd: Int
+}
+// The rest of a file whose `#include` is being read: the file resumes at
+// `next` once the included tokens run out.
+struct IncludeFrame {
+    let tokens: [Token]
+    let bases: [String]
+    let next: Int
+}
+struct Preprocessor {
+    let input: [Token]
+    var bases: [String]
+    var frames: [IncludeFrame]
+    var guardPaths: [String]
+    var guardMacros: [String]
+    var out: [Token]
+    var macros: [Macro]
+    var condLive: [Bool]
+    var condTaken: [Bool]
+    var condElse: [Bool]
+    var code: Int
+    var errorOffset: Int
+    var errorEnd: Int
+}
+
+function sourceSpelling(t: Token) -> String {
+    if t.spelling != "" { return t.spelling }
+    if t.kind == .Number { return decimalText(t.number) }
+    if t.kind == .Float { return t.text }
+    return t.text
+}
+
+function includePath(state: Preprocessor, from: Int, stop: Int) -> String {
+    if from >= stop { return "" }
+    let first = state.input[from]
+    if first.kind == .Str { return first.text }
+    if first.kind != .Lt { return "" }
+    var pieces: [String] = []
+    var close = -1
+    for i in (from + 1)..stop {
+        if state.input[i].kind == .Gt { close = i; break }
+        pieces.append(sourceSpelling(state.input[i]))
+    }
+    if close < 0 { return "" }
+    return joinText(pieces)
+}
+
+function directory(path: String) -> String {
+    var last = -1
+    for i in 0..utf8Count(path) {
+        if utf8Byte(path, i) == 47 { last = i }
+    }
+    if last < 0 { return "" }
+    return utf8Slice(path, 0, last + 1)
+}
+
+function sourceHash(text: String) -> Int {
+    var hash: Int = 17
+    for i in 0..utf8Count(text) {
+        hash = (hash * 131 + utf8Byte(text, i) + 1) % 2147483647
+    }
+    if hash == 0 { return 1 }
+    return hash
+}
+
+function resolveInclude(state: Preprocessor, requested: String, base: String) -> String {
+    if includeExists(requested) { return requested }
+    let prefix = directory(base)
+    if prefix == "" { return requested }
+    let relative = joinText([prefix, requested])
+    if includeExists(relative) { return relative }
+    return requested
+}
+
+function isSystemInclude(path: String) -> Bool {
+    match path {
+        "algorithm", "any", "array", "atomic" -> return true
+        "cassert", "cctype", "cerrno", "cinttypes" -> return true
+        "clocale", "cmath", "compare", "condition_variable" -> return true
+        "chrono", "ctime", "deque", "fstream" -> return true
+        "cstddef", "cstdint", "cstdio", "cstdlib", "csignal" -> return true
+        "cstring", "exception", "filesystem", "forward_list" -> return true
+        "functional", "future", "initializer_list", "iomanip", "ios" -> return true
+        "iostream", "iosfwd", "iterator", "limits" -> return true
+        "map", "memory", "mutex", "numeric", "random" -> return true
+        "optional", "regex", "set", "sstream", "string", "thread" -> return true
+        "utility", "vector", "experimental/filesystem" -> return true
+        "arpa/inet.h", "curl/curl.h", "dirent.h", "fcntl.h" -> return true
+        "netdb.h", "netinet/in.h", "netinet/tcp.h", "openssl/bn.h" -> return true
+        "openssl/core_names.h", "openssl/ecdsa.h", "openssl/evp.h", "openssl/objects.h" -> return true
+        "openssl/param_build.h", "openssl/x509.h", "openssl/x509_vfy.h", "poll.h" -> return true
+        "spawn.h", "sys/file.h", "sys/socket.h", "sys/stat.h" -> return true
+        "sys/wait.h", "turbojpeg.h", "unistd.h" -> return true
+        "third_party/nlohmann/json.hpp" -> return true
+        else -> return false
+    }
+}
+
+// Reads the tokens of an included file next. The including file is parked on
+// the frame stack, so an include costs the size of the header, not of the
+// whole translation unit.
+function pushInclude(state: borrow mut Preprocessor, stop: Int, source: [Token], base: String, origin: Int) -> Int {
+    var tokens: [Token] = []
+    var bases: [String] = []
+    for token in source {
+        if token.kind != .End {
+            let packed = token.start * 4294967296 + token.end
+            let encodedStart = 0 - (origin * 4294967296 + token.start)
+            tokens.append(Token { space = token.space, spelling = token.spelling, kind = token.kind, text = token.text, number = token.number, start = encodedStart, end = packed, line = token.line })
+            bases.append(base)
+        }
+    }
+    state.frames.append(IncludeFrame { tokens = state.input, bases = state.bases, next = stop })
+    state.input = tokens
+    state.bases = bases
+    return 0
+}
+// The byte offsets of a token in its own file. `pushInclude` packs a header
+// token's offsets with the header's hash, so they are unpacked here.
+function byteStart(t: Token) -> Int {
+    if t.start < 0 { return (0 - t.start) % 4294967296 }
+    return t.start
+}
+function byteEnd(t: Token) -> Int {
+    if t.start < 0 { return t.end % 4294967296 }
+    return t.end
+}
+// Resumes the including file once an included one is exhausted.
+function popInclude(state: borrow mut Preprocessor) -> Int {
+    let frame = state.frames[state.frames.count - 1]
+    var rest: [IncludeFrame] = []
+    for i in 0..(state.frames.count - 1) { rest.append(state.frames[i]) }
+    state.frames = rest
+    state.input = frame.tokens
+    state.bases = frame.bases
+    return frame.next
+}
+// The macro of a classic include guard: the file opens with
+// `#ifndef G` / `#define G` and that conditional closes at its last directive.
+function includeGuard(tokens: [Token]) -> String {
+    if tokens.count < 7 { return "" }
+    if tokens[0].kind != .Hash || tokens[1].text != "ifndef" || tokens[2].kind != .Ident { return "" }
+    if tokens[3].kind != .Hash || !tokens[3].line || tokens[4].text != "define" || tokens[5].text != tokens[2].text { return "" }
+    var depth = 0
+    var closed = -1
+    for i in 0..tokens.count {
+        let t = tokens[i]
+        if closed >= 0 && t.line && t.kind != .End { return "" }
+        if t.kind == .Hash && t.line && i + 1 < tokens.count {
+            let name = tokens[i + 1].text
+            match name {
+                "if", "ifdef", "ifndef" -> depth = depth + 1
+                "endif" -> {
+                    depth = depth - 1
+                    if depth == 0 { closed = i }
+                }
+                else -> {}
+            }
+        }
+    }
+    if closed < 0 { return "" }
+    return tokens[2].text
+}
+function guardedAway(state: Preprocessor, path: String) -> Bool {
+    for i in 0..state.guardPaths.count {
+        if state.guardPaths[i] == path { return macroDefined(state, state.guardMacros[i]) }
+    }
+    return false
+}
+struct Expansion {
+    let tokens: [Token]
+    let next: Int
+}
+struct Arguments {
+    let values: [Token]
+    let starts: [Int]
+    let lengths: [Int]
+    let next: Int
+    let ok: Bool
+}
+
+function ppError(state: borrow mut Preprocessor, code: Int, t: Token) {
+    if state.code == 0 {
+        state.code = code
+        state.errorOffset = t.start
+        state.errorEnd = t.end
+    }
+}
+function macroIndex(state: Preprocessor, name: String) -> Int {
+    for i in 0..state.macros.count {
+        if state.macros[i].live && state.macros[i].name == name { return i }
+    }
+    return -1
+}
+function macroDefined(state: Preprocessor, name: String) -> Bool {
+    return macroIndex(state, name) >= 0
+}
+function defineMacro(state: borrow mut Preprocessor, entry: Macro) {
+    let existing = macroIndex(state, entry.name)
+    if existing >= 0 {
+        state.macros[existing] = entry
+    } else {
+        state.macros.append(entry)
+    }
+}
+function undefineMacro(state: borrow mut Preprocessor, name: String) {
+    let existing = macroIndex(state, name)
+    if existing < 0 { return }
+    let old = state.macros[existing]
+    state.macros[existing] = Macro { name = old.name, isFunction = old.isFunction, parameters = old.parameters, body = old.body, live = false }
+}
+function popBools(values: [Bool]) -> [Bool] {
+    var out: [Bool] = []
+    if values.count > 1 {
+        for i in 0..(values.count - 1) {
+            out.append(values[i])
+        }
+    }
+    return out
+}
+function emitting(state: Preprocessor) -> Bool {
+    for live in state.condLive {
+        if !live { return false }
+    }
+    return true
+}
+function lineEnd(state: Preprocessor, from: Int) -> Int {
+    for i in from..state.input.count {
+        let t = state.input[i]
+        if t.kind == .End || (t.line && i > from) { return i }
+    }
+    return state.input.count
+}
+function retag(t: Token, at: Token) -> Token {
+    return Token { space = t.space, spelling = t.spelling, kind = t.kind, text = t.text, number = t.number, start = at.start, end = at.end, line = false }
+}
+function nameIndexIn(names: [String], name: String) -> Int {
+    for i in 0..names.count {
+        if names[i] == name { return i }
+    }
+    return -1
+}
+function collectArguments(source: [Token], open: Int, count: Int) -> Arguments {
+    var values: [Token] = []
+    var starts: [Int] = [0]
+    var lengths: [Int] = []
+    var depth = 1
+    var current = 0
+    var next = open + 1
+    for i in (open + 1)..source.count {
+        if depth <= 0 { break }
+        let t = source[i]
+        if t.kind == .End { next = i; break }
+        if t.kind == .LParen || t.kind == .LBracket { depth = depth + 1 }
+        else if t.kind == .RParen || t.kind == .RBracket {
+            depth = depth - 1
+            if depth == 0 { next = i; break }
+        } else if t.kind == .Comma && depth == 1 {
+            lengths.append(values.count - starts[current])
+            current = current + 1
+            starts.append(values.count)
+            next = i + 1
+            continue
+        }
+        values.append(t)
+        next = i + 1
+    }
+    if depth != 0 { return Arguments { values = values, starts = starts, lengths = lengths, next = next, ok = false } }
+    lengths.append(values.count - starts[current])
+    if count == 0 && starts.count == 1 && lengths[0] == 0 {
+        return Arguments { values = [], starts = [], lengths = [], next = next + 1, ok = true }
+    }
+    if starts.count != count { return Arguments { values = values, starts = starts, lengths = lengths, next = next + 1, ok = false } }
+    return Arguments { values = values, starts = starts, lengths = lengths, next = next + 1, ok = true }
+}
+function substitute(state: borrow mut Preprocessor, entry: Macro, arguments: Arguments, at: Token, hidden: [String]) -> [Token] {
+    var out: [Token] = []
+    var bodyIndex = 0
+    while bodyIndex < entry.body.count {
+        let bodyToken = entry.body[bodyIndex]
+        bodyIndex = bodyIndex + 1
+        if bodyToken.kind == .Hash {
+            let parameter = nameIndexIn(entry.parameters, entry.body[bodyIndex].text)
+            out.append(stringizeArgument(arguments, parameter, at))
+            bodyIndex = bodyIndex + 1
+            continue
+        }
+        var parameter = -1
+        if bodyToken.kind == .Ident { parameter = nameIndexIn(entry.parameters, bodyToken.text) }
+        if parameter < 0 {
+            out.append(retag(bodyToken, at))
+        } else {
+            let slice = macroArgument(arguments, parameter)
+            let pasted = (bodyIndex >= 2 && entry.body[bodyIndex - 2].kind == .HashHash) ||
+                (bodyIndex < entry.body.count && entry.body[bodyIndex].kind == .HashHash)
+            if pasted {
+                if slice.count == 0 { out.append(token(.Placemark, "", 0, at.start, at.end, false)) }
+                for raw in slice { out.append(retag(raw, at)) }
+            } else {
+                for expanded in expandList(state, slice, hidden) { out.append(retag(expanded, at)) }
+            }
+        }
+    }
+    return pasteMacro(state, out, at)
+}
+function expandList(state: borrow mut Preprocessor, source: [Token], hidden: [String]) -> [Token] {
+    var out: [Token] = []
+    var i = 0
+    while i < source.count {
+        let step = expandAt(state, source, i, hidden)
+        for t in step.tokens { out.append(t) }
+        i = step.next
+    }
+    return out
+}
+function expandAt(state: borrow mut Preprocessor, source: [Token], i: Int, hidden: [String]) -> Expansion {
+    let t = source[i]
+    if t.kind != .Ident || nameIndexIn(hidden, t.text) >= 0 { return Expansion { tokens = [t], next = i + 1 } }
+    let index = macroIndex(state, t.text)
+    if index < 0 { return Expansion { tokens = [t], next = i + 1 } }
+    let entry = state.macros[index]
+    var inner: [String] = []
+    for name in hidden { inner.append(name) }
+    inner.append(entry.name)
+    if !entry.isFunction {
+        var body: [Token] = []
+        for bodyToken in entry.body { body.append(retag(bodyToken, t)) }
+        return Expansion { tokens = expandList(state, pasteMacro(state, body, t), inner), next = i + 1 }
+    }
+    if i + 1 >= source.count || source[i + 1].kind != .LParen { return Expansion { tokens = [t], next = i + 1 } }
+    let arguments = collectArguments(source, i + 1, entry.parameters.count)
+    if !arguments.ok {
+        ppError(state, diagMacroArguments(), t)
+        return Expansion { tokens = [t], next = arguments.next }
+    }
+    let substituted = substitute(state, entry, arguments, t, hidden)
+    return Expansion { tokens = expandList(state, substituted, inner), next = arguments.next }
+}
+function resolveDefined(state: borrow mut Preprocessor, line: [Token]) -> [Token] {
+    var out: [Token] = []
+    var i = 0
+    while i < line.count {
+        let t = line[i]
+        if t.kind != .Ident || t.text != "defined" {
+            out.append(t)
+            i = i + 1
+            continue
+        }
+        var j = i + 1
+        var parenthesized = false
+        if j < line.count && line[j].kind == .LParen { parenthesized = true; j = j + 1 }
+        if j >= line.count || line[j].kind != .Ident {
+            ppError(state, diagDirectiveSyntax(), t)
+            return out
+        }
+        var value = 0
+        if macroDefined(state, line[j].text) { value = 1 }
+        out.append(Token { space = false, spelling = "", kind = .Number, text = "", number = value, start = t.start, end = t.end, line = false })
+        j = j + 1
+        if parenthesized {
+            if j >= line.count || line[j].kind != .RParen {
+                ppError(state, diagDirectiveSyntax(), t)
+                return out
+            }
+            j = j + 1
+        }
+        i = j
+    }
+    return out
+}

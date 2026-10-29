@@ -1,0 +1,130 @@
+// Case labels belong to their nearest switch, including those in a nested
+// block or loop. Dispatch enters their block directly; lexical traversal
+// still binds the locals visible at each label and supplies fallthrough.
+function collectSwitchMarkers(tree: CppTree, body: [StmtId], markers: borrow mut [StmtId]) {
+    for id in body {
+        match tree.statements[id.value].kind {
+            Case -> markers.append(id)
+            Default -> markers.append(id)
+            Group(children) -> collectSwitchMarkers(tree, children, markers)
+            DeclGroup(children) -> collectSwitchMarkers(tree, children, markers)
+            If(branch) -> {
+                collectSwitchMarkers(tree, branch.body, markers)
+                collectSwitchMarkers(tree, branch.elseBody, markers)
+            }
+            While(loop) -> collectSwitchMarkers(tree, loop.body, markers)
+            DoWhile(loop) -> collectSwitchMarkers(tree, loop.body, markers)
+            For(loop) -> collectSwitchMarkers(tree, loop.body, markers)
+            RangeFor(loop) -> collectSwitchMarkers(tree, loop.body, markers)
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            ExprStmt -> {}
+            Return -> {}
+            Switch -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+}
+
+function emitSwitchMarker(state: borrow mut Lowerer, id: StmtId) {
+    for marker in state.switchMarkers {
+        if marker.statement.value == id.value {
+            if !state.terminated { kBr(state, marker.block) }
+            kSwitchTo(state, marker.block)
+            state.terminated = false
+            return
+        }
+    }
+    lowerError(state, diagCaseOutsideSwitch(), state.tree.statements[id.value].span)
+}
+
+function emitSwitch(state: borrow mut Lowerer, switchStmt: SwitchStatement) {
+    let scrutinee = asInt(state, emitExpression(state, switchStmt.expression))
+    let afterBlock = kBlock(state)
+    let enclosingMarkers = state.switchMarkers
+    state.switchMarkers = []
+    var markers: [StmtId] = []
+    collectSwitchMarkers(state.tree, switchStmt.body, markers)
+    var defaultBlock = afterBlock
+    for id in markers {
+        let block = kBlock(state)
+        state.switchMarkers.append(SwitchMarkerTarget { statement = id, block = block })
+        match state.tree.statements[id.value].kind {
+            Default -> { defaultBlock = block }
+            Case -> {}
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    for i in 0..markers.count {
+        let id = markers[i]
+        match state.tree.statements[id.value].kind {
+            Case(value) -> {
+                let caseValue = asInt(state, emitExpression(state, value))
+                let test = kIcmp(state, "eq", scrutinee.reference, caseValue.reference)
+                let next = kBlock(state)
+                kCondBr(state, test, state.switchMarkers[i].block, next)
+                kSwitchTo(state, next)
+            }
+            Default -> {}
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    kBr(state, defaultBlock)
+    state.terminated = true
+    let savedBreak = state.breakDepth
+    pushBreak(state, afterBlock)
+    emitBody(state, switchStmt.body)
+    if !state.terminated { kBr(state, afterBlock) }
+    state.breakDepth = savedBreak
+    state.switchMarkers = enclosingMarkers
+    kSwitchTo(state, afterBlock)
+    state.terminated = false
+}

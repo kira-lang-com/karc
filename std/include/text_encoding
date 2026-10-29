@@ -1,0 +1,132 @@
+// <text_encoding>: std::text_encoding over the IANA registry entries most
+// programs meet. The literal encoding is UTF-8; the environment's comes from
+// LC_ALL, LC_CTYPE or LANG.
+#ifndef KARC_STD_TEXT_ENCODING
+#define KARC_STD_TEXT_ENCODING
+
+#include <cstdlib>
+#include <cstring>
+#include <string_view>
+
+namespace std {
+
+struct text_encoding {
+    enum id {
+        other = 1,
+        unknown = 2,
+        ASCII = 3,
+        ISOLatin1 = 4,
+        ISOLatin2 = 5,
+        ISOLatinCyrillic = 8,
+        ISOLatinGreek = 10,
+        ShiftJIS = 17,
+        EUCPkdFmtJapanese = 18,
+        KOI8R = 2084,
+        UTF8 = 106,
+        UTF16BE = 1013,
+        UTF16LE = 1014,
+        UTF16 = 1015,
+        UTF32 = 1017,
+        UTF32BE = 1018,
+        UTF32LE = 1019,
+        GBK = 113,
+        GB18030 = 114,
+        Big5 = 2026,
+        windows1252 = 2252
+    };
+    static constexpr size_t max_name_length = 63;
+
+    text_encoding() : mib_(unknown) { name_[0] = 0; }
+    text_encoding(id mib) : mib_(mib) { copyName(nameOf(mib)); }
+    text_encoding(string_view name) : mib_(other) {
+        copyName("");
+        size_t length = name.size() < max_name_length ? name.size() : max_name_length;
+        for (size_t i = 0; i < length; i++) { name_[i] = name[i]; }
+        name_[length] = 0;
+        for (int mib = 1; mib < 2300; mib++) {
+            if (nameOf(mib)[0] != 0 && sameName(name_, nameOf(mib))) {
+                mib_ = mib;
+                break;
+            }
+        }
+        if (sameName(name_, "UTF8")) { mib_ = UTF8; }
+        if (sameName(name_, "US-ASCII") || sameName(name_, "ANSI_X3.4-1968")) { mib_ = ASCII; }
+        if (sameName(name_, "ISO8859-1") || sameName(name_, "latin1")) { mib_ = ISOLatin1; }
+    }
+
+    id mib() const noexcept { return (id)mib_; }
+    const char* name() const noexcept { return name_; }
+    bool operator==(const text_encoding& that) const noexcept {
+        if (mib_ == other && that.mib_ == other) { return sameName(name_, that.name_); }
+        return mib_ == that.mib_;
+    }
+    bool operator==(id wanted) const noexcept { return mib_ == wanted; }
+
+    static text_encoding literal() noexcept { return text_encoding(UTF8); }
+    static text_encoding environment() {
+        const char* locale = getenv("LC_ALL");
+        if (locale == nullptr || *locale == 0) { locale = getenv("LC_CTYPE"); }
+        if (locale == nullptr || *locale == 0) { locale = getenv("LANG"); }
+        if (locale == nullptr || *locale == 0) { return text_encoding(ASCII); }
+        const char* dot = strchr(locale, '.');
+        if (dot == nullptr) { return text_encoding(ASCII); }
+        const char* at = strchr(dot, '@');
+        size_t length = at == nullptr ? strlen(dot + 1) : (size_t)(at - dot - 1);
+        return text_encoding(string_view(dot + 1, length));
+    }
+    template <id wanted>
+    static bool environment_is() { return environment() == wanted; }
+
+private:
+    static const char* nameOf(int mib) {
+        switch (mib) {
+        case ASCII: return "US-ASCII";
+        case ISOLatin1: return "ISO-8859-1";
+        case ISOLatin2: return "ISO-8859-2";
+        case ISOLatinCyrillic: return "ISO-8859-5";
+        case ISOLatinGreek: return "ISO-8859-7";
+        case ShiftJIS: return "Shift_JIS";
+        case EUCPkdFmtJapanese: return "EUC-JP";
+        case KOI8R: return "KOI8-R";
+        case UTF8: return "UTF-8";
+        case UTF16BE: return "UTF-16BE";
+        case UTF16LE: return "UTF-16LE";
+        case UTF16: return "UTF-16";
+        case UTF32: return "UTF-32";
+        case UTF32BE: return "UTF-32BE";
+        case UTF32LE: return "UTF-32LE";
+        case GBK: return "GBK";
+        case GB18030: return "GB18030";
+        case Big5: return "Big5";
+        case windows1252: return "windows-1252";
+        }
+        return "";
+    }
+    // Names compare ignoring case and every character but letters and digits.
+    static bool sameName(const char* left, const char* right) {
+        while (true) {
+            while (*left != 0 && !isNameChar(*left)) { left++; }
+            while (*right != 0 && !isNameChar(*right)) { right++; }
+            if (*left == 0 || *right == 0) { return *left == *right; }
+            if (lower(*left) != lower(*right)) { return false; }
+            left++;
+            right++;
+        }
+    }
+    static bool isNameChar(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+    static char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+    void copyName(const char* text) {
+        size_t i = 0;
+        while (text[i] != 0 && i < max_name_length) {
+            name_[i] = text[i];
+            i++;
+        }
+        name_[i] = 0;
+    }
+    int mib_;
+    char name_[64];
+};
+
+}
+
+#endif

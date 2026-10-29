@@ -1,0 +1,72 @@
+// Conversions between classes: by a constructor taking the argument, by
+// the argument's conversion operator, and from a derived object's base.
+
+// Whether class `wanted` has a constructor taking one non-class `argument`
+// (other parameters defaulted), or a member constructor template.
+function convertsFrom(state: Lowerer, wanted: String, argument: String) -> Bool {
+    let name = constructorName(wanted)
+    for i in functionsNamedIn(state.tree, name) {
+        let fn = state.tree.functions[i]
+        if fn.parameters.count >= 1 && ownerOf(state.tree, i) == wanted &&
+            (fn.parameters.count == 1 || hasExpr(fn.parameters[1].fallback)) {
+            let parameter = parameterClassOf(fn.parameters[0])
+            if !isClassType(parameter) && argumentFit(state, fn.parameters[0], argument) > 0 && !pointerMismatch(state, parameter, argument) { return true }
+        }
+    }
+    let owner = nominalName(wanted)
+    for t in state.tree.templates {
+        if t.owner == owner && unqualifiedName(t.name) == name &&
+            templateParameters(t.tokens).count == 1 &&
+            (isClassType(argument) || takesAnyType(t)) { return true }
+    }
+    return false
+}
+// Whether a one-parameter constructor template's parameter is one of its
+// template's type parameters, `T`, `const T&` or `T&&`, rather than a class
+// such as `pair<C, D>` that only a class argument can be.
+function takesAnyType(t: CppTemplate) -> Bool {
+    for token in templateParameters(t.tokens)[0] {
+        if token.kind == .Ident && token.text != "const" {
+            for parameter in t.params {
+                if parameter == token.text { return true }
+            }
+            return false
+        }
+    }
+    return false
+}
+// `T x = u` with u of class U that has `operator T()` and T no constructor
+// from U: the conversion builds x.
+function emitConversionInto(state: borrow mut Lowerer, object: KirValue, structType: String, argument: ExprId) -> Bool {
+    let from = staticType(state, argument)
+    if !isClassType(from) || from == structType || isBaseOf(state, structType, from) { return false }
+    let name = joinText(["operator ", structType])
+    if findMember(state.tree, from, name, 0) < 0 { return false }
+    for i in functionsNamedIn(state.tree, constructorName(structType)) {
+        let fn = state.tree.functions[i]
+        if methodOwnerType(state.tree, fn.name) == structType && fn.parameters.count >= 1 && parameterClassOf(fn.parameters[0]) == from { return false }
+    }
+    let span = state.tree.expressions[argument.value].span
+    let call = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = argument, name = joinText(["@member::", name]), arguments = [], explicitArguments = 0, awaitTransform = false }), span = span, nameSpan = span })
+    moveClassValue(state, call, structBehindPointer(state, object, structType), structType)
+    return true
+}
+// The conversion operator of class `from` to use for a `wanted` scalar:
+// `operator wanted`, else one to another arithmetic type; "" for none.
+function scalarConversion(tree: CppTree, from: String, wanted: String) -> String {
+    let targets: [String] = [wanted, "i32", "i64", "u32", "u64", "f64", "i1", "i8", "u8", "i16", "u16"]
+    for target in targets {
+        let name = joinText(["operator ", target])
+        if findMember(tree, from, name, 0) >= 0 { return name }
+    }
+    return ""
+}
+// `Base(derived)` for a class without a copy constructor of its own: the
+// base subobject copied.
+function emitBaseCopyInto(state: borrow mut Lowerer, object: KirValue, structType: String, argument: ExprId) -> Bool {
+    if copyConstructor(state, structType) >= 0 || !isClassLvalue(state, argument) { return false }
+    let from = staticType(state, argument)
+    if !isClassType(from) || from == structType || !isBaseOf(state, structType, from) { return false }
+    copyInto(state, object, upcast(state, methodReceiver(state, argument, from), from, structType), structType)
+    return true
+}

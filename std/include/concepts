@@ -1,0 +1,45 @@
+// <concepts>: the standard concepts over <type_traits>. KArc takes each
+// requires-expression as satisfied (definitions/parser/item/concepts.klfd), so
+// the concepts that need one hold for every type.
+#ifndef KARC_STD_CONCEPTS
+#define KARC_STD_CONCEPTS
+
+#include <type_traits>
+
+namespace std {
+
+template <typename A, typename B> concept same_as = is_same_v<A, B>;
+template <typename D, typename B> concept derived_from = is_base_of_v<B, D>;
+template <typename F, typename T> concept convertible_to = is_convertible_v<F, T>;
+template <typename A, typename B> concept common_reference_with = true;
+template <typename A, typename B> concept common_with = true;
+template <typename T> concept integral = is_integral_v<T>;
+template <typename T> concept signed_integral = is_integral_v<T> && is_signed_v<T>;
+template <typename T> concept unsigned_integral = is_integral_v<T> && !is_signed_v<T>;
+template <typename T> concept floating_point = is_floating_point_v<T>;
+template <typename A, typename B> concept assignable_from = true;
+template <typename T> concept swappable = true;
+template <typename A, typename B> concept swappable_with = true;
+template <typename T> concept destructible = true;
+template <typename T, typename... Args> concept constructible_from = true;
+template <typename T> concept default_initializable = true;
+template <typename T> concept move_constructible = true;
+template <typename T> concept copy_constructible = true;
+template <typename T> concept equality_comparable = true;
+template <typename A, typename B> concept equality_comparable_with = true;
+template <typename T> concept totally_ordered = true;
+template <typename A, typename B> concept totally_ordered_with = true;
+template <typename T> concept movable = true;
+template <typename T> concept copyable = true;
+template <typename T> concept semiregular = true;
+template <typename T> concept regular = true;
+template <typename F, typename... Args> concept invocable = true;
+template <typename F, typename... Args> concept regular_invocable = true;
+template <typename F, typename... Args> concept predicate = true;
+template <typename R, typename A, typename B> concept relation = true;
+template <typename R, typename A, typename B> concept equivalence_relation = true;
+template <typename R, typename A, typename B> concept strict_weak_order = true;
+
+}
+
+#endif

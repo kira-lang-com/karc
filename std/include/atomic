@@ -1,0 +1,67 @@
+// <atomic>: std::atomic. KArc programs run on one thread (there is no
+// <thread> yet), so plain loads and stores are atomic.
+#ifndef KARC_STD_ATOMIC
+#define KARC_STD_ATOMIC
+
+namespace std {
+
+template <typename T>
+class atomic {
+public:
+    atomic() : value_(0) {}
+    atomic(T value) : value_(value) {}
+    T load() const { return value_; }
+    void store(T value) { value_ = value; }
+    T exchange(T value) {
+        T old = value_;
+        value_ = value;
+        return old;
+    }
+    bool compare_exchange_strong(T& expected, T desired) {
+        if (value_ == expected) {
+            value_ = desired;
+            return true;
+        }
+        expected = value_;
+        return false;
+    }
+    bool compare_exchange_weak(T& expected, T desired) { return compare_exchange_strong(expected, desired); }
+    T fetch_add(T delta) {
+        T old = value_;
+        value_ = value_ + delta;
+        return old;
+    }
+    T fetch_sub(T delta) {
+        T old = value_;
+        value_ = value_ - delta;
+        return old;
+    }
+    atomic& operator++() {
+        value_ = value_ + 1;
+        return *this;
+    }
+    atomic& operator--() {
+        value_ = value_ - 1;
+        return *this;
+    }
+    atomic& operator+=(T delta) {
+        value_ = value_ + delta;
+        return *this;
+    }
+    atomic& operator-=(T delta) {
+        value_ = value_ - delta;
+        return *this;
+    }
+    atomic& operator=(T value) {
+        value_ = value;
+        return *this;
+    }
+    operator T() const { return value_; }
+
+private:
+    T value_;
+};
+
+}
+
+#endif

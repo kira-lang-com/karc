@@ -1,0 +1,213 @@
+// <type_traits>: the type predicates and transformations. Predicates come
+// from clang-style type-trait builtins; transformations are class templates
+// with partial specializations. References have no type of their own in
+// KArc, so is_reference is false and remove_reference keeps its type.
+#ifndef KARC_STD_TYPE_TRAITS
+#define KARC_STD_TYPE_TRAITS
+
+#include <cstddef>
+
+namespace std {
+
+template <bool B> struct bool_constant {
+    static const bool value = B;
+    typedef bool value_type;
+    operator bool() const { return B; }
+    int unused;
+};
+typedef bool_constant<true> true_type;
+typedef bool_constant<false> false_type;
+template <typename T, long V> struct integral_constant {
+    static const long value = V;
+    int unused;
+};
+
+template <typename A, typename B> struct is_same { static const bool value = __is_same(A, B); int unused; };
+template <typename T> struct is_integral { static const bool value = __is_integral(T); int unused; };
+template <typename T> struct is_floating_point { static const bool value = __is_floating_point(T); int unused; };
+template <typename T> struct is_arithmetic { static const bool value = __is_arithmetic(T); int unused; };
+template <typename T> struct is_fundamental { static const bool value = __is_arithmetic(T) || __is_void(T); int unused; };
+template <typename T> struct is_scalar { static const bool value = __is_arithmetic(T) || __is_pointer(T); int unused; };
+template <typename T> struct is_pointer { static const bool value = __is_pointer(T); int unused; };
+template <typename T> struct is_class { static const bool value = __is_class(T); int unused; };
+template <typename T> struct is_void { static const bool value = __is_void(T); int unused; };
+template <typename T> struct is_array { static const bool value = __is_array(T); int unused; };
+template <typename T> struct is_signed { static const bool value = __is_signed(T); int unused; };
+template <typename T> struct is_unsigned { static const bool value = __is_unsigned(T); int unused; };
+template <typename T> struct is_enum { static const bool value = false; int unused; };
+template <typename T> struct is_const { static const bool value = false; int unused; };
+template <typename T> struct is_reference { static const bool value = false; int unused; };
+template <typename T> struct is_polymorphic { static const bool value = __is_polymorphic(T); int unused; };
+template <typename T> struct is_empty { static const bool value = __is_empty(T); int unused; };
+template <typename T> struct is_trivially_copyable { static const bool value = __is_trivially_copyable(T); int unused; };
+template <typename B, typename D> struct is_base_of { static const bool value = __is_base_of(B, D); int unused; };
+template <typename F, typename T> struct is_convertible { static const bool value = __is_convertible(F, T); int unused; };
+
+template <typename A, typename B> inline constexpr bool is_same_v = __is_same(A, B);
+template <typename T> inline constexpr bool is_integral_v = __is_integral(T);
+template <typename T> inline constexpr bool is_floating_point_v = __is_floating_point(T);
+template <typename T> inline constexpr bool is_arithmetic_v = __is_arithmetic(T);
+template <typename T> inline constexpr bool is_pointer_v = __is_pointer(T);
+template <typename T> inline constexpr bool is_class_v = __is_class(T);
+template <typename T> inline constexpr bool is_void_v = __is_void(T);
+template <typename T> inline constexpr bool is_array_v = __is_array(T);
+template <typename T> inline constexpr bool is_signed_v = __is_signed(T);
+template <typename T> inline constexpr bool is_unsigned_v = __is_unsigned(T);
+template <typename B, typename D> inline constexpr bool is_base_of_v = __is_base_of(B, D);
+template <typename F, typename T> inline constexpr bool is_convertible_v = __is_convertible(F, T);
+
+template <typename T> inline constexpr bool is_fundamental_v = __is_arithmetic(T) || __is_void(T);
+template <typename T> inline constexpr bool is_scalar_v = __is_arithmetic(T) || __is_pointer(T);
+template <typename T> inline constexpr bool is_object_v = !__is_void(T);
+template <typename T> inline constexpr bool is_compound_v = !(__is_arithmetic(T) || __is_void(T));
+template <typename T> inline constexpr bool is_enum_v = false;
+template <typename T> inline constexpr bool is_union_v = false;
+template <typename T> inline constexpr bool is_function_v = false;
+template <typename T> inline constexpr bool is_member_pointer_v = false;
+template <typename T> inline constexpr bool is_null_pointer_v = false;
+template <typename T> inline constexpr bool is_const_v = false;
+template <typename T> inline constexpr bool is_volatile_v = false;
+template <typename T> inline constexpr bool is_reference_v = false;
+template <typename T> inline constexpr bool is_lvalue_reference_v = false;
+template <typename T> inline constexpr bool is_rvalue_reference_v = false;
+template <typename T> inline constexpr bool is_polymorphic_v = __is_polymorphic(T);
+template <typename T> inline constexpr bool is_empty_v = __is_empty(T);
+template <typename T> inline constexpr bool is_trivially_copyable_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_trivial_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_standard_layout_v = !__is_polymorphic(T);
+template <typename T> inline constexpr bool is_pod_v = __is_trivially_copyable(T) && !__is_polymorphic(T);
+template <typename T> inline constexpr bool is_aggregate_v = __is_class(T) && __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_final_v = false;
+template <typename T> inline constexpr bool is_abstract_v = false;
+
+// Construction, assignment and destruction are assumed possible: KArc
+// cannot ask whether an expression would compile.
+template <typename T, typename... Args> inline constexpr bool is_constructible_v = true;
+template <typename T, typename... Args> inline constexpr bool is_trivially_constructible_v = __is_trivially_copyable(T);
+template <typename T, typename... Args> inline constexpr bool is_nothrow_constructible_v = true;
+template <typename T> inline constexpr bool is_default_constructible_v = true;
+template <typename T> inline constexpr bool is_trivially_default_constructible_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_nothrow_default_constructible_v = true;
+template <typename T> inline constexpr bool is_copy_constructible_v = true;
+template <typename T> inline constexpr bool is_trivially_copy_constructible_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_nothrow_copy_constructible_v = true;
+template <typename T> inline constexpr bool is_move_constructible_v = true;
+template <typename T> inline constexpr bool is_trivially_move_constructible_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_nothrow_move_constructible_v = true;
+template <typename T, typename U> inline constexpr bool is_assignable_v = true;
+template <typename T> inline constexpr bool is_copy_assignable_v = true;
+template <typename T> inline constexpr bool is_move_assignable_v = true;
+template <typename T> inline constexpr bool is_nothrow_move_assignable_v = true;
+template <typename T> inline constexpr bool is_trivially_copy_assignable_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_destructible_v = true;
+template <typename T> inline constexpr bool is_trivially_destructible_v = __is_trivially_copyable(T);
+template <typename T> inline constexpr bool is_nothrow_destructible_v = true;
+template <typename T> inline constexpr bool is_swappable_v = true;
+template <typename T> inline constexpr bool is_nothrow_swappable_v = true;
+template <typename T> inline constexpr bool has_virtual_destructor_v = __is_polymorphic(T);
+template <typename F, typename... Args> inline constexpr bool is_invocable_v = true;
+template <typename R, typename F, typename... Args> inline constexpr bool is_invocable_r_v = true;
+template <typename F, typename... Args> inline constexpr bool is_nothrow_invocable_v = true;
+
+template <typename T> struct is_object { static const bool value = !__is_void(T); int unused; };
+template <typename T> struct is_function { static const bool value = false; int unused; };
+template <typename T> struct is_member_pointer { static const bool value = false; int unused; };
+template <typename T> struct is_lvalue_reference { static const bool value = false; int unused; };
+template <typename T> struct is_rvalue_reference { static const bool value = false; int unused; };
+template <typename T> struct is_trivial { static const bool value = __is_trivially_copyable(T); int unused; };
+template <typename T> struct is_standard_layout { static const bool value = !__is_polymorphic(T); int unused; };
+template <typename T> struct is_pod { static const bool value = __is_trivially_copyable(T) && !__is_polymorphic(T); int unused; };
+template <typename T> struct is_abstract { static const bool value = false; int unused; };
+template <typename T> struct is_final { static const bool value = false; int unused; };
+template <typename T, typename... Args> struct is_constructible { static const bool value = true; int unused; };
+template <typename T> struct is_default_constructible { static const bool value = true; int unused; };
+template <typename T> struct is_copy_constructible { static const bool value = true; int unused; };
+template <typename T> struct is_move_constructible { static const bool value = true; int unused; };
+template <typename T> struct is_nothrow_move_constructible { static const bool value = true; int unused; };
+template <typename T> struct is_trivially_destructible { static const bool value = __is_trivially_copyable(T); int unused; };
+template <typename T> struct is_destructible { static const bool value = true; int unused; };
+template <typename T, typename U> struct is_assignable { static const bool value = true; int unused; };
+template <typename T> struct is_copy_assignable { static const bool value = true; int unused; };
+template <typename T> struct is_move_assignable { static const bool value = true; int unused; };
+template <typename F, typename... Args> struct is_invocable { static const bool value = true; int unused; };
+
+template <typename T> struct rank { static const long value = 0; int unused; };
+template <typename T> struct extent { static const long value = 0; int unused; };
+template <typename T> struct alignment_of { static const long value = sizeof(T) < 8 ? sizeof(T) : 8; int unused; };
+template <typename T> inline constexpr long rank_v = 0;
+template <typename T> inline constexpr long alignment_of_v = sizeof(T) < 8 ? sizeof(T) : 8;
+
+template <bool... B> struct conjunction { static const bool value = (B && ...); int unused; };
+template <bool... B> struct disjunction { static const bool value = (B || ...); int unused; };
+template <bool B> struct negation { static const bool value = !B; int unused; };
+
+template <typename... T> using void_t = void;
+template <typename T> struct underlying_type { typedef int type; int unused; };
+template <typename T> using underlying_type_t = typename underlying_type<T>::type;
+template <typename T> struct remove_extent { typedef conditional_t<__is_array(T), __karc_element(T), T> type; int unused; };
+template <typename T> struct remove_all_extents { typedef T type; int unused; };
+template <typename T> struct add_rvalue_reference { typedef T type; int unused; };
+template <typename T> struct add_volatile { typedef T type; int unused; };
+template <typename T> struct add_cv { typedef T type; int unused; };
+template <typename T> using add_const_t = typename add_const<T>::type;
+template <typename T> using add_lvalue_reference_t = typename add_lvalue_reference<T>::type;
+template <typename T> using add_rvalue_reference_t = typename add_rvalue_reference<T>::type;
+template <typename T> using type_identity_t = T;
+template <typename T> using remove_volatile_t = typename remove_volatile<T>::type;
+template <typename T> using remove_extent_t = typename remove_extent<T>::type;
+template <typename T> using remove_all_extents_t = typename remove_all_extents<T>::type;
+
+// The common type of two: the wider arithmetic type, else the first.
+template <typename A, typename B> struct common_type { typedef A type; int unused; };
+template <> struct common_type<int, long> { typedef long type; int unused; };
+template <> struct common_type<long, int> { typedef long type; int unused; };
+template <> struct common_type<int, double> { typedef double type; int unused; };
+template <> struct common_type<double, int> { typedef double type; int unused; };
+template <> struct common_type<long, double> { typedef double type; int unused; };
+template <> struct common_type<double, long> { typedef double type; int unused; };
+template <> struct common_type<float, double> { typedef double type; int unused; };
+template <> struct common_type<double, float> { typedef double type; int unused; };
+template <> struct common_type<int, float> { typedef float type; int unused; };
+template <> struct common_type<float, int> { typedef float type; int unused; };
+template <typename A, typename B> using common_type_t = typename common_type<A, B>::type;
+
+template <typename T> T declval();
+
+template <typename T> struct type_identity { typedef T type; int unused; };
+template <typename T> struct remove_reference { typedef T type; int unused; };
+template <typename T> struct remove_const { typedef T type; int unused; };
+template <typename T> struct remove_volatile { typedef T type; int unused; };
+template <typename T> struct remove_cv { typedef T type; int unused; };
+template <typename T> struct remove_cvref { typedef T type; int unused; };
+template <typename T> struct decay { typedef T type; int unused; };
+template <typename T> struct remove_pointer { typedef T type; int unused; };
+template <typename T> struct remove_pointer<T*> { typedef T type; int unused; };
+template <typename T> struct add_pointer { typedef T* type; int unused; };
+template <typename T> struct add_const { typedef T type; int unused; };
+template <typename T> struct add_lvalue_reference { typedef T type; int unused; };
+template <typename T> struct make_unsigned { typedef unsigned long type; int unused; };
+template <> struct make_unsigned<int> { typedef unsigned int type; int unused; };
+template <> struct make_unsigned<char> { typedef unsigned char type; int unused; };
+template <typename T> struct make_signed { typedef long type; int unused; };
+template <> struct make_signed<unsigned int> { typedef int type; int unused; };
+
+template <bool B, typename T, typename F> struct conditional { typedef T type; int unused; };
+template <typename T, typename F> struct conditional<false, T, F> { typedef F type; int unused; };
+template <bool B, typename T = void> struct enable_if { int unused; };
+template <typename T> struct enable_if<true, T> { typedef T type; int unused; };
+
+template <typename T> using remove_reference_t = typename remove_reference<T>::type;
+template <typename T> using remove_const_t = typename remove_const<T>::type;
+template <typename T> using remove_cv_t = typename remove_cv<T>::type;
+template <typename T> using remove_cvref_t = typename remove_cvref<T>::type;
+template <typename T> using decay_t = typename decay<T>::type;
+template <typename T> using remove_pointer_t = typename remove_pointer<T>::type;
+template <typename T> using add_pointer_t = typename add_pointer<T>::type;
+template <typename T> using make_unsigned_t = typename make_unsigned<T>::type;
+template <typename T> using make_signed_t = typename make_signed<T>::type;
+template <bool B, typename T, typename F> using conditional_t = typename conditional<B, T, F>::type;
+template <bool B, typename T = void> using enable_if_t = typename enable_if<B, T>::type;
+
+}
+
+#endif

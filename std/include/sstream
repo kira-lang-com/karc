@@ -1,0 +1,104 @@
+// <sstream>: string streams. ostringstream collects what is written into
+// a std::string; istringstream reads out of one; stringstream does both,
+// reading what has been written.
+#ifndef KARC_STD_SSTREAM
+#define KARC_STD_SSTREAM
+
+#include <iostream>
+#include <string>
+
+namespace std {
+
+class ostringstream : public ostream {
+public:
+    ostringstream() : ostream(-1) {}
+    ostringstream(const string& text) : ostream(-1), text_(text) {}
+    void karc_put(const char* data, size_t count) override { text_.append(data, count); }
+    string str() const { return text_; }
+    void str(const string& text) { text_ = text; }
+
+private:
+    string text_;
+};
+
+class istringstream : public istream {
+public:
+    istringstream() : istream(-1), position_(0) {}
+    istringstream(const string& text) : istream(-1), text_(text), position_(0) {}
+    istringstream(const char* text) : istream(-1), text_(text), position_(0) {}
+    int karc_get() override {
+        if (position_ >= text_.size()) { return -1; }
+        int c = (unsigned char)text_[position_];
+        position_++;
+        return c;
+    }
+    string str() const { return text_; }
+    void str(const string& text) {
+        text_ = text;
+        position_ = 0;
+        pending_ = -2;
+        state_ = 0;
+    }
+    // More text to read, keeping the position (stringstream's writes).
+    void karc_source(const string& text) {
+        text_ = text;
+        state_ = state_ & ~ios_base::eofbit;
+        if (pending_ == -1) { pending_ = -2; }
+    }
+
+private:
+    string text_;
+    size_t position_;
+};
+
+// Written text is readable: input continues from where the last read
+// stopped in everything written so far.
+class stringstream : public ostream {
+public:
+    stringstream() : ostream(-1) {}
+    stringstream(const string& text) : ostream(-1), text_(text) {}
+    void karc_put(const char* data, size_t count) override { text_.append(data, count); }
+    string str() const { return text_; }
+    void str(const string& text) {
+        text_ = text;
+        reader_.str(text);
+    }
+    template <typename T>
+    stringstream& operator>>(T& value) {
+        sync();
+        reader_ >> value;
+        return *this;
+    }
+    bool readLine(string& line, char delimiter = '\n') {
+        sync();
+        return reader_.readLine(line, delimiter);
+    }
+    int get() {
+        sync();
+        return reader_.get();
+    }
+    int peek() {
+        sync();
+        return reader_.peek();
+    }
+    bool eof() const { return reader_.eof(); }
+    explicit operator bool() const { return !reader_.fail() && !fail(); }
+    bool operator!() const { return reader_.fail() || fail(); }
+
+private:
+    // The reader sees everything written, keeping its position.
+    void sync() {
+        if (reader_.str().size() != text_.size()) { reader_.karc_source(text_); }
+    }
+    string text_;
+    istringstream reader_;
+};
+
+inline stringstream& getline(stringstream& input, string& line, char delimiter = '\n') {
+    input.readLine(line, delimiter);
+    return input;
+}
+
+}
+
+#endif

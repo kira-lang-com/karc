@@ -1,0 +1,38 @@
+// <memory>: the uninitialized-memory algorithms; std::allocator is in
+// <__allocator> and the smart pointers are in <__smart_ptr>.
+#ifndef KARC_STD_MEMORY
+#define KARC_STD_MEMORY
+
+#include <cstddef>
+#include <new>
+#include <cstdlib>
+#include <utility>
+#include <__allocator>
+
+namespace std {
+
+template <typename T>
+T* addressof(T& value) { return &value; }
+
+template <typename T, typename... Args>
+T* construct_at(T* pointer, Args&&... args) { return new (pointer) T(std::forward<Args>(args)...); }
+template <typename T>
+void destroy_at(T* pointer) { pointer->~T(); }
+template <typename I, typename O>
+O uninitialized_copy(I first, I last, O out) {
+    for (; first != last; ++first) {
+        construct_at(&*out, *first);
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename V>
+void uninitialized_fill(I first, I last, const V& value) {
+    for (; first != last; ++first) { construct_at(&*first, value); }
+}
+
+}
+
+#include <__smart_ptr>
+
+#endif

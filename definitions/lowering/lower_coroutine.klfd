@@ -1,0 +1,346 @@
+// C++20 coroutines. A coroutine becomes three functions:
+//
+// - the ramp, under the coroutine's own name: it allocates the frame, copies
+//   the parameters into it, constructs the promise, builds the result from
+//   `promise.get_return_object()` and runs the body to its first suspension;
+// - the resume function, `(frame) -> void`: the body, every local of which
+//   lives in the frame. It enters at the start or at the suspension point the
+//   frame's state names, and returns to its caller at each suspension;
+// - the destroy function, `(frame) -> void`: destroys the promise and the
+//   parameter copies and frees the frame.
+//
+// The frame begins with the resume and destroy function pointers, the state
+// and the done flag (std's __karc_coroutine_frame), and holds the promise at
+// byte 32, where coroutine_handle::promise finds it.
+
+function isCoroutine(tree: CppTree, fn: CppFunction) -> Bool {
+    if fn.body.count == 0 { return false }
+    for first in tree.coroutineBodies {
+        if first == fn.body[0].value { return true }
+    }
+    return false
+}
+// The promise type: the result class's member `promise_type`.
+function promiseTypeOf(tree: CppTree, result: String) -> String {
+    let wanted = joinText([nominalName(result), "::promise_type"])
+    for t in tree.typedefs {
+        if t.name == wanted { return t.declType }
+    }
+    for t in tree.typedefs {
+        if qualifiedNamesMatch(t.name, wanted) { return t.declType }
+    }
+    return ""
+}
+// The frame slot a parameter is kept in: a class by value is copied in.
+function coroutineParamType(parameter: CppParam) -> String {
+    return parameter.declType
+}
+function copiesParameter(parameter: CppParam) -> Bool {
+    return isClassType(parameter.declType) && !parameter.reference
+}
+// The frame offsets of the promise, the two scratch slots, the frame
+// pointer, `this` for a member function and each parameter, carved in the
+// order the resume function declares them.
+function coroutineLayout(state: borrow mut Lowerer, fn: CppFunction, promise: String) -> [Int] {
+    var types: [String] = [promise, "i32", "[1 x i32]", "*[0 x i8]"]
+    let owner = methodOwnerType(state.tree, fn.name)
+    if owner != "" { types.append(joinText(["*[0 x ", owner, "]"])) }
+    for parameter in fn.parameters { types.append(coroutineParamType(parameter)) }
+    var offsets: [Int] = []
+    var offset = 32
+    for ty in types {
+        offset = roundUp(offset, typeAlign(state.tree, ty))
+        offsets.append(offset)
+        var size = typeSize(state.tree, ty)
+        if size < 1 { size = 1 }
+        offset = offset + size
+    }
+    return offsets
+}
+// The `ty` at byte `offset` of the frame.
+function frameAt(state: borrow mut Lowerer, frame: KirValue, offset: Int, ty: String) -> KirAddress {
+    let bytes = kAddressOf(state, frame, "[0 x i8]")
+    let byte = kElemAddr(state, bytes, kConstInt(state, "i64", offset), "i8")
+    let typed = slotPointer(state, byte, ty)
+    return kElemAddr(state, kAddressOf(state, typed, joinText(["[0 x ", ty, "]"])), kConstInt(state, "i64", 0), ty)
+}
+// Where kStackAlloc puts a local of the resume function: the next free
+// bytes of the frame, addressed from the entry block.
+function frameAddress(state: borrow mut Lowerer, ty: String) -> KirAddress {
+    let offset = roundUp(state.frameOffset, typeAlign(state.tree, ty))
+    var size = typeSize(state.tree, ty)
+    if size < 1 { size = 1 }
+    state.frameOffset = offset + size
+    kEnterEntry(state)
+    let address = frameAt(state, state.coroutineFrame.unwrap(), offset, ty)
+    kLeaveEntry(state)
+    return address
+}
+function declareAt(state: borrow mut Lowerer, name: String, ty: String, element: String, address: KirAddress) -> Int {
+    let slot = state.slots
+    state.slots = state.slots + 1
+    state.slotsData.append(Slot { ty = ty, element = element, reference = false, global = "", address = address })
+    bind(state, name, slot)
+    return slot
+}
+function loweredName(state: borrow mut Lowerer, name: String, span: Span) -> ExprId {
+    return addLoweredExpr(state, Expr { kind = .Name(NameExpression { name = name, explicitArguments = 0, valueUse = true }), span = span, nameSpan = span })
+}
+function loweredCall(state: borrow mut Lowerer, callee: String, receiver: ExprId, arguments: [ExprId], span: Span) -> ExprId {
+    return addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = receiver, name = callee, arguments = arguments, explicitArguments = 0, awaitTransform = false }), span = span, nameSpan = span })
+}
+// `object.member(arguments)` on the local `object`.
+function localMemberCall(state: borrow mut Lowerer, object: String, member: String, arguments: [ExprId], span: Span) -> ExprId {
+    return loweredCall(state, joinText(["@member::", member]), loweredName(state, object, span), arguments, span)
+}
+// Declares the class local `name` initialized from `init` in the scope
+// being lowered.
+function declareFromExpression(state: borrow mut Lowerer, name: String, ty: String, init: ExprId, span: Span) {
+    state.tree.statements.append(sStructDecl(name, ty, init, span))
+    emitStatementKind(state, StmtId { value = state.tree.statements.count - 1 })
+}
+function helperFunction(state: borrow mut Lowerer, name: String) -> Int {
+    for i in functionsNamed(state, name) { return i }
+    return -1
+}
+function declareFrameFunction(state: borrow mut Lowerer, fn: CppFunction, suffix: String) -> KirFunctionBuilder {
+    let signature = kSignatureNamed(state, fn.nameSpan, joinText([fn.name, suffix]), "unit", functionSuffix(state.tree, fn))
+    kSignatureParameter(state, signature, "*[0 x i8]")
+    return kDeclareFunction(signature)
+}
+function lowerCoroutine(state: borrow mut Lowerer, index: Int, handle: KirFunctionBuilder) {
+    let fn = state.tree.functions[index]
+    let promise = promiseTypeOf(state.tree, fn.returnType)
+    if promise == "" || !isClassType(fn.returnType) {
+        lowerError(state, diagUnsupportedExpression(), fn.nameSpan)
+        return
+    }
+    let resume = declareFrameFunction(state, fn, "__karc_resume")
+    let destroy = declareFrameFunction(state, fn, "__karc_destroy")
+    let size = lowerResume(state, index, resume, destroy, promise)
+    lowerDestroy(state, index, destroy, promise)
+    lowerRamp(state, index, handle, resume, destroy, promise, size)
+}
+// The ramp, under the coroutine's own signature.
+function lowerRamp(state: borrow mut Lowerer, index: Int, handle: KirFunctionBuilder, resume: KirFunctionBuilder, destroy: KirFunctionBuilder, promise: String, size: Int) {
+    let fn = state.tree.functions[index]
+    kOpenBody(handle)
+    resetFunctionState(state, index, handle)
+    declareScratch(state, "i32", "")
+    declareScratch(state, "[1 x i32]", "i32")
+    setSret(state, kParameter(handle, 0))
+    var offset = 1
+    let owner = methodOwnerType(state.tree, fn.name)
+    let ownerPointer = joinText(["*[0 x ", owner, "]"])
+    var thisSlot = -1
+    if owner != "" {
+        thisSlot = declare(state, "this", ownerPointer, owner, fn.span)
+        kStore(state, kParameter(handle, offset), state.slotsData[thisSlot].address)
+        offset = offset + 1
+    }
+    let body = kBlock(state)
+    kSwitchTo(state, body)
+    bindParameters(state, fn, handle, offset)
+    let allocate = functionSlotForFunction(state, helperFunction(state, "__karc_coroutine_alloc"))
+    if allocate < 0 {
+        lowerError(state, diagUnsupportedExpression(), fn.nameSpan)
+        return
+    }
+    kArgument(state, kConstInt(state, "i64", size))
+    let frame = kBitcast(state, kCall(state, state.functionSlots[allocate].handle, state.functionSlots[allocate].result), "*[0 x i8]")
+    kStore(state, kBitcast(state, kFuncRef(state, resume), "*[0 x i8]"), frameAt(state, frame, 0, "*[0 x i8]"))
+    kStore(state, kBitcast(state, kFuncRef(state, destroy), "*[0 x i8]"), frameAt(state, frame, 8, "*[0 x i8]"))
+    let layout = coroutineLayout(state, fn, promise)
+    var next = 4
+    if owner != "" {
+        kStore(state, kLoad(state, state.slotsData[thisSlot].address), frameAt(state, frame, layout[4], ownerPointer))
+        next = 5
+    }
+    for parameter in fn.parameters {
+        let slot = lookup(state, parameter.name)
+        let ty = coroutineParamType(parameter)
+        let destination = frameAt(state, frame, layout[next], ty)
+        if copiesParameter(parameter) {
+            var source = slotPointer(state, state.slotsData[slot].address, ty)
+            if state.slotsData[slot].reference { source = kBitcast(state, kLoad(state, state.slotsData[slot].address), joinText(["*[0 x ", ty, "]"])) }
+            copyInto(state, slotPointer(state, destination, ty), source, ty)
+        } else {
+            kStore(state, kLoad(state, state.slotsData[slot].address), destination)
+        }
+        next = next + 1
+    }
+    let promisePointer = slotPointer(state, frameAt(state, frame, 32, promise), promise)
+    emitConstruct(state, promisePointer, promise, [])
+    let promiseSlot = declare(state, "__karc_promise", joinText(["*[0 x ", promise, "]"]), promise, fn.span)
+    state.slotsData[promiseSlot].reference = true
+    kStore(state, promisePointer, state.slotsData[promiseSlot].address)
+    let result = localMemberCall(state, "__karc_promise", "get_return_object", [], fn.nameSpan)
+    emitConstruct(state, state.sret.unwrap(), fn.returnType, [result])
+    destroyTemporaries(state, 0)
+    kArgument(state, frame)
+    kCallVoid(state, resume)
+    deallocLocals(state)
+    kReturnVoid(state)
+    kSwitchTo(state, state.entryBlock.unwrap())
+    kBr(state, body)
+}
+// The body over the frame; returns the frame size.
+function lowerResume(state: borrow mut Lowerer, index: Int, handle: KirFunctionBuilder, destroy: KirFunctionBuilder, promise: String) -> Int {
+    let fn = state.tree.functions[index]
+    kOpenBody(handle)
+    resetFunctionState(state, index, handle)
+    let frame = kParameter(handle, 0)
+    state.coroutineFrame = .Some(frame)
+    state.frameOffset = 32
+    let promiseAddress = frameAddress(state, promise)
+    declareScratch(state, "i32", "")
+    declareScratch(state, "[1 x i32]", "i32")
+    declareAt(state, "__karc_promise", promise, "", promiseAddress)
+    let frameSlot = declare(state, "__karc_frame", "*[0 x i8]", "i8", fn.span)
+    kStore(state, frame, state.slotsData[frameSlot].address)
+    let owner = methodOwnerType(state.tree, fn.name)
+    if owner != "" { declare(state, "this", joinText(["*[0 x ", owner, "]"]), owner, fn.span) }
+    for parameter in fn.parameters {
+        let ty = coroutineParamType(parameter)
+        var element = ""
+        if isPointerType(ty) { element = elementOfPointer(ty) }
+        let slot = declare(state, parameter.name, ty, element, fn.span)
+        if parameter.reference && !copiesParameter(parameter) { state.slotsData[slot].reference = true }
+    }
+    state.localsFrom = state.slots
+    let dispatch = kBlock(state)
+    let start = kBlock(state)
+    let final = kBlock(state)
+    state.finalBlock = .Some(final)
+    kSwitchTo(state, start)
+    emitCoAwait(state, loweredCall(state, "@member::initial_suspend", loweredName(state, "__karc_promise", fn.nameSpan), [], fn.nameSpan), fn.nameSpan)
+    emitBody(state, fn.body)
+    if !state.terminated {
+        if findMember(state.tree, promise, "return_void", 0) >= 0 {
+            emitExpression(state, localMemberCall(state, "__karc_promise", "return_void", [], fn.nameSpan))
+        }
+        destroyTemporaries(state, 0)
+        kBr(state, final)
+    }
+    kSwitchTo(state, final)
+    state.terminated = false
+    kStore(state, kConstInt(state, "i64", 1), frameAt(state, frame, 24, "i64"))
+    emitCoAwait(state, loweredCall(state, "@member::final_suspend", loweredName(state, "__karc_promise", fn.nameSpan), [], fn.nameSpan), fn.nameSpan)
+    // Past a final suspension that did not suspend, the frame goes.
+    kArgument(state, frame)
+    kCallVoid(state, destroy)
+    kReturnVoid(state)
+    kSwitchTo(state, dispatch)
+    let resumeState = kLoad(state, frameAt(state, frame, 16, "i64"))
+    for k in 0..state.resumeBlocks.count {
+        let otherwise = kBlock(state)
+        kCondBr(state, kIcmp(state, "eq", resumeState, kConstInt(state, "i64", k + 1)), state.resumeBlocks[k], otherwise)
+        kSwitchTo(state, otherwise)
+    }
+    kBr(state, start)
+    kSwitchTo(state, state.entryBlock.unwrap())
+    kBr(state, dispatch)
+    let size = state.frameOffset
+    state.coroutineFrame = .None
+    return size
+}
+function lowerDestroy(state: borrow mut Lowerer, index: Int, handle: KirFunctionBuilder, promise: String) {
+    let fn = state.tree.functions[index]
+    kOpenBody(handle)
+    resetFunctionState(state, index, handle)
+    declareScratch(state, "i32", "")
+    declareScratch(state, "[1 x i32]", "i32")
+    let frame = kParameter(handle, 0)
+    let body = kBlock(state)
+    kSwitchTo(state, body)
+    let layout = coroutineLayout(state, fn, promise)
+    var next = 4
+    if methodOwnerType(state.tree, fn.name) != "" { next = 5 }
+    for parameter in fn.parameters {
+        if copiesParameter(parameter) {
+            let ty = coroutineParamType(parameter)
+            destroyValue(state, slotPointer(state, frameAt(state, frame, layout[next], ty), ty), ty)
+        }
+        next = next + 1
+    }
+    destroyValue(state, slotPointer(state, frameAt(state, frame, 32, promise), promise), promise)
+    let release = helperFunction(state, "__karc_coroutine_free")
+    if release >= 0 { callWithValues(state, release, [frame]) }
+    kReturnVoid(state)
+    kSwitchTo(state, state.entryBlock.unwrap())
+    kBr(state, body)
+}
+// `co_await operand`: the awaiter is kept in the frame; unless it is ready,
+// the state records where to resume, await_suspend gets the handle, and the
+// resume function returns. Its value is await_resume's.
+function emitCoAwait(state: borrow mut Lowerer, operand: ExprId, span: Span) -> Value {
+    if state.coroutineFrame.isNone() {
+        lowerError(state, diagUnsupportedExpression(), span)
+        return zeroValue(state)
+    }
+    let awaitIndex = state.resumeBlocks.count + 1
+    let awaiter = joinText(["__karc_awaiter", decimalText(awaitIndex)])
+    declareFromExpression(state, awaiter, staticType(state, operand), operand, span)
+    let ready = emitCondition(state, localMemberCall(state, awaiter, "await_ready", [], span))
+    let suspend = kBlock(state)
+    let after = kBlock(state)
+    kCondBr(state, ready.reference, after, suspend)
+    kSwitchTo(state, suspend)
+    let resumed = kBlock(state)
+    state.resumeBlocks.append(resumed)
+    kStore(state, kConstInt(state, "i64", state.resumeBlocks.count), frameAt(state, state.coroutineFrame.unwrap(), 16, "i64"))
+    let address = loweredCall(state, "std::__karc_coroutine_handle_of", noExpr(), [loweredName(state, "__karc_frame", span)], span)
+    let suspended = localMemberCall(state, awaiter, "await_suspend", [address], span)
+    let kind = staticType(state, suspended)
+    if kind == "i1" || kind == "bool" {
+        let leave = kBlock(state)
+        kCondBr(state, emitCondition(state, suspended).reference, leave, after)
+        kSwitchTo(state, leave)
+    } else if isClassType(kind) {
+        // Symmetric transfer: the handle await_suspend returns runs next.
+        let transfer = joinText(["__karc_transfer", decimalText(awaitIndex)])
+        declareFromExpression(state, transfer, kind, suspended, span)
+        emitExpression(state, localMemberCall(state, transfer, "resume", [], span))
+    } else {
+        emitExpression(state, suspended)
+    }
+    kReturnVoid(state)
+    kSwitchTo(state, resumed)
+    kBr(state, after)
+    kSwitchTo(state, after)
+    return emitExpression(state, localMemberCall(state, awaiter, "await_resume", [], span))
+}
+// What a `co_await` waits on: a written operand goes through the promise's
+// await_transform, then the result's `operator co_await`, when they exist.
+function awaitableOf(state: borrow mut Lowerer, call: CallExpression, span: Span) -> ExprId {
+    var operand = call.arguments[0]
+    let promise = lookup(state, "__karc_promise")
+    if call.awaitTransform && promise >= 0 && findMember(state.tree, state.slotsData[promise].ty, "await_transform", 1) >= 0 {
+        operand = localMemberCall(state, "__karc_promise", "await_transform", [operand], span)
+    }
+    let awaitable = staticType(state, operand)
+    if isClassType(awaitable) && findMember(state.tree, awaitable, "operator co_await", 0) >= 0 {
+        operand = loweredCall(state, "@member::operator co_await", operand, [], span)
+    }
+    return operand
+}
+// What `co_await operand` gives: the awaiter's await_resume result.
+function coAwaitType(state: borrow mut Lowerer, operand: ExprId) -> String {
+    let awaiter = staticType(state, operand)
+    let resume = findMember(state.tree, awaiter, "await_resume", 0)
+    if resume < 0 { return "unit" }
+    return referentOf(state.tree.functions[resume])
+}
+// `co_return`: the promise call, then the scopes are left for the final
+// suspension.
+function emitCoReturn(state: borrow mut Lowerer, value: ExprId, span: Span) {
+    if state.finalBlock.isNone() {
+        lowerError(state, diagUnsupportedExpression(), span)
+        return
+    }
+    emitExpression(state, value)
+    destroyTemporaries(state, 0)
+    destroyScope(state, 0, -1)
+    kBr(state, state.finalBlock.unwrap())
+    state.terminated = true
+}

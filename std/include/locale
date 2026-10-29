@@ -1,0 +1,42 @@
+// <locale>: std::locale and the character classification that takes one.
+// KArc's std has the "C" locale only: every locale behaves as it.
+#ifndef KARC_STD_LOCALE
+#define KARC_STD_LOCALE
+
+#include <cctype>
+#include <clocale>
+#include <string>
+
+namespace std {
+
+class locale {
+public:
+    locale() {}
+    locale(const char* name) {}
+    locale(const string& name) {}
+    static locale classic() { return locale(); }
+    static locale global(const locale& replacement) { return locale(); }
+    string name() const { return string("C"); }
+    bool operator==(const locale& other) const { return true; }
+    bool operator!=(const locale& other) const { return false; }
+    int unused;
+};
+
+inline bool isspace(char c, const locale& where) { return ::isspace((unsigned char)c) != 0; }
+inline bool isprint(char c, const locale& where) { return ::isprint((unsigned char)c) != 0; }
+inline bool iscntrl(char c, const locale& where) { return ::iscntrl((unsigned char)c) != 0; }
+inline bool isupper(char c, const locale& where) { return ::isupper((unsigned char)c) != 0; }
+inline bool islower(char c, const locale& where) { return ::islower((unsigned char)c) != 0; }
+inline bool isalpha(char c, const locale& where) { return ::isalpha((unsigned char)c) != 0; }
+inline bool isdigit(char c, const locale& where) { return ::isdigit((unsigned char)c) != 0; }
+inline bool ispunct(char c, const locale& where) { return ::ispunct((unsigned char)c) != 0; }
+inline bool isxdigit(char c, const locale& where) { return ::isxdigit((unsigned char)c) != 0; }
+inline bool isalnum(char c, const locale& where) { return ::isalnum((unsigned char)c) != 0; }
+inline bool isgraph(char c, const locale& where) { return ::isgraph((unsigned char)c) != 0; }
+inline bool isblank(char c, const locale& where) { return c == ' ' || c == '\t'; }
+inline char toupper(char c, const locale& where) { return (char)::toupper((unsigned char)c); }
+inline char tolower(char c, const locale& where) { return (char)::tolower((unsigned char)c); }
+
+}
+
+#endif

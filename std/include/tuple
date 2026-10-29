@@ -1,0 +1,210 @@
+// <tuple>: std::tuple over a pack; its elements are its members in order,
+// and get<N> is the member of that index. std::tie gives an object that
+// assigns and compares through pointers to its variables.
+#ifndef KARC_STD_TUPLE
+#define KARC_STD_TUPLE
+
+#include <cstddef>
+#include <utility>
+
+namespace std {
+
+template <typename... Ts>
+struct tuple {
+    Ts... elements;
+
+    bool operator==(const tuple& other) const {
+        bool same = true;
+        karc_same(elements, other.elements, same)...;
+        return same;
+    }
+    bool operator!=(const tuple& other) const { return !(*this == other); }
+    bool operator<(const tuple& other) const {
+        int order = 0;
+        karc_order(elements, other.elements, order)...;
+        return order < 0;
+    }
+    bool operator>(const tuple& other) const { return other < *this; }
+    bool operator<=(const tuple& other) const { return !(other < *this); }
+    bool operator>=(const tuple& other) const { return !(*this < other); }
+    // The element of type T, for get<T>; `tag` only carries the type.
+    template <typename T>
+    T* karc_get(T* tag) {
+        void* found = 0;
+        found = karc_pick_if(__is_same(T, Ts), (void*)&elements, found)...;
+        return (T*)found;
+    }
+
+private:
+    template <typename A>
+    void karc_same(const A& mine, const A& theirs, bool& same) const {
+        if (!(mine == theirs)) { same = false; }
+    }
+    template <typename A>
+    void karc_order(const A& mine, const A& theirs, int& order) const {
+        if (order != 0) { return; }
+        if (mine < theirs) {
+            order = -1;
+        } else if (theirs < mine) {
+            order = 1;
+        }
+    }
+    void* karc_pick_if(bool matches, void* address, void* found) {
+        if (matches && found == 0) { return address; }
+        return found;
+    }
+};
+
+template <typename T, typename... Ts>
+T& get(tuple<Ts...>& t) { return *t.karc_get((T*)0); }
+
+template <typename... Ts>
+tuple<Ts...> make_tuple(Ts... values) {
+    tuple<Ts...> result{values...};
+    return result;
+}
+template <typename... Ts>
+tuple<Ts...> forward_as_tuple(Ts... values) {
+    tuple<Ts...> result{values...};
+    return result;
+}
+
+// The element count of a tuple or pair: its members.
+template <typename T>
+struct tuple_size { static const size_t value = __karc_field_count(T); int unused; };
+template <typename T> inline constexpr size_t tuple_size_v = __karc_field_count(T);
+
+// Assigning std::ignore does nothing.
+struct karc_ignore {
+    template <typename T>
+    const karc_ignore& operator=(const T& value) const { return *this; }
+    int unused;
+};
+static karc_ignore ignore;
+
+template <typename A, typename B>
+struct karc_tie2 {
+    A* a;
+    B* b;
+    karc_tie2& operator=(const pair<A, B>& value) {
+        *a = value.first;
+        *b = value.second;
+        return *this;
+    }
+    karc_tie2& operator=(const tuple<A, B>& value) {
+        *a = get<0>(value);
+        *b = get<1>(value);
+        return *this;
+    }
+    bool operator==(const karc_tie2& other) const { return *a == *other.a && *b == *other.b; }
+    bool operator!=(const karc_tie2& other) const { return !(*this == other); }
+    bool operator<(const karc_tie2& other) const {
+        if (*a < *other.a) { return true; }
+        if (*other.a < *a) { return false; }
+        return *b < *other.b;
+    }
+    bool operator>(const karc_tie2& other) const { return other < *this; }
+    bool operator<=(const karc_tie2& other) const { return !(other < *this); }
+    bool operator>=(const karc_tie2& other) const { return !(*this < other); }
+};
+template <typename A, typename B, typename C>
+struct karc_tie3 {
+    A* a;
+    B* b;
+    C* c;
+    karc_tie3& operator=(const tuple<A, B, C>& value) {
+        *a = get<0>(value);
+        *b = get<1>(value);
+        *c = get<2>(value);
+        return *this;
+    }
+    bool operator==(const karc_tie3& other) const { return *a == *other.a && *b == *other.b && *c == *other.c; }
+    bool operator!=(const karc_tie3& other) const { return !(*this == other); }
+    bool operator<(const karc_tie3& other) const {
+        if (*a < *other.a) { return true; }
+        if (*other.a < *a) { return false; }
+        if (*b < *other.b) { return true; }
+        if (*other.b < *b) { return false; }
+        return *c < *other.c;
+    }
+    bool operator>(const karc_tie3& other) const { return other < *this; }
+    bool operator<=(const karc_tie3& other) const { return !(other < *this); }
+    bool operator>=(const karc_tie3& other) const { return !(*this < other); }
+};
+template <typename A, typename B, typename C, typename D>
+struct karc_tie4 {
+    A* a;
+    B* b;
+    C* c;
+    D* d;
+    karc_tie4& operator=(const tuple<A, B, C, D>& value) {
+        *a = get<0>(value);
+        *b = get<1>(value);
+        *c = get<2>(value);
+        *d = get<3>(value);
+        return *this;
+    }
+    bool operator==(const karc_tie4& other) const { return *a == *other.a && *b == *other.b && *c == *other.c && *d == *other.d; }
+    bool operator<(const karc_tie4& other) const {
+        if (*a < *other.a) { return true; }
+        if (*other.a < *a) { return false; }
+        if (*b < *other.b) { return true; }
+        if (*other.b < *b) { return false; }
+        if (*c < *other.c) { return true; }
+        if (*other.c < *c) { return false; }
+        return *d < *other.d;
+    }
+};
+template <typename A, typename B>
+karc_tie2<A, B> tie(A& a, B& b) {
+    karc_tie2<A, B> result{&a, &b};
+    return result;
+}
+template <typename A, typename B, typename C>
+karc_tie3<A, B, C> tie(A& a, B& b, C& c) {
+    karc_tie3<A, B, C> result{&a, &b, &c};
+    return result;
+}
+template <typename A, typename B, typename C, typename D>
+karc_tie4<A, B, C, D> tie(A& a, B& b, C& c, D& d) {
+    karc_tie4<A, B, C, D> result{&a, &b, &c, &d};
+    return result;
+}
+
+// Calls `f` with the tuple's elements.
+template <typename F, typename A>
+auto apply(F f, const tuple<A>& t) { return f(get<0>(t)); }
+template <typename F, typename A, typename B>
+auto apply(F f, const tuple<A, B>& t) { return f(get<0>(t), get<1>(t)); }
+template <typename F, typename A, typename B, typename C>
+auto apply(F f, const tuple<A, B, C>& t) { return f(get<0>(t), get<1>(t), get<2>(t)); }
+template <typename F, typename A, typename B, typename C, typename D>
+auto apply(F f, const tuple<A, B, C, D>& t) { return f(get<0>(t), get<1>(t), get<2>(t), get<3>(t)); }
+template <typename F, typename A, typename B>
+auto apply(F f, const pair<A, B>& t) { return f(t.first, t.second); }
+
+// tuple_cat of two tuples of up to three elements each.
+template <typename A, typename B>
+tuple<A, B> tuple_cat(const tuple<A>& x, const tuple<B>& y) { return make_tuple(get<0>(x), get<0>(y)); }
+template <typename A, typename B, typename C>
+tuple<A, B, C> tuple_cat(const tuple<A, B>& x, const tuple<C>& y) { return make_tuple(get<0>(x), get<1>(x), get<0>(y)); }
+template <typename A, typename B, typename C>
+tuple<A, B, C> tuple_cat(const tuple<A>& x, const tuple<B, C>& y) { return make_tuple(get<0>(x), get<0>(y), get<1>(y)); }
+template <typename A, typename B, typename C, typename D>
+tuple<A, B, C, D> tuple_cat(const tuple<A, B>& x, const tuple<C, D>& y) { return make_tuple(get<0>(x), get<1>(x), get<0>(y), get<1>(y)); }
+template <typename A, typename B, typename C, typename D>
+tuple<A, B, C, D> tuple_cat(const tuple<A, B, C>& x, const tuple<D>& y) { return make_tuple(get<0>(x), get<1>(x), get<2>(x), get<0>(y)); }
+template <typename A, typename B, typename C, typename D>
+tuple<A, B, C, D> tuple_cat(const tuple<A>& x, const tuple<B, C, D>& y) { return make_tuple(get<0>(x), get<0>(y), get<1>(y), get<2>(y)); }
+template <typename A, typename B, typename C, typename D, typename E>
+tuple<A, B, C, D, E> tuple_cat(const tuple<A, B, C>& x, const tuple<D, E>& y) { return make_tuple(get<0>(x), get<1>(x), get<2>(x), get<0>(y), get<1>(y)); }
+template <typename A, typename B, typename C, typename D, typename E>
+tuple<A, B, C, D, E> tuple_cat(const tuple<A, B>& x, const tuple<C, D, E>& y) { return make_tuple(get<0>(x), get<1>(x), get<0>(y), get<1>(y), get<2>(y)); }
+template <typename A, typename B, typename C, typename D, typename E, typename F>
+tuple<A, B, C, D, E, F> tuple_cat(const tuple<A, B, C>& x, const tuple<D, E, F>& y) {
+    return make_tuple(get<0>(x), get<1>(x), get<2>(x), get<0>(y), get<1>(y), get<2>(y));
+}
+
+}
+
+#endif

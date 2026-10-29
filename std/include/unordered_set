@@ -1,0 +1,189 @@
+// <unordered_set>: std::unordered_set and std::unordered_multiset over a chained
+// hash table (<__hash_table>).
+#ifndef KARC_STD_UNORDERED_SET
+#define KARC_STD_UNORDERED_SET
+
+#include <exception>
+#include <__hash_table>
+
+namespace std {
+
+template <typename T, typename H = hash<T>, typename E = equal_to<T>, typename A = allocator<T>>
+class unordered_set {
+public:
+    typedef A allocator_type;
+    typedef T key_type;
+    typedef T value_type;
+    typedef H hasher;
+    typedef E key_equal;
+    typedef size_t size_type;
+    typedef karc_hash_iterator<T> iterator;
+    typedef karc_hash_iterator<T> const_iterator;
+
+    unordered_set() {}
+    explicit unordered_set(const A& alloc) : table_(alloc) {}
+    A get_allocator() const { return table_.get_allocator(); }
+    explicit unordered_set(size_t buckets) { table_.rehash(buckets); }
+    unordered_set(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { table_.insertUnique(*item); }
+    }
+    template <typename I>
+    unordered_set(I first, I last) {
+        for (; first != last; ++first) { table_.insertUnique(*first); }
+    }
+
+    size_t size() const { return table_.size(); }
+    bool empty() const { return table_.empty(); }
+    size_t max_size() const { return 1152921504606846975ul; }
+    void clear() { table_.clear(); }
+    void swap(unordered_set& other) { table_.swap(other.table_); }
+    karc_hash_iterator<T> begin() const { return table_.begin(); }
+    karc_hash_iterator<T> end() const { return table_.end(); }
+    karc_hash_iterator<T> cbegin() const { return table_.begin(); }
+    karc_hash_iterator<T> cend() const { return table_.end(); }
+    size_t bucket_count() const { return table_.bucket_count(); }
+    size_t bucket(const T& key) const { return table_.bucket(key); }
+    float load_factor() const { return table_.load_factor(); }
+    float max_load_factor() const { return table_.max_load_factor(); }
+    void max_load_factor(float value) { table_.max_load_factor(value); }
+    void rehash(size_t count) { table_.rehash(count); }
+    void reserve(size_t count) { table_.reserve(count); }
+    H hash_function() const { return table_.hash_function(); }
+    E key_eq() const { return table_.key_eq(); }
+
+    karc_hash_iterator<T> find(const T& key) const { return table_.find(key); }
+    size_t count(const T& key) const { return table_.count(key); }
+    bool contains(const T& key) const { return table_.find(key) != table_.end(); }
+    pair<karc_hash_iterator<T>, karc_hash_iterator<T>> equal_range(const T& key) const { return table_.equal_range(key); }
+
+    pair<karc_hash_iterator<T>, bool> insert(const T& value) { return table_.insertUnique(value); }
+    karc_hash_iterator<T> insert(karc_hash_iterator<T> hint, const T& value) { return table_.insertUnique(value).first; }
+    template <typename I>
+    void insert(I first, I last) {
+        for (; first != last; ++first) { table_.insertUnique(*first); }
+    }
+    void insert(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { table_.insertUnique(*item); }
+    }
+    template <typename... Args>
+    pair<karc_hash_iterator<T>, bool> emplace(Args&&... args) { return table_.insertUnique(T(std::forward<Args>(args)...)); }
+    template <typename... Args>
+    karc_hash_iterator<T> emplace_hint(karc_hash_iterator<T> hint, Args&&... args) { return table_.insertUnique(T(std::forward<Args>(args)...)).first; }
+    karc_hash_iterator<T> erase(karc_hash_iterator<T> position) { return table_.erase(position); }
+    karc_hash_iterator<T> erase(karc_hash_iterator<T> first, karc_hash_iterator<T> last) {
+        while (first != last) { first = table_.erase(first); }
+        return last;
+    }
+    size_t erase(const T& key) { return table_.eraseKey(key); }
+    void merge(unordered_set& other) {
+        for (karc_hash_iterator<T> at = other.begin(); at != other.end(); ++at) { table_.insertUnique(*at); }
+        other.clear();
+    }
+
+    // Equal when each key occurs as often in both.
+    bool operator==(const unordered_set& other) const {
+        if (size() != other.size()) { return false; }
+        for (karc_hash_iterator<T> at = begin(); at != end(); ++at) {
+            karc_hash_iterator<T> found = other.find(key_of(*at));
+            if (found == other.end() || other.count(key_of(*at)) != count(key_of(*at))) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const unordered_set& other) const { return !(*this == other); }
+
+private:
+    static const T& key_of(const T& entry) { return entry; }
+    karc_hash_table<T, T, karc_set_key<T>, H, E, A> table_;
+};
+
+template <typename T, typename H = hash<T>, typename E = equal_to<T>, typename A = allocator<T>>
+class unordered_multiset {
+public:
+    typedef A allocator_type;
+    typedef T key_type;
+    typedef T value_type;
+    typedef H hasher;
+    typedef E key_equal;
+    typedef size_t size_type;
+    typedef karc_hash_iterator<T> iterator;
+    typedef karc_hash_iterator<T> const_iterator;
+
+    unordered_multiset() {}
+    explicit unordered_multiset(const A& alloc) : table_(alloc) {}
+    A get_allocator() const { return table_.get_allocator(); }
+    explicit unordered_multiset(size_t buckets) { table_.rehash(buckets); }
+    unordered_multiset(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { table_.insertMulti(*item); }
+    }
+    template <typename I>
+    unordered_multiset(I first, I last) {
+        for (; first != last; ++first) { table_.insertMulti(*first); }
+    }
+
+    size_t size() const { return table_.size(); }
+    bool empty() const { return table_.empty(); }
+    size_t max_size() const { return 1152921504606846975ul; }
+    void clear() { table_.clear(); }
+    void swap(unordered_multiset& other) { table_.swap(other.table_); }
+    karc_hash_iterator<T> begin() const { return table_.begin(); }
+    karc_hash_iterator<T> end() const { return table_.end(); }
+    karc_hash_iterator<T> cbegin() const { return table_.begin(); }
+    karc_hash_iterator<T> cend() const { return table_.end(); }
+    size_t bucket_count() const { return table_.bucket_count(); }
+    size_t bucket(const T& key) const { return table_.bucket(key); }
+    float load_factor() const { return table_.load_factor(); }
+    float max_load_factor() const { return table_.max_load_factor(); }
+    void max_load_factor(float value) { table_.max_load_factor(value); }
+    void rehash(size_t count) { table_.rehash(count); }
+    void reserve(size_t count) { table_.reserve(count); }
+    H hash_function() const { return table_.hash_function(); }
+    E key_eq() const { return table_.key_eq(); }
+
+    karc_hash_iterator<T> find(const T& key) const { return table_.find(key); }
+    size_t count(const T& key) const { return table_.count(key); }
+    bool contains(const T& key) const { return table_.find(key) != table_.end(); }
+    pair<karc_hash_iterator<T>, karc_hash_iterator<T>> equal_range(const T& key) const { return table_.equal_range(key); }
+
+    karc_hash_iterator<T> insert(const T& value) { return table_.insertMulti(value); }
+    karc_hash_iterator<T> insert(karc_hash_iterator<T> hint, const T& value) { return table_.insertMulti(value); }
+    template <typename I>
+    void insert(I first, I last) {
+        for (; first != last; ++first) { table_.insertMulti(*first); }
+    }
+    void insert(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { table_.insertMulti(*item); }
+    }
+    template <typename... Args>
+    karc_hash_iterator<T> emplace(Args&&... args) { return table_.insertMulti(T(std::forward<Args>(args)...)); }
+    template <typename... Args>
+    karc_hash_iterator<T> emplace_hint(karc_hash_iterator<T> hint, Args&&... args) { return table_.insertMulti(T(std::forward<Args>(args)...)); }
+    karc_hash_iterator<T> erase(karc_hash_iterator<T> position) { return table_.erase(position); }
+    karc_hash_iterator<T> erase(karc_hash_iterator<T> first, karc_hash_iterator<T> last) {
+        while (first != last) { first = table_.erase(first); }
+        return last;
+    }
+    size_t erase(const T& key) { return table_.eraseKey(key); }
+    void merge(unordered_multiset& other) {
+        for (karc_hash_iterator<T> at = other.begin(); at != other.end(); ++at) { table_.insertMulti(*at); }
+        other.clear();
+    }
+
+    // Equal when each key occurs as often in both.
+    bool operator==(const unordered_multiset& other) const {
+        if (size() != other.size()) { return false; }
+        for (karc_hash_iterator<T> at = begin(); at != end(); ++at) {
+            karc_hash_iterator<T> found = other.find(key_of(*at));
+            if (found == other.end() || other.count(key_of(*at)) != count(key_of(*at))) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const unordered_multiset& other) const { return !(*this == other); }
+
+private:
+    static const T& key_of(const T& entry) { return entry; }
+    karc_hash_table<T, T, karc_set_key<T>, H, E, A> table_;
+};
+
+}
+
+#endif

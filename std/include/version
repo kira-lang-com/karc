@@ -1,0 +1,17 @@
+// <version>: the library feature-test macros for what KArc's std provides.
+#ifndef KARC_STD_VERSION
+#define KARC_STD_VERSION
+
+#define __cpp_lib_any 201606
+#define __cpp_lib_bit_cast 201806
+#define __cpp_lib_bitops 201907
+#define __cpp_lib_filesystem 201703
+#define __cpp_lib_format 202106
+#define __cpp_lib_optional 201606
+#define __cpp_lib_span 202002
+#define __cpp_lib_three_way_comparison 201907
+#define __cpp_lib_variant 201606
+#define __cpp_lib_math_constants 201907
+#define __cpp_lib_jthread 201911
+
+#endif

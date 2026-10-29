@@ -1,0 +1,23 @@
+import Testing
+
+@Test
+function rendersAnUndeclaredNameWithItsPosition() {
+    expect!(!compiles("""
+        int main() {
+            return missing;
+        }
+        """))
+    expect!(diagnosed(1021, 2, 12))
+    expect!(reported("phase `lower` failed"))
+}
+
+@Test
+function reportsAParseErrorFromTheParsePhase() {
+    expect!(!compiles("""
+        int main() {
+            return 1
+        }
+        """))
+    expect!(diagnosed(1202, 3, 1))
+    expect!(reported("phase `parse` failed"))
+}

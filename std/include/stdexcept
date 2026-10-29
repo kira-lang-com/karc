@@ -1,0 +1,66 @@
+// <stdexcept>: the standard exception hierarchy, each carrying its message.
+#ifndef KARC_STD_STDEXCEPT
+#define KARC_STD_STDEXCEPT
+
+#include <exception>
+#include <string>
+
+namespace std {
+
+class logic_error : public exception {
+public:
+    logic_error(const char* message) : message_(message) {}
+    logic_error(const string& message) : message_(message) {}
+    const char* what() const override { return message_.c_str(); }
+private:
+    string message_;
+};
+
+class runtime_error : public exception {
+public:
+    runtime_error(const char* message) : message_(message) {}
+    runtime_error(const string& message) : message_(message) {}
+    const char* what() const override { return message_.c_str(); }
+private:
+    string message_;
+};
+
+class invalid_argument : public logic_error {
+public:
+    invalid_argument(const char* message) : logic_error(message) {}
+    invalid_argument(const string& message) : logic_error(message) {}
+};
+class out_of_range : public logic_error {
+public:
+    out_of_range(const char* message) : logic_error(message) {}
+    out_of_range(const string& message) : logic_error(message) {}
+};
+class length_error : public logic_error {
+public:
+    length_error(const char* message) : logic_error(message) {}
+    length_error(const string& message) : logic_error(message) {}
+};
+class domain_error : public logic_error {
+public:
+    domain_error(const char* message) : logic_error(message) {}
+    domain_error(const string& message) : logic_error(message) {}
+};
+class range_error : public runtime_error {
+public:
+    range_error(const char* message) : runtime_error(message) {}
+    range_error(const string& message) : runtime_error(message) {}
+};
+class overflow_error : public runtime_error {
+public:
+    overflow_error(const char* message) : runtime_error(message) {}
+    overflow_error(const string& message) : runtime_error(message) {}
+};
+class underflow_error : public runtime_error {
+public:
+    underflow_error(const char* message) : runtime_error(message) {}
+    underflow_error(const string& message) : runtime_error(message) {}
+};
+
+}
+
+#endif

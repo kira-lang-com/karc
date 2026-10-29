@@ -1,0 +1,36 @@
+// <cstdlib>: the allocator, number conversion, sorting and process exit.
+// The allocator routes to the KLF runtime's raw heap (KLF-RIDL 28.9).
+#ifndef KARC_STD_CSTDLIB
+#define KARC_STD_CSTDLIB
+
+#include <cstddef>
+
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+#define RAND_MAX 2147483647
+
+void* malloc(size_t size);
+void* calloc(size_t count, size_t size);
+void* realloc(void* pointer, size_t size);
+void free(void* pointer);
+
+int abs(int value);
+long labs(long value);
+int atoi(const char* s);
+long atol(const char* s);
+long strtol(const char* s, char** end, int base);
+unsigned long strtoul(const char* s, char** end, int base);
+double strtod(const char* s, char** end);
+double atof(const char* s);
+
+typedef int (*karc_compare_fn)(const void*, const void*);
+void qsort(void* base, size_t count, size_t size, karc_compare_fn compare);
+void* bsearch(const void* key, const void* base, size_t count, size_t size, karc_compare_fn compare);
+
+int rand();
+void srand(unsigned int seed);
+
+void exit(int status);
+void abort();
+
+#endif

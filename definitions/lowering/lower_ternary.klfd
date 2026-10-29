@@ -1,0 +1,126 @@
+// Conditional expressions: `c ? a : b` as a value, as a place, and between
+// class values, whose branch temporaries are destroyed only when made.
+
+// `cond ? a : b`. The join block's parameter type is the type the then-branch
+// produces, so the join block is created after that branch is lowered; creating
+// a block after a terminator is legal.
+function emitTernary(state: borrow mut Lowerer, ternary: TernaryExpression, span: Span) -> Value {
+    let mixed = mixedTernaryClass(state, ternary)
+    if mixed != "" { return emitClassTernary(state, ternary, span, mixed) }
+    let classType = staticType(state, ternary.thenValue)
+    if isClassType(classType) && staticType(state, ternary.elseValue) == classType &&
+        !(isClassLvalue(state, ternary.thenValue) && isClassLvalue(state, ternary.elseValue)) { return emitClassTernary(state, ternary, span, classType) }
+    let target = ternaryType(state, ternary)
+    let condition = emitCondition(state, ternary.condition)
+    let thenBlock = kBlock(state)
+    let elseBlock = kBlock(state)
+    kCondBr(state, condition.reference, thenBlock, elseBlock)
+    kSwitchTo(state, thenBlock)
+    let thenMark = state.temporaries.count
+    let thenValue = emitExpression(state, ternary.thenValue)
+    var resultType = target
+    if resultType == "" { resultType = valueType(thenValue) }
+    let thenRef = ternaryBranch(state, thenValue, resultType)
+    guardBranchTemporaries(state, thenMark)
+    kBlockParameter(state, resultType)
+    let joinBlock = kBlock(state)
+    kArgument(state, thenRef)
+    kBr(state, joinBlock)
+    kSwitchTo(state, elseBlock)
+    let elseMark = state.temporaries.count
+    let elseValue = emitExpression(state, ternary.elseValue)
+    let elseRef = ternaryBranch(state, elseValue, resultType)
+    guardBranchTemporaries(state, elseMark)
+    kArgument(state, elseRef)
+    kBr(state, joinBlock)
+    kSwitchTo(state, joinBlock)
+    let merged = kBlockValue(state, joinBlock, 0)
+    if isPointerType(resultType) || isFnPtrType(resultType) {
+        return Value { reference = merged, boolean = false, wide = true, pointer = resultType, unsigned = false, floating = false }
+    }
+    if target != "" {
+        return Value { reference = merged, boolean = resultType == "i1", wide = resultType == "i64" || resultType == "u64", pointer = "", unsigned = utf8Byte(resultType, 0) == 117, floating = resultType == "f64" }
+    }
+    return Value { reference = merged, boolean = thenValue.boolean, wide = thenValue.wide, pointer = "", unsigned = thenValue.unsigned, floating = thenValue.floating }
+}
+// `c ? a : b` as a place: the address of whichever branch runs.
+function conditionalPlace(state: borrow mut Lowerer, ternary: TernaryExpression) -> Place {
+    let condition = emitCondition(state, ternary.condition)
+    let thenBlock = kBlock(state)
+    let elseBlock = kBlock(state)
+    kCondBr(state, condition.reference, thenBlock, elseBlock)
+    kSwitchTo(state, thenBlock)
+    let firstMark = state.temporaries.count
+    let first = emitPlace(state, ternary.thenValue)
+    guardBranchTemporaries(state, firstMark)
+    let pointerType = joinText(["*[0 x ", first.ty, "]"])
+    let firstPointer = slotPointer(state, first.address, first.ty)
+    kBlockParameter(state, pointerType)
+    let joinBlock = kBlock(state)
+    kArgument(state, firstPointer)
+    kBr(state, joinBlock)
+    kSwitchTo(state, elseBlock)
+    let secondMark = state.temporaries.count
+    let second = emitPlace(state, ternary.elseValue)
+    guardBranchTemporaries(state, secondMark)
+    kArgument(state, kBitcast(state, slotPointer(state, second.address, second.ty), pointerType))
+    kBr(state, joinBlock)
+    kSwitchTo(state, joinBlock)
+    let merged = kBlockValue(state, joinBlock, 0)
+    return placeFromPointer(state, Value { reference = merged, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false })
+}
+// `c ? "text" : str`: one branch a class the other converts to, which is
+// the result's type; "" otherwise.
+function mixedTernaryClass(state: borrow mut Lowerer, ternary: TernaryExpression) -> String {
+    let first = staticType(state, ternary.thenValue)
+    let second = staticType(state, ternary.elseValue)
+    if isClassType(first) && !isClassType(second) && second != "" && convertsFrom(state, first, second) { return first }
+    if isClassType(second) && !isClassType(first) && first != "" && convertsFrom(state, second, first) { return second }
+    return ""
+}
+// A conditional between two class values: each branch moves (or copies)
+// its value into one temporary, which is the result.
+function emitClassTernary(state: borrow mut Lowerer, ternary: TernaryExpression, span: Span, classType: String) -> Value {
+    let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), classType, "", span)
+    zeroAggregate(state, state.slotsData[slot].address, classType)
+    let condition = emitCondition(state, ternary.condition)
+    let thenBlock = kBlock(state)
+    let elseBlock = kBlock(state)
+    let joinBlock = kBlock(state)
+    kCondBr(state, condition.reference, thenBlock, elseBlock)
+    kSwitchTo(state, thenBlock)
+    let thenMark = state.temporaries.count
+    emitClassInit(state, slot, classType, ternary.thenValue)
+    guardBranchTemporaries(state, thenMark)
+    kBr(state, joinBlock)
+    kSwitchTo(state, elseBlock)
+    let elseMark = state.temporaries.count
+    emitClassInit(state, slot, classType, ternary.elseValue)
+    guardBranchTemporaries(state, elseMark)
+    kBr(state, joinBlock)
+    kSwitchTo(state, joinBlock)
+    state.temporaries.append(slot)
+    let object = slotPointer(state, state.slotsData[slot].address, classType)
+    return Value { reference = object, boolean = false, wide = true, pointer = joinText(["*[0 x ", classType, "]"]), unsigned = false, floating = false }
+}
+// The common type of a conditional's branches, when their static types
+// tell: a pointer over a null constant, double over integers, 64 bits over
+// 32; "" to take the first branch's.
+function ternaryType(state: borrow mut Lowerer, ternary: TernaryExpression) -> String {
+    var first = staticType(state, ternary.thenValue)
+    var second = staticType(state, ternary.elseValue)
+    if isArrayType(first) { first = joinText(["*[0 x ", arrayElementType(first), "]"]) }
+    if isArrayType(second) { second = joinText(["*[0 x ", arrayElementType(second), "]"]) }
+    if first == "" || second == "" || isClassType(first) || isClassType(second) { return "" }
+    if isPointerType(first) || isFnPtrType(first) { return first }
+    if isPointerType(second) || isFnPtrType(second) { return second }
+    if first == second { return "" }
+    if first == "f64" || second == "f64" { return "f64" }
+    if first == "i64" || second == "i64" { return "i64" }
+    if first == "u64" || second == "u64" { return "u64" }
+    return ""
+}
+function ternaryBranch(state: borrow mut Lowerer, value: Value, resultType: String) -> KirValue {
+    if isPointerType(resultType) || isFnPtrType(resultType) || value.pointer != "" { return coerceRef(state, value, resultType) }
+    return convert(state, value, resultType).reference
+}

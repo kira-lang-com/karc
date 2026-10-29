@@ -1,0 +1,85 @@
+// Comparison operators declared `= default`: each compares the data
+// members in order. `<=>` gives an int (negative, zero or positive), and a
+// defaulted `<=>` brings a defaulted `==` with it. The lowering rewrites
+// `a < b` as `(a <=> b) < 0` and `a != b` as `!(a == b)` for a class that
+// declares only those (lowering/lower_expr.klfd).
+
+function isComparisonName(name: String) -> Bool {
+    match name {
+        "operator==", "operator!=", "operator<=>", "operator<", "operator>", "operator<=", "operator>=" -> return true
+        else -> return false
+    }
+}
+// The bodies of the class's defaulted comparisons, now that `fields` are
+// its members.
+function synthesizeComparisons(p: borrow mut Parser, fields: [CppField]) {
+    if p.defaultedOperators.count == 0 { return }
+    let pending = p.defaultedOperators
+    p.defaultedOperators = []
+    var members: [String] = []
+    for field in fields {
+        let base = utf8Count(field.name) > 7 && utf8Slice(field.name, 0, 7) == "__base_"
+        if field.name != "__vptr" && !base { members.append(field.name) }
+    }
+    var hasEquality = false
+    for fn in pending {
+        if unqualifiedName(fn.name) == "operator==" { hasEquality = true }
+    }
+    for fn in pending {
+        let op = utf8Slice(unqualifiedName(fn.name), 8, utf8Count(unqualifiedName(fn.name)))
+        synthesizeComparison(p, fn, op, members)
+        if op == "<=>" && !hasEquality {
+            let equality = CppFunction { name = joinText([utf8Slice(fn.name, 0, utf8Count(fn.name) - 3), "=="]), nameSpan = fn.nameSpan, parameters = fn.parameters, returnType = "i1", body = [], isProto = false, internal = true, cLinkage = false, refReturn = false, isConst = false, span = fn.span }
+            synthesizeComparison(p, equality, "==", members)
+        }
+    }
+}
+function synthesizeComparison(p: borrow mut Parser, fn: CppFunction, op: String, members: [String]) {
+    let span = fn.nameSpan
+    let other = "__karc_other"
+    var parameters: [CppParam] = []
+    for parameter in fn.parameters {
+        parameters.append(CppParam { name = other, declType = parameter.declType, reference = parameter.reference, fallback = parameter.fallback, rvalue = parameter.rvalue })
+    }
+    var body: [StmtId] = []
+    var returnType = fn.returnType
+    if op == "==" || op == "!=" {
+        // Every member equal (any unequal for !=).
+        var all = eNumber(p, 1, span)
+        for member in members {
+            let same = eBinary(p, "==", eName(p, member, span), eField(p, eName(p, other, span), member, span, span), span)
+            all = eBinary(p, "&&", all, same, span)
+        }
+        if op == "!=" { all = addExpr(p, Expr { kind = .Not(all), span = span, nameSpan = span }) }
+        body.append(returnStatement(p, all, span))
+    } else {
+        // The first member that differs decides.
+        var less = -1
+        var greater = 1
+        var equal = 0
+        if op == "<" || op == "<=" { less = 1 }
+        if op == "<" || op == "<=" { greater = 0 }
+        if op == ">" || op == ">=" { less = 0 }
+        if op == "<=" || op == ">=" { equal = 1 }
+        if op == "<=>" { returnType = "i32" } else { returnType = "i1" }
+        for member in members {
+            let mine = eName(p, member, span)
+            let theirs = eField(p, eName(p, other, span), member, span, span)
+            let below = eBinary(p, "<", mine, theirs, span)
+            let above = eBinary(p, "<", eField(p, eName(p, other, span), member, span, span), eName(p, member, span), span)
+            body.append(ifReturn(p, below, less, span))
+            body.append(ifReturn(p, above, greater, span))
+        }
+        body.append(returnStatement(p, eNumber(p, equal, span), span))
+    }
+    p.tree.functions.append(CppFunction { name = fn.name, nameSpan = fn.nameSpan, parameters = parameters, returnType = returnType, body = body, isProto = false, internal = true, cLinkage = false, refReturn = false, isConst = false, span = fn.span })
+}
+function returnStatement(p: borrow mut Parser, value: ExprId, span: Span) -> StmtId {
+    return addStatement(p, sReturn("", value, span))
+}
+function ifReturn(p: borrow mut Parser, condition: ExprId, value: Int, span: Span) -> StmtId {
+    var result = eNumber(p, value, span)
+    if value < 0 { result = addExpr(p, Expr { kind = .Neg(eNumber(p, 0 - value, span)), span = span, nameSpan = span }) }
+    let returned = returnStatement(p, result, span)
+    return addStatement(p, sIf(condition, .None, [returned], [], span))
+}

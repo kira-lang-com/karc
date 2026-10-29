@@ -1,0 +1,682 @@
+// Expression lowering: the place model (emitPlace/emitIndexable) and
+// emitExpression, which dispatches on ExprKind. Access and assignment share the
+// place model, so member, index and dereference compose.
+
+// Lower an lvalue expression to the address it denotes. Field/Index/Deref
+// compose, so `a.b.c`, `p->f[i]` and `*(base)` all resolve through here.
+function implicitFieldPlace(state: borrow mut Lowerer, fieldName: String) -> Place {
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    if owner == "" { return Place { address = state.slotsData[0].address, ty = "", unsigned = false, bitOffset = 0, bitWidth = 0 } }
+    let structIndexValue = structIndex(state, nominalName(owner))
+    let selfSlot = lookup(state, "this")
+    if structIndexValue < 0 || selfSlot < 0 { return Place { address = state.slotsData[0].address, ty = "", unsigned = false, bitOffset = 0, bitWidth = 0 } }
+    let byReference = memberType(state, owner, joinText(["&", fieldName]))
+    if memberType(state, owner, fieldName) == "" && byReference == "" { return outerMemberPlace(state, fieldName) }
+    let self = kLoad(state, state.slotsData[selfSlot].address)
+    let storage = kAddrCast(state, kAddressOf(state, self, arrayOfPointer(state.slotsData[selfSlot].ty)), owner)
+    if byReference != "" {
+        let captured = memberPlace(state, storage, owner, joinText(["&", fieldName]))
+        let pointerValue = Value { reference = kLoad(state, captured.address), boolean = false, wide = true, pointer = byReference, unsigned = false, floating = false }
+        return placeFromPointer(state, pointerValue)
+    }
+    return memberPlace(state, storage, owner, fieldName)
+}
+function emitNamePlace(state: borrow mut Lowerer, named: NameExpression) -> Place {
+    var resolved = lookup(state, named.name)
+    if resolved < 0 {
+        let field = implicitFieldPlace(state, named.name)
+        if field.ty != "" { return field }
+        resolved = ensureGlobalSlot(state, named.name)
+    }
+    if resolved < 0 {
+        let field = implicitFieldPlace(state, named.name)
+        if field.ty != "" { return field }
+        return scratchPlace(state)
+    }
+    let ty = state.slotsData[resolved].ty
+    if state.slotsData[resolved].reference {
+        let element = elementOfPointer(ty)
+        let pointer = kLoad(state, state.slotsData[resolved].address)
+        let base = kAddressOf(state, pointer, arrayOfPointer(ty))
+        let address = kElemAddr(state, base, kConstInt(state, "i32", 0), element)
+        return Place { address = address, ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+    }
+    return Place { address = state.slotsData[resolved].address, ty = ty, unsigned = isUnsignedType(ty), bitOffset = 0, bitWidth = 0 }
+}
+
+function emitFieldPlace(state: borrow mut Lowerer, fieldExpr: FieldExpression, source: Expr) -> Place {
+    var base = emitPlace(state, fieldExpr.base)
+    if isPointerType(base.ty) {
+        let element = elementOfPointer(base.ty)
+        let loaded = kLoad(state, base.address)
+        let storage = kAddrCast(state, kAddressOf(state, loaded, arrayOfPointer(base.ty)), element)
+        base = Place { address = storage, ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+    }
+    if isArrayType(base.ty) && utf8Byte(fieldExpr.name, 0) == 35 {
+        let element = arrayElementType(base.ty)
+        let index = numberValue(utf8Slice(fieldExpr.name, 1, utf8Count(fieldExpr.name)))
+        return Place { address = kElemAddr(state, base.address, kConstInt(state, "i64", index), element), ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+    }
+    let structIndexValue = structIndex(state, nominalName(base.ty))
+    if structIndexValue < 0 { return scratchPlace(state) }
+    let structValue = state.tree.structs[structIndexValue]
+    if soleArrayMember(structValue, fieldExpr.name) { return arrayMemberPlace(state, base, structValue, fieldExpr.name) }
+    let bit = bitFieldOf(state.tree, structValue.name, fieldExpr.name)
+    if bit >= 0 { return bitPlace(state, base.address, base.ty, bit) }
+    var fieldIndex = fieldIndexOf(structValue, fieldExpr.name)
+    if utf8Byte(fieldExpr.name, 0) == 35 { fieldIndex = numberValue(utf8Slice(fieldExpr.name, 1, utf8Count(fieldExpr.name))) }
+    if fieldIndex < 0 {
+        let inherited = memberPlace(state, base.address, base.ty, fieldExpr.name)
+        if inherited.ty != "" { return inherited }
+        let shared = staticMemberName(state, base.ty, fieldExpr.name)
+        if shared != "" {
+            let sharedExpr = Expr { kind = .Name(NameExpression { name = shared, explicitArguments = 0, valueUse = true }), span = source.span, nameSpan = source.nameSpan }
+            return emitPlace(state, addLoweredExpr(state, sharedExpr))
+        }
+        return scratchPlace(state)
+    }
+    let fieldType = structValue.fields[fieldIndex].declType
+    let address = memberAddress(state, base.address, base.ty, fieldIndex, fieldType)
+    return Place { address = address, ty = fieldType, unsigned = isUnsignedType(fieldType), bitOffset = 0, bitWidth = 0 }
+}
+
+function emitIndexPlace(state: borrow mut Lowerer, indexExpr: IndexExpression, span: Span) -> Place {
+    if hasClassIndex(state, indexExpr) { return classIndexPlace(state, indexExpr, span) }
+    let base = emitIndexable(state, indexExpr.base)
+    let index = convert(state, asInt(state, emitExpression(state, indexExpr.index)), "i64")
+    let address = kElemAddr(state, base.address, index.reference, base.ty)
+    return Place { address = address, ty = base.ty, unsigned = base.unsigned, bitOffset = 0, bitWidth = 0 }
+}
+
+function emitValuePlace(state: borrow mut Lowerer, value: Value) -> Place {
+    state.lastCallReference = false
+    if value.pointer == "" { return scratchPlace(state) }
+    return placeFromPointer(state, value)
+}
+
+function emitDerefPlace(state: borrow mut Lowerer, operand: ExprId, span: Span) -> Place {
+    let overloaded = dereferenceOperator(state, operand)
+    if overloaded >= 0 {
+        let owner = methodOwnerType(state.tree, state.tree.functions[overloaded].name)
+        let fn = state.tree.functions[overloaded]
+        let result = callFunction(state, overloaded, [methodReceiver(state, operand, owner)], [])
+        state.lastCallReference = false
+        if !fn.refReturn && !isClassType(fn.returnType) {
+            let slot = declare(state, joinText(["__karc_deref_", decimalText(state.slots)]), fn.returnType, "", span)
+            storeLocal(state, slot, result)
+            return Place { address = state.slotsData[slot].address, ty = fn.returnType, unsigned = isUnsignedType(fn.returnType), bitOffset = 0, bitWidth = 0 }
+        }
+        return emitValuePlace(state, result)
+    }
+    let ptr = emitExpression(state, operand)
+    if ptr.pointer == "" { return scratchPlace(state) }
+    let element = elementOfPointer(ptr.pointer)
+    let base = kAddressOf(state, ptr.reference, element)
+    let address = kElemAddr(state, base, kConstInt(state, "i32", 0), element)
+    return Place { address = address, ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+}
+
+function emitPlace(state: borrow mut Lowerer, id: ExprId) -> Place {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Ternary(ternary) -> return conditionalPlace(state, ternary)
+        Name(named) -> return emitNamePlace(state, named)
+        Field(fieldExpr) -> return emitFieldPlace(state, fieldExpr, expr)
+        Index(indexExpr) -> return emitIndexPlace(state, indexExpr, expr.span)
+        Call -> return emitValuePlace(state, emitCall(state, id))
+        Binary -> return emitValuePlace(state, emitBinary(state, id))
+        Deref(operand) -> return emitDerefPlace(state, operand, expr.span)
+        NumberLit -> return scratchPlace(state)
+        FloatLit -> return scratchPlace(state)
+        StringLit -> return scratchPlace(state)
+        Neg -> return scratchPlace(state)
+        Positive -> return scratchPlace(state)
+        Not -> return scratchPlace(state)
+        BitNot -> return scratchPlace(state)
+        AddrOf -> return scratchPlace(state)
+        Sizeof -> return scratchPlace(state)
+        Cast -> return scratchPlace(state)
+        PreStep -> return scratchPlace(state)
+        PostStep -> return scratchPlace(state)
+        New -> return scratchPlace(state)
+        Delete -> return scratchPlace(state)
+    }
+}
+// The array-typed address to `elem.addr` from and the element type, for
+// indexing an array place (use its address) or a pointer value (load it first).
+function emitIndexable(state: borrow mut Lowerer, baseId: ExprId) -> Place {
+    let e = state.tree.expressions[baseId.value]
+    var placeLike = false
+    match e.kind {
+        Name(named) -> {
+            var slot = lookup(state, named.name)
+            if slot < 0 { slot = ensureGlobalSlot(state, named.name) }
+            if slot >= 0 {
+                let st = state.slotsData[slot].ty
+                if isArrayType(st) {
+                    let elem = state.slotsData[slot].element
+                    return Place { address = state.slotsData[slot].address, ty = elem, unsigned = isUnsignedType(elem), bitOffset = 0, bitWidth = 0 }
+                }
+                if isPointerType(st) {
+                    let loaded = kLoad(state, state.slotsData[slot].address)
+                    let elem = elementOfPointer(st)
+                    let address = kAddressOf(state, loaded, arrayOfPointer(st))
+                    return Place { address = address, ty = elem, unsigned = isUnsignedType(elem), bitOffset = 0, bitWidth = 0 }
+                }
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> { placeLike = true }
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> { placeLike = true }
+        Index -> { placeLike = true }
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if placeLike {
+        let base = emitPlace(state, baseId)
+        if isArrayType(base.ty) {
+            let elem = arrayElementType(base.ty)
+            return Place { address = base.address, ty = elem, unsigned = isUnsignedType(elem), bitOffset = 0, bitWidth = 0 }
+        }
+        if isPointerType(base.ty) {
+            let loaded = kLoad(state, base.address)
+            let elem = elementOfPointer(base.ty)
+            let address = kAddressOf(state, loaded, arrayOfPointer(base.ty))
+            return Place { address = address, ty = elem, unsigned = isUnsignedType(elem), bitOffset = 0, bitWidth = 0 }
+        }
+    }
+    let v = emitExpression(state, baseId)
+    if v.pointer != "" {
+        let elem = elementOfPointer(v.pointer)
+        let address = kAddressOf(state, v.reference, arrayOfPointer(v.pointer))
+        return Place { address = address, ty = elem, unsigned = isUnsignedType(elem), bitOffset = 0, bitWidth = 0 }
+    }
+    return scratchIndexable(state)
+}
+// Read the value at a place: an array place decays to a pointer to its first
+// element; any other place loads and promotes to expression width.
+function rvalueFromPlace(state: borrow mut Lowerer, place: Place) -> Value {
+    if place.bitWidth > 0 { return loadBits(state, place) }
+    if isClassType(place.ty) {
+        let result = slotPointer(state, place.address, place.ty)
+        return Value { reference = result, boolean = false, wide = true, pointer = joinText(["*[0 x ", place.ty, "]"]), unsigned = false, floating = false }
+    }
+    if isArrayType(place.ty) {
+        let elem = arrayElementType(place.ty)
+        let ptrType = joinText(["*[0 x ", elem, "]"])
+        let result = slotPointer(state, place.address, elem)
+        return Value { reference = result, boolean = false, wide = true, pointer = ptrType, unsigned = false, floating = false }
+    }
+    let loaded = kLoad(state, place.address)
+    return promoteFromType(state, loaded, place.ty)
+}
+// The KIR value for one call argument, given the callee's parameter type. A
+// function name decays to a `func.ref`, and a struct argument is handed over as
+// the address of the caller's copy.
+function emitArgument(state: borrow mut Lowerer, argId: ExprId, paramType: String) -> KirValue {
+    let argExpr = state.tree.expressions[argId.value]
+    match argExpr.kind {
+        Name(named) -> {
+            if isFnPtrType(paramType) && lookup(state, named.name) < 0 {
+                let callee = functionSlotInScope(state, named.name)
+                if callee >= 0 {
+                    // A C function's pointer differs from a KArc one only in type.
+                    return kBitcast(state, functionReference(state, callee), paramType)
+                }
+            }
+            if isClassType(paramType) {
+                var argSlot = lookup(state, named.name)
+                if argSlot < 0 { argSlot = ensureGlobalSlot(state, named.name) }
+                if argSlot >= 0 {
+                    return slotPointer(state, state.slotsData[argSlot].address, paramType)
+                }
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let argType = staticType(state, argId)
+    if isClassType(argType) && !isClassType(paramType) && !isPointerType(paramType) && !isFnPtrType(paramType) {
+        // A class argument to a scalar parameter: its conversion operator.
+        let conversion = scalarConversion(state.tree, argType, paramType)
+        if conversion != "" {
+            let call = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = argId, name = joinText(["@member::", conversion]), arguments = [], explicitArguments = 0, awaitTransform = false }), span = argExpr.span, nameSpan = argExpr.span })
+            return coerceRef(state, emitExpression(state, call), paramType)
+        }
+    }
+    return coerceRef(state, emitExpression(state, argId), paramType)
+}
+// The comparison predicate for a relational operator, or "" when the operator
+// is arithmetic.
+function comparePredicate(op: String, unsigned: Bool) -> String {
+    match op {
+        "==" -> return "eq"
+        "!=" -> return "ne"
+        else -> {}
+    }
+    if unsigned {
+        match op {
+            "<" -> return "ult"
+            ">" -> return "ugt"
+            "<=" -> return "ule"
+            ">=" -> return "uge"
+            else -> return ""
+        }
+    }
+    match op {
+        "<" -> return "slt"
+        ">" -> return "sgt"
+        "<=" -> return "sle"
+        ">=" -> return "sge"
+        else -> return ""
+    }
+}
+// The KIR binary operator for an arithmetic operator.
+function arithmeticOperator(op: String, unsigned: Bool) -> String {
+    match op {
+        "+" -> return "add"
+        "-" -> return "sub"
+        "*" -> return "mul"
+        else -> {}
+    }
+    if op == "/" {
+        if unsigned { return "udiv" }
+        return "sdiv"
+    }
+    if op == "%" {
+        if unsigned { return "urem" }
+        return "srem"
+    }
+    match op {
+        "|" -> return "or"
+        "^" -> return "xor"
+        "&" -> return "and"
+        "<<" -> return "shl"
+        else -> {}
+    }
+    if unsigned { return "lshr" }
+    return "ashr"
+}
+// `+`, `-` and `*` trap on signed overflow; everything else wraps.
+function trapsOnOverflow(op: String, unsigned: Bool) -> Bool {
+    if unsigned { return false }
+    match op {
+        "+", "-", "*" -> return true
+        else -> return false
+    }
+}
+function emitArithmetic(state: borrow mut Lowerer, op: String, leftRaw: Value, rightRaw: Value, span: Span) -> Value {
+    if leftRaw.pointer != "" || rightRaw.pointer != "" {
+        return emitPointerBinary(state, op, leftRaw, rightRaw, span)
+    }
+    if leftRaw.floating || rightRaw.floating {
+        let left = convert(state, leftRaw, "f64")
+        let right = convert(state, rightRaw, "f64")
+        let predicate = comparePredicate(op, false)
+        if predicate != "" {
+            let result = kFcmp(state, predicate, left.reference, right.reference)
+            return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+        }
+        let result = kFloatBinary(state, arithmeticOperator(op, false), left.reference, right.reference)
+        return Value { reference = result, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+    }
+    let left = asInt(state, leftRaw)
+    let right = asInt(state, rightRaw)
+    // Usual arithmetic conversions: widen both operands; an unsigned operand
+    // makes the operation wrap and selects the unsigned opcodes.
+    let uns = left.unsigned || right.unsigned
+    var common: String = "i32"
+    if left.wide || right.wide { common = "i64" }
+    let l = convert(state, left, common)
+    let r = convert(state, right, common)
+    let predicate = comparePredicate(op, uns)
+    if predicate != "" {
+        let result = kIcmp(state, predicate, l.reference, r.reference)
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    let operation = arithmeticOperator(op, uns)
+    let result = kBinary(state, operation, trapsOnOverflow(op, uns), !uns, l.reference, r.reference)
+    return Value { reference = result, boolean = false, wide = common == "i64", pointer = "", unsigned = uns, floating = false }
+}
+// For a class without the operator itself: `a < b` as `(a <=> b) < 0`
+// when it has `<=>`, `a != b` as `!(a == b)` when it has `==`.
+function rewrittenComparison(state: borrow mut Lowerer, expr: Expr, binary: BinaryExpression) -> ExprId {
+    let op = binary.op
+    match op {
+        "<", ">", "<=", ">=", "!=" -> {}
+        else -> return noExpr()
+    }
+    let relational = op != "!="
+    let left = staticType(state, binary.left)
+    if !isClassType(left) { return noExpr() }
+    if relational && findMember(state.tree, left, "operator<=>", 1) >= 0 {
+        let three = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = binary.right, op = "<=>" }), span = expr.span, nameSpan = expr.nameSpan })
+        let zero = addLoweredExpr(state, Expr { kind = .NumberLit(NumberExpression { value = 0, suffix = "" }), span = expr.span, nameSpan = expr.span })
+        return addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = three, right = zero, op = op }), span = expr.span, nameSpan = expr.nameSpan })
+    }
+    if op == "!=" && findMember(state.tree, left, "operator==", 1) >= 0 {
+        let equal = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = binary.right, op = "==" }), span = expr.span, nameSpan = expr.nameSpan })
+        return addLoweredExpr(state, Expr { kind = .Not(equal), span = expr.span, nameSpan = expr.nameSpan })
+    }
+    return noExpr()
+}
+function emitBinary(state: borrow mut Lowerer, id: ExprId) -> Value {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Binary(binary) -> return emitBinaryPayload(state, expr, binary)
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    lowerError(state, diagUnsupportedExpression(), expr.span)
+    return zeroValue(state)
+}
+function emitBinaryPayload(state: borrow mut Lowerer, expr: Expr, binary: BinaryExpression) -> Value {
+
+    if binary.op == "," {
+        emitExpression(state, binary.left)
+        return emitExpression(state, binary.right)
+    }
+    let overloaded = binaryOperator(state, expr, binary)
+    if overloaded >= 0 { return derefIfReference(state, emitOperatorCall(state, binary, overloaded)) }
+    let rewritten = rewrittenComparison(state, expr, binary)
+    if hasExpr(rewritten) { return emitExpression(state, rewritten) }
+    if isCompoundText(binary.op) {
+        // `a op= b` as an expression: `a = a op b`, whose value is `a`.
+        let operator = utf8Slice(binary.op, 0, utf8Count(binary.op) - 1)
+        let combined = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = binary.right, op = operator }), span = expr.span, nameSpan = expr.nameSpan })
+        let assignment = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = combined, op = "=" }), span = expr.span, nameSpan = expr.nameSpan })
+        emitExpression(state, assignment)
+        return emitExpression(state, binary.left)
+    }
+    if binary.op == "<=>" {
+        // Built-in three-way comparison: (a > b) - (a < b), an int.
+        let greater = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = binary.right, op = ">" }), span = expr.span, nameSpan = expr.nameSpan })
+        let less = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = binary.left, right = binary.right, op = "<" }), span = expr.span, nameSpan = expr.nameSpan })
+        let gi = addLoweredExpr(state, Expr { kind = .Cast(CastExpression { ty = "i32", operand = greater }), span = expr.span, nameSpan = expr.nameSpan })
+        let li = addLoweredExpr(state, Expr { kind = .Cast(CastExpression { ty = "i32", operand = less }), span = expr.span, nameSpan = expr.nameSpan })
+        let difference = addLoweredExpr(state, Expr { kind = .Binary(BinaryExpression { left = gi, right = li, op = "-" }), span = expr.span, nameSpan = expr.nameSpan })
+        return emitExpression(state, difference)
+    }
+    if binary.op == "=" {
+        let targetType = staticType(state, binary.left)
+        if isClassType(targetType) && structIndex(state, nominalName(targetType)) >= 0 {
+            emitClassAssignment(state, binary.left, binary.right, targetType)
+            return zeroValue(state)
+        }
+        let value = emitExpression(state, binary.right)
+        let target = emitPlace(state, binary.left)
+        if isClassType(target.ty) {
+            zeroAggregate(state, target.address, target.ty)
+        } else {
+            storeToPlace(state, target, value)
+        }
+        return value
+    }
+    if binary.op == "&&" || binary.op == "||" {
+        // Short-circuit: evaluate the right operand only when the left does not
+        // already decide the result. Merge with a boolean block parameter.
+        let leftValue = emitCondition(state, binary.left)
+        let rightBlock = kBlock(state)
+        kBlockParameter(state, "i1")
+        let joinBlock = kBlock(state)
+        if binary.op == "&&" {
+            kElseArgument(state, leftValue.reference)
+            kCondBr(state, leftValue.reference, rightBlock, joinBlock)
+        } else {
+            kArgument(state, leftValue.reference)
+            kCondBr(state, leftValue.reference, joinBlock, rightBlock)
+        }
+        kSwitchTo(state, rightBlock)
+        let rightMark = state.temporaries.count
+        let rightValue = emitCondition(state, binary.right)
+        guardBranchTemporaries(state, rightMark)
+        kArgument(state, rightValue.reference)
+        kBr(state, joinBlock)
+        kSwitchTo(state, joinBlock)
+        let merged = kBlockValue(state, joinBlock, 0)
+        return Value { reference = merged, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    let leftRaw = emitExpression(state, binary.left)
+    let rightRaw = emitExpression(state, binary.right)
+    return emitArithmetic(state, binary.op, leftRaw, rightRaw, expr.span)
+}
+function emitStep(state: borrow mut Lowerer, stepExpr: StepExpression, span: Span, post: Bool) -> Value {
+    let objectType = staticType(state, stepExpr.operand)
+    if isClassType(objectType) {
+        // `++it` on a class: its operator++ (or operator+= 1).
+        var name = "operator++"
+        var compound = "operator+="
+        if stepExpr.op == "-" {
+            name = "operator--"
+            compound = "operator-="
+        }
+        let object = methodReceiver(state, stepExpr.operand, objectType)
+        let step = findMember(state.tree, objectType, name, 0)
+        if step >= 0 && state.tree.functions[step].parameters.count == 0 {
+            callFunction(state, step, [object], [])
+        } else {
+            let index = findMember(state.tree, objectType, compound, 1)
+            if index >= 0 {
+                let one = addStepOne(state, span)
+                callFunction(state, index, [object], [one])
+            }
+        }
+        state.lastCallReference = false
+        return Value { reference = object, boolean = false, wide = true, pointer = joinText(["*[0 x ", objectType, "]"]), unsigned = false, floating = false }
+    }
+    let place = emitPlace(state, stepExpr.operand)
+    let old = rvalueFromPlace(state, place)
+    let next = emitArithmetic(state, stepExpr.op, old, intValue(state, 1), span)
+    storeToPlace(state, place, next)
+    if post { return old }
+    return next
+}
+function emitCast(state: borrow mut Lowerer, cast: CastExpression) -> Value {
+    let target = cast.ty
+    let sourceType = staticType(state, cast.operand)
+    if isClassType(sourceType) && !isClassType(target) {
+        let conversion = findMember(state.tree, sourceType, joinText(["operator ", target]), 0)
+        if conversion >= 0 {
+            let object = memberReceiver(state, methodReceiver(state, cast.operand, sourceType), sourceType, conversion)
+            let converted = callFunction(state, conversion, [object], [])
+            return convert(state, converted, target)
+        }
+    }
+    let operand = emitExpression(state, cast.operand)
+    if target == "unit" {
+        return zeroValue(state)
+    }
+    if isFnPtrType(target) {
+        var source = operand.reference
+        if operand.pointer == "" { source = toAddr64(state, operand) }
+        let result = kBitcast(state, source, target)
+        return Value { reference = result, boolean = false, wide = true, pointer = target, unsigned = false, floating = false }
+    }
+    if isPointerType(target) {
+        var source = adjustClassPointer(state, operand, target)
+        if operand.pointer == "" {
+            source = toAddr64(state, operand)
+        }
+        let result = kBitcast(state, source, target)
+        return Value { reference = result, boolean = false, wide = true, pointer = target, unsigned = false, floating = false }
+    }
+    var opVal = operand
+    if operand.pointer != "" {
+        let a64 = toAddr64(state, operand)
+        opVal = Value { reference = a64, boolean = false, wide = true, pointer = "", unsigned = false, floating = false }
+    }
+    let narrowed = convert(state, opVal, target)
+    if typeWidth(target) < 32 {
+        return promoteFromType(state, narrowed.reference, target)
+    }
+    return narrowed
+}
+function emitCallExpression(state: borrow mut Lowerer, id: ExprId, call: CallExpression, span: Span) -> Value {
+    if call.name == "@co_await" { return emitCoAwait(state, awaitableOf(state, call, span), span) }
+    if call.name == "@alignof" {
+        return Value {
+            reference = kConstInt(state, "u64", typeAlign(state.tree, staticType(state, call.arguments[0]))),
+            boolean = false,
+            wide = true,
+            pointer = "",
+            unsigned = true,
+            floating = false
+        }
+    }
+    return derefIfReference(state, emitCall(state, id))
+}
+
+function emitNumberLiteral(state: borrow mut Lowerer, number: NumberExpression) -> Value {
+    if number.suffix != "char" {
+        let ty = literalType(number)
+        if ty != "i32" {
+            let wide = ty == "i64" || ty == "u64"
+            var kirType = "i32"
+            if wide { kirType = "i64" }
+            let constant = kConstInt(state, kirType, number.value)
+            return Value {
+                reference = constant,
+                boolean = false,
+                wide = wide,
+                pointer = "",
+                unsigned = ty == "u64" || ty == "u32",
+                floating = false
+            }
+        }
+    }
+    return intValue(state, number.value)
+}
+
+function emitStringLiteral(state: borrow mut Lowerer, string: StringExpression) -> Value {
+    if string.prefix != "" { return emitWideString(state, string) }
+    let base = kGlobalAddr(state, state.stringHandles[string.index])
+    let result = slotPointer(state, base, "i8")
+    return Value { reference = result, boolean = false, wide = true, pointer = "*[0 x i8]", unsigned = false, floating = false }
+}
+
+function emitNamedValue(state: borrow mut Lowerer, id: ExprId, named: NameExpression, span: Span) -> Value {
+    var slot = lookup(state, named.name)
+    if slot < 0 {
+        let field = implicitFieldPlace(state, named.name)
+        if field.ty != "" { return rvalueFromPlace(state, field) }
+        slot = ensureGlobalSlot(state, named.name)
+    }
+    if slot >= 0 { return rvalueFromPlace(state, emitPlace(state, id)) }
+    for constant in state.tree.enumConstants {
+        if constant.name == named.name { return intValue(state, constant.value) }
+    }
+    for constant in state.tree.enumConstants {
+        if enumConstantNamed(constant, named.name) { return intValue(state, constant.value) }
+    }
+    let functionSlot = functionSlotInScope(state, named.name)
+    if functionSlot >= 0 {
+        let reference = functionReference(state, functionSlot)
+        return Value {
+            reference = reference,
+            boolean = false,
+            wide = true,
+            pointer = functionPointerType(state, functionSlot),
+            unsigned = false,
+            floating = false
+        }
+    }
+    let field = implicitFieldPlace(state, named.name)
+    if field.ty != "" { return rvalueFromPlace(state, field) }
+    if span.start >= 0 && !isExternalName(named.name) { lowerError(state, diagUnknownName(), span) }
+    return zeroValue(state)
+}
+
+function emitAddressOf(state: borrow mut Lowerer, operand: ExprId) -> Value {
+    let place = emitPlace(state, operand)
+    var element = place.ty
+    if isArrayType(element) { element = arrayElementType(element) }
+    let result = slotPointer(state, place.address, element)
+    let pointerType = joinText(["*[0 x ", element, "]"])
+    return Value { reference = result, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false }
+}
+
+function emitExpression(state: borrow mut Lowerer, id: ExprId) -> Value {
+    let expr = state.tree.expressions[id.value]
+    match expr.kind {
+        Call(call) -> return emitCallExpression(state, id, call, expr.span)
+        NumberLit(number) -> return emitNumberLiteral(state, number)
+        FloatLit(value) -> {
+            let result = kConstFloat(state, value)
+            return Value { reference = result, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+        }
+        StringLit(string) -> return emitStringLiteral(state, string)
+        Name(named) -> return emitNamedValue(state, id, named, expr.span)
+        Field -> return rvalueFromPlace(state, emitPlace(state, id))
+        Index -> return rvalueFromPlace(state, emitPlace(state, id))
+        Deref -> return rvalueFromPlace(state, emitPlace(state, id))
+        AddrOf(operand) -> return emitAddressOf(state, operand)
+        Sizeof(operand) -> return intValue(state, sizeOfExpression(state, operand))
+        New(newExpr) -> return emitNew(state, newExpr, expr.nameSpan)
+        Delete(deleteExpr) -> return emitDelete(state, deleteExpr, expr.span, expr.nameSpan)
+        Neg(operandId) -> return emitNegation(state, operandId)
+        Positive(operandId) -> return emitPositive(state, operandId)
+        Not(operandId) -> return emitLogicalNot(state, operandId)
+        BitNot(operandId) -> return emitBitwiseNot(state, operandId)
+        Cast(cast) -> return emitCast(state, cast)
+        Ternary(ternary) -> return emitTernary(state, ternary, expr.span)
+        PreStep(stepExpr) -> return emitStep(state, stepExpr, expr.span, false)
+        PostStep(stepExpr) -> return emitStep(state, stepExpr, expr.span, true)
+        Binary -> return emitBinary(state, id)
+    }
+}
+function isCompoundText(op: String) -> Bool {
+    match op {
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=" -> return true
+        else -> return false
+    }
+}

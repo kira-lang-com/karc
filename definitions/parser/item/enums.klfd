@@ -1,0 +1,131 @@
+// Enum declarations and integer constant-expression evaluation.
+
+function parseEnumBody(p: borrow mut Parser, enumName: String, scoped: Bool) {
+    expect(p, .LBrace)
+    var running: Int = 0
+    while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+        let ename = expect(p, .Ident).text
+        if peekKind(p) == .Assign {
+            consume(p)
+            running = constantExpression(p, expression(p, 0))
+        }
+        if !scoped { p.tree.enumConstants.append(CppEnumConstant { name = ename, value = running }) }
+        if enumName != "" { p.tree.enumConstants.append(CppEnumConstant { name = joinText([declarationName(p, enumName), "::", ename]), value = running }) }
+        running = running + 1
+        if peekKind(p) == .Comma {
+            consume(p)
+        }
+    }
+    expect(p, .RBrace)
+}
+function parseEnumDefinition(p: borrow mut Parser, enumName: String, scoped: Bool) {
+    parseEnumBody(p, enumName, scoped)
+    expect(p, .Semicolon)
+}
+function constantExpression(p: borrow Parser, id: ExprId) -> Int {
+    let value = p.tree.expressions[id.value]
+    match value.kind {
+        NumberLit(number) -> return number.value
+        Neg(operand) -> return 0 - constantExpression(p, operand)
+        Positive(operand) -> return constantExpression(p, operand)
+        BitNot(operand) -> return 0 - constantExpression(p, operand) - 1
+        Not(operand) -> {
+            if constantExpression(p, operand) == 0 { return 1 }
+            return 0
+        }
+        Ternary(ternary) -> {
+            if constantExpression(p, ternary.condition) != 0 { return constantExpression(p, ternary.thenValue) }
+            return constantExpression(p, ternary.elseValue)
+        }
+        Name(named) -> {
+            for c in p.tree.enumConstants {
+                if enumConstantNamed(c, named.name) { return c.value }
+            }
+            let name = staticMemberSpelling(p, named.name)
+            for g in p.tree.globals {
+                if (g.name == name || qualifiedNamesMatch(g.name, name)) && g.hasInit { return g.initValue }
+            }
+            return 0
+        }
+        Binary(binary) -> {
+            let left = constantExpression(p, binary.left)
+            let right = constantExpression(p, binary.right)
+            match binary.op {
+                "+" -> return left + right
+                "-" -> return left - right
+                "*" -> return left * right
+                else -> {}
+            }
+            if binary.op == "/" {
+                if right == 0 { return 0 }
+                return left / right
+            }
+            if binary.op == "%" {
+                if right == 0 { return 0 }
+                return left % right
+            }
+            match binary.op {
+                "<<", ">>" -> {
+                    var scale = 1
+                    for _ in 0..right { scale = scale * 2 }
+                    if binary.op == "<<" { return left * scale }
+                    return left / scale
+                }
+                "&", "|", "^" -> return bitwiseConstant(binary.op, left, right)
+                else -> {}
+            }
+            var truth = false
+            match binary.op {
+                "&&" -> truth = left != 0 && right != 0
+                "||" -> truth = left != 0 || right != 0
+                "==" -> truth = left == right
+                "!=" -> truth = left != right
+                "<" -> truth = left < right
+                ">" -> truth = left > right
+                "<=" -> truth = left <= right
+                ">=" -> truth = left >= right
+                else -> {}
+            }
+            if truth { return 1 }
+            return 0
+        }
+        FloatLit -> return 0
+        StringLit -> return 0
+        AddrOf -> return 0
+        Deref -> return 0
+        Sizeof -> return 0
+        Cast -> return 0
+        Call -> return 0
+        Field -> return 0
+        Index -> return 0
+        PreStep -> return 0
+        PostStep -> return 0
+        New -> return 0
+        Delete -> return 0
+    }
+}
+// `&`, `|` or `^` of two non-negative constants, bit by bit.
+function bitwiseConstant(op: String, left: Int, right: Int) -> Int {
+    if left < 0 || right < 0 { return 0 }
+    var result = 0
+    var bit = 1
+    var a = left
+    var b = right
+    while a > 0 || b > 0 {
+        let x = a % 2
+        let y = b % 2
+        var set = false
+        match op {
+            "&" -> set = x == 1 && y == 1
+            "|" -> set = x == 1 || y == 1
+            "^" -> set = x != y
+            else -> {}
+        }
+        if set { result = result + bit }
+        a = a / 2
+        b = b / 2
+        bit = bit * 2
+    }
+    return result
+}
+// `extern "C"` before one declaration or around a braced group of them.

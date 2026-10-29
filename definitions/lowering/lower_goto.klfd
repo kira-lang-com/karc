@@ -1,0 +1,67 @@
+// C labels have function scope, including labels inside nested statements.
+// Forward references allocate their block before the label is encountered.
+function namedJumpTarget(state: borrow mut Lowerer, name: String, span: Span) -> Int {
+    for i in 0..state.labels.count {
+        if state.labels[i].name == name { return i }
+    }
+    let index = state.labels.count
+    let block = kBlock(state)
+    state.labels.append(NamedJumpTarget { name = name, block = block, defined = false, span = span })
+    return index
+}
+function emitNamedGoto(state: borrow mut Lowerer, name: String, span: Span) {
+    let index = namedJumpTarget(state, name, span)
+    kBr(state, state.labels[index].block)
+    state.terminated = true
+}
+function emitNamedLabel(state: borrow mut Lowerer, name: String, span: Span) {
+    let index = namedJumpTarget(state, name, span)
+    if state.labels[index].defined {
+        lowerError(state, diagDuplicateLabel(), span)
+        return
+    }
+    state.labels[index].defined = true
+    let block = state.labels[index].block
+    if !state.terminated { kBr(state, block) }
+    kSwitchTo(state, block)
+    state.terminated = false
+}
+// Continue visiting C source after terminators: a later nested label may be
+// reached from elsewhere. Ordinary intervening statements go in a dead block.
+function shouldEmitStatement(state: Lowerer) -> Bool {
+    return !state.terminated || state.tree.cInput || state.switchMarkers.count > 0
+}
+function resumeUnreachableStatement(state: borrow mut Lowerer, id: StmtId) {
+    if !state.terminated { return }
+    if statementIsBranchMarker(state.tree.statements[id.value]) { return }
+    kSwitchTo(state, kBlock(state))
+    state.terminated = false
+}
+
+function statementIsBranchMarker(statement: Statement) -> Bool {
+    match statement.kind {
+        Return -> return false
+        Declare -> return false
+        IfInit -> return false
+        Assignment -> return false
+        ArrayDecl -> return false
+        StructDecl -> return false
+        Group -> return false
+        DeclGroup -> return false
+        ExprStmt -> return false
+        While -> return false
+        DoWhile -> return false
+        For -> return false
+        If -> return false
+        Switch -> return false
+        Case -> return true
+        Default -> return true
+        Break -> return false
+        Continue -> return false
+        Label -> return true
+        Goto -> return false
+        RangeFor -> return false
+        GlobalInit -> return false
+        Try -> return false
+    }
+}

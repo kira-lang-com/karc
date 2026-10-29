@@ -1,0 +1,57 @@
+// C++20 coroutine syntax. `co_await e` is the call `@co_await(e)`; `co_yield
+// e` awaits `promise.yield_value(e)`; `co_return` is a return statement named
+// `@co_return` whose expression is `promise.return_value(e)` or
+// `promise.return_void()`. The promise is the local `__karc_promise` that the
+// lowering gives a coroutine (lowering/lower_coroutine.klfd).
+
+function isCoroutineKeyword(t: Token) -> Bool {
+    if t.kind != .Ident { return false }
+    match t.text {
+        "co_await", "co_yield", "co_return" -> return true
+        else -> return false
+    }
+}
+function coroutinePromise(p: borrow mut Parser, span: Span) -> ExprId {
+    return eName(p, "__karc_promise", span)
+}
+// `co_await` and `co_yield` at the start of a unary expression.
+function coroutineExpression(p: borrow mut Parser) -> ExprId {
+    let t = consume(p)
+    p.coroutineMarks = p.coroutineMarks + 1
+    let span = tokenSpan(t)
+    if t.text == "co_await" {
+        // Written, so the promise's await_transform applies (number 1).
+        let operand = unary(p)
+        return addExpr(p, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = "@co_await", arguments = [operand], explicitArguments = 0, awaitTransform = true }), span = spanFrom(p, t.start), nameSpan = span })
+    }
+    let value = expression(p, 0)
+    let yielded = eCall(p, "@member::yield_value", [value], spanFrom(p, t.start), span, coroutinePromise(p, span))
+    return eCall(p, "@co_await", [yielded], spanFrom(p, t.start), span, noExpr())
+}
+// A statement starting with a coroutine keyword.
+function coroutineStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    if peek(p).text != "co_return" {
+        let e = expression(p, 0)
+        expect(p, .Semicolon)
+        return addStatement(p, sExpr(e, spanFrom(p, start)))
+    }
+    let t = consume(p)
+    p.coroutineMarks = p.coroutineMarks + 1
+    let span = tokenSpan(t)
+    var call = noExpr()
+    if peekKind(p) == .Semicolon {
+        call = eCall(p, "@member::return_void", [], span, span, coroutinePromise(p, span))
+    } else {
+        let value = expression(p, 0)
+        call = eCall(p, "@member::return_value", [value], spanFrom(p, t.start), span, coroutinePromise(p, span))
+    }
+    expect(p, .Semicolon)
+    return addStatement(p, sReturn("@co_return", call, spanFrom(p, start)))
+}
+// After a function body is parsed: a body that used a coroutine keyword
+// since `marks` makes the function a coroutine, known by its first statement.
+function markCoroutine(p: borrow mut Parser, marks: Int, body: [StmtId]) {
+    if p.coroutineMarks > marks && body.count > 0 {
+        p.tree.coroutineBodies.append(body[0].value)
+    }
+}

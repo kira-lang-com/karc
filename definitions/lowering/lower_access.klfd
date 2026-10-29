@@ -1,0 +1,118 @@
+// Member accesses the struct's own fields do not answer: `get<N>` of a
+// std::array (a class whose one member is an array), a static data member
+// read through an object, and designated initializers.
+
+// Whether `#N` (get<N>, a structured binding) names element N of the
+// class's only member, an array.
+function soleArrayMember(s: CppStruct, text: String) -> Bool {
+    return utf8Byte(text, 0) == 35 && s.fields.count == 1 && isArrayType(s.fields[0].declType)
+}
+function arrayMemberPlace(state: borrow mut Lowerer, base: Place, s: CppStruct, text: String) -> Place {
+    let arrayType = s.fields[0].declType
+    let element = arrayElementType(arrayType)
+    let storage = kFieldAddr(state, base.address, 0, arrayType)
+    let index = numberValue(utf8Slice(text, 1, utf8Count(text)))
+    return Place { address = kElemAddr(state, storage, kConstInt(state, "i64", index), element), ty = element, unsigned = isUnsignedType(element), bitOffset = 0, bitWidth = 0 }
+}
+// `Owner::name` when the class `owner` has a static member `name`, else "".
+function staticMemberName(state: Lowerer, owner: String, name: String) -> String {
+    let member = joinText([nominalName(owner), "::", name])
+    for g in state.tree.globals {
+        if g.name == member || qualifiedSuffix(g.name, member) { return g.name }
+    }
+    return ""
+}
+function globalType(state: Lowerer, name: String) -> String {
+    for g in state.tree.globals {
+        if g.name == name { return g.declType }
+    }
+    return ""
+}
+// `{.y = 2, .x = 1}`: the arguments in member order, none (noExpr) for a
+// member not named; the arguments as given when none is designated.
+function designatedInOrder(state: Lowerer, structType: String, arguments: [ExprId]) -> [ExprId] {
+    var designated = false
+    for argument in arguments {
+        let e = state.tree.expressions[argument.value]
+        match e.kind {
+            Call(call) -> {
+                if utf8Count(call.name) > 12 && utf8Slice(call.name, 0, 12) == "@designated:" { designated = true }
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Name -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+    }
+    let record = structIndex(state, nominalName(structType))
+    if !designated || record < 0 { return arguments }
+    // In member order, bit-fields included.
+    let members = aggregateMembers(state, record)
+    var ordered: [ExprId] = []
+    for _ in 0..members.count { ordered.append(noExpr()) }
+    var last = -1
+    for argument in arguments {
+        let e = state.tree.expressions[argument.value]
+        match e.kind {
+            Call(call) -> {
+                if utf8Count(call.name) > 12 && utf8Slice(call.name, 0, 12) == "@designated:" && call.arguments.count > 0 {
+                    let name = utf8Slice(call.name, 13, utf8Count(call.name))
+                    for m in 0..members.count {
+                        if aggregateMemberName(state, record, members[m]) == name {
+                            ordered[m] = call.arguments[0]
+                            if m > last { last = m }
+                        }
+                    }
+                }
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Name -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+    }
+    var result: [ExprId] = []
+    for f in 0..(last + 1) { result.append(ordered[f]) }
+    return result
+}
+// A member of the enclosing object named inside a lambda that captured
+// `this`; a place of type "" when there is none.
+function outerMemberPlace(state: borrow mut Lowerer, name: String) -> Place {
+    let outer = outerObject(state)
+    let outerClass = elementOfPointer(outer.pointer)
+    if outer.pointer == "" || memberType(state, outerClass, name) == "" { return Place { address = state.slotsData[0].address, ty = "", unsigned = false, bitOffset = 0, bitWidth = 0 } }
+    let storage = kAddrCast(state, kAddressOf(state, outer.reference, arrayOfPointer(outer.pointer)), outerClass)
+    return memberPlace(state, storage, outerClass, name)
+}

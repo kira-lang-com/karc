@@ -1,0 +1,293 @@
+// Part of <iostream>: ios_base, the manipulators and std::ostream. An
+// ostream formats into karc_put, which writes to a file descriptor;
+// ostringstream and ofstream derive from it and put elsewhere.
+#ifndef KARC_STD_OSTREAM_CORE
+#define KARC_STD_OSTREAM_CORE
+
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
+extern "C" {
+long write(int descriptor, const void* data, unsigned long size);
+long read(int descriptor, void* data, unsigned long size);
+int open(const char* path, int flags, int mode);
+int close(int descriptor);
+long lseek(int descriptor, long offset, int whence);
+long karc_write(int descriptor, const char* data, long count);
+void karc_output_flush();
+void karc_before_input(int descriptor);
+}
+
+namespace std {
+
+class ios_base {
+public:
+    typedef int fmtflags;
+    typedef int openmode;
+    typedef int iostate;
+    static const int hex = 1;
+    static const int fixed = 2;
+    static const int boolalpha = 4;
+    static const int scientific = 8;
+    static const int left = 16;
+    static const int right = 32;
+    static const int showpos = 64;
+    static const int uppercase = 128;
+    static const int showpoint = 256;
+    static const int oct = 512;
+    static const int showbase = 1024;
+    static const int skipws = 2048;
+    static const int internal = 4096;
+    static const int unitbuf = 8192;
+    static const int dec = 0;
+    static const int basefield = 513;
+    static const int floatfield = 10;
+    static const int adjustfield = 48;
+    static const int in = 1;
+    static const int out = 2;
+    static const int app = 4;
+    static const int trunc = 8;
+    static const int binary = 16;
+    static const int ate = 32;
+    typedef int seekdir;
+    // The standard streams never share a buffer with C stdio here.
+    static bool sync_with_stdio(bool sync = true) { return true; }
+    static const int beg = 0;
+    static const int cur = 1;
+    static const int end = 2;
+    static const int goodbit = 0;
+    static const int badbit = 1;
+    static const int eofbit = 2;
+    static const int failbit = 4;
+    int unused;
+};
+typedef ios_base ios;
+
+struct endl_t { int unused; };
+struct ends_t { int unused; };
+struct flush_t { int unused; };
+struct ws_t { int unused; };
+struct setw_t { int width; };
+struct setprecision_t { int precision; };
+struct setfill_t { char fill; };
+struct format_flag_t { int set; int clear; };
+
+class ostream {
+public:
+    ostream() : descriptor_(1), width_(0), precision_(6), fill_(' '), flags_(0), state_(0) {}
+    ostream(int descriptor) : descriptor_(descriptor), width_(0), precision_(6), fill_(' '), flags_(0), state_(0) {}
+    virtual ~ostream() {}
+    // The write position, for a stream on a file.
+    ostream& seekp(long position) { return seekp(position, ios_base::beg); }
+    ostream& seekp(long offset, int direction) {
+        if (descriptor_ < 0 || ::lseek(descriptor_, offset, direction) < 0) { state_ = state_ | ios_base::failbit; }
+        return *this;
+    }
+    long tellp() { return descriptor_ < 0 ? -1 : ::lseek(descriptor_, 0, ios_base::cur); }
+    // Output is written as it is made, so no stream needs flushing first.
+    ostream* tie() const { return 0; }
+    ostream* tie(ostream* other) { return 0; }
+
+    // Where formatted text goes: the descriptor here, elsewhere in a
+    // derived stream.
+    virtual void karc_put(const char* data, size_t count) {
+        if (descriptor_ < 0 || karc_write(descriptor_, data, (long)count) != (long)count) { state_ = state_ | ios_base::badbit; }
+    }
+
+    ostream& operator<<(const char* text) { return pad(text, strlen(text), false); }
+    ostream& operator<<(const string& text) { return pad(text.c_str(), text.size(), false); }
+    ostream& operator<<(string_view text) { return pad(text.data(), text.size(), false); }
+    ostream& operator<<(char c) {
+        char one[1];
+        one[0] = c;
+        return pad(one, 1, false);
+    }
+    ostream& operator<<(int value) { return integer(value, false); }
+    ostream& operator<<(long value) { return integer(value, false); }
+    ostream& operator<<(unsigned int value) { return integer((long)value, true); }
+    ostream& operator<<(unsigned long value) { return integer((long)value, true); }
+    ostream& operator<<(double value) {
+        char digits[400];
+        const char* sign = (flags_ & ios_base::showpos) ? "+" : "";
+        if (flags_ & ios_base::fixed) { snprintf(digits, 400, "%s%.*f", sign, precision_, value); }
+        else if (flags_ & ios_base::scientific) { snprintf(digits, 400, (flags_ & ios_base::uppercase) ? "%s%.*E" : "%s%.*e", sign, precision_, value); }
+        else { snprintf(digits, 400, (flags_ & ios_base::showpoint) ? "%s%#.*g" : "%s%.*g", sign, precision_ == 0 ? 1 : precision_, value); }
+        return pad(digits, strlen(digits), true);
+    }
+    ostream& operator<<(bool value) {
+        if (flags_ & ios_base::boolalpha) { return value ? pad("true", 4, false) : pad("false", 5, false); }
+        return value ? pad("1", 1, true) : pad("0", 1, true);
+    }
+    ostream& operator<<(const void* pointer) {
+        char digits[32];
+        snprintf(digits, 32, "0x%lx", (unsigned long)pointer);
+        return pad(digits, strlen(digits), true);
+    }
+    ostream& operator<<(endl_t manipulator) {
+        karc_put("\n", 1);
+        return flush();
+    }
+    ostream& operator<<(ends_t manipulator) {
+        char zero[1];
+        zero[0] = 0;
+        karc_put(zero, 1);
+        return *this;
+    }
+    ostream& operator<<(flush_t manipulator) { return flush(); }
+    ostream& operator<<(setw_t manipulator) {
+        width_ = manipulator.width;
+        return *this;
+    }
+    ostream& operator<<(setprecision_t manipulator) {
+        precision_ = manipulator.precision;
+        return *this;
+    }
+    ostream& operator<<(setfill_t manipulator) {
+        fill_ = manipulator.fill;
+        return *this;
+    }
+    ostream& operator<<(format_flag_t manipulator) {
+        flags_ = (flags_ & ~manipulator.clear) | manipulator.set;
+        return *this;
+    }
+    ostream& write(const char* data, long count) {
+        karc_put(data, (size_t)count);
+        return *this;
+    }
+    ostream& put(char c) {
+        karc_put(&c, 1);
+        return *this;
+    }
+    ostream& flush() {
+        if (descriptor_ == 1) { karc_output_flush(); }
+        return *this;
+    }
+    int precision() const { return precision_; }
+    int precision(int value) {
+        int old = precision_;
+        precision_ = value;
+        return old;
+    }
+    int width() const { return width_; }
+    int width(int value) {
+        int old = width_;
+        width_ = value;
+        return old;
+    }
+    char fill() const { return fill_; }
+    char fill(char value) {
+        char old = fill_;
+        fill_ = value;
+        return old;
+    }
+    int flags() const { return flags_; }
+    int flags(int value) {
+        int old = flags_;
+        flags_ = value;
+        return old;
+    }
+    int setf(int value) {
+        int old = flags_;
+        flags_ = flags_ | value;
+        return old;
+    }
+    int setf(int value, int mask) {
+        int old = flags_;
+        flags_ = (flags_ & ~mask) | (value & mask);
+        return old;
+    }
+    void unsetf(int value) { flags_ = flags_ & ~value; }
+    bool good() const { return state_ == 0; }
+    bool fail() const { return (state_ & (ios_base::failbit | ios_base::badbit)) != 0; }
+    bool bad() const { return (state_ & ios_base::badbit) != 0; }
+    bool eof() const { return (state_ & ios_base::eofbit) != 0; }
+    int rdstate() const { return state_; }
+    void clear(int state = 0) { state_ = state; }
+    void setstate(int state) { state_ = state_ | state; }
+    explicit operator bool() const { return !fail(); }
+    bool operator!() const { return fail(); }
+
+protected:
+    int descriptor_;
+    int state_;
+
+private:
+    ostream& integer(long value, bool isUnsigned) {
+        char digits[40];
+        if ((flags_ & (ios_base::hex | ios_base::oct | ios_base::showpos)) == 0) {
+            // Decimal, the common case: digits written backwards, no printf.
+            unsigned long magnitude = (unsigned long)value;
+            bool negative = !isUnsigned && value < 0;
+            if (negative) { magnitude = 0 - magnitude; }
+            int at = 39;
+            digits[at] = 0;
+            do {
+                at--;
+                digits[at] = (char)('0' + magnitude % 10);
+                magnitude = magnitude / 10;
+            } while (magnitude != 0);
+            if (negative) {
+                at--;
+                digits[at] = '-';
+            }
+            return pad(digits + at, (size_t)(39 - at), true);
+        }
+        const char* hexPattern = (flags_ & ios_base::uppercase) ? "%lX" : "%lx";
+        if (flags_ & ios_base::hex) {
+            const char* basePattern = (flags_ & ios_base::uppercase) ? "0X%lX" : "0x%lx";
+            snprintf(digits, 40, ((flags_ & ios_base::showbase) && value != 0) ? basePattern : hexPattern, value);
+        }
+        else if (flags_ & ios_base::oct) { snprintf(digits, 40, ((flags_ & ios_base::showbase) && value != 0) ? "0%lo" : "%lo", value); }
+        else if (isUnsigned) { snprintf(digits, 40, "%lu", value); }
+        else { snprintf(digits, 40, (flags_ & ios_base::showpos) ? "%+ld" : "%ld", value); }
+        return pad(digits, strlen(digits), true);
+    }
+    // Writes `text` in the pending width, which then resets: filled on the
+    // left unless left-adjusted.
+    ostream& pad(const char* text, size_t count, bool numeric) {
+        long gap = width_ - (long)count;
+        width_ = 0;
+        bool leftAdjust = (flags_ & ios_base::left) != 0;
+        if (numeric && gap > 0 && (flags_ & ios_base::internal) == ios_base::internal && (flags_ & ios_base::left) == 0) {
+            // Internal: the sign and base prefix, then the fill, then digits.
+            size_t prefix = 0;
+            if (count > 0 && (text[0] == '-' || text[0] == '+')) { prefix = 1; }
+            if (count > prefix + 1 && text[prefix] == '0' && (text[prefix + 1] == 'x' || text[prefix + 1] == 'X')) { prefix = prefix + 2; }
+            karc_put(text, prefix);
+            while (gap > 0) {
+                karc_put(&fill_, 1);
+                gap--;
+            }
+            karc_put(text + prefix, count - prefix);
+            return *this;
+        }
+        if (!leftAdjust) {
+            while (gap > 0) {
+                karc_put(&fill_, 1);
+                gap--;
+            }
+        }
+        karc_put(text, count);
+        while (gap > 0) {
+            karc_put(&fill_, 1);
+            gap--;
+        }
+        return *this;
+    }
+    int width_;
+    int precision_;
+    char fill_;
+    int flags_;
+};
+
+static endl_t endl;
+static ends_t ends;
+static flush_t flush;
+static ws_t ws;
+
+}
+
+#endif

@@ -1,0 +1,140 @@
+// <exception>: std::exception and the std's throwing helpers. A throw runs
+// the handlers of the enclosing try blocks, destroying the objects in
+// between; one that leaves main terminates the program.
+#ifndef KARC_STD_EXCEPTION
+#define KARC_STD_EXCEPTION
+
+#include <cstddef>
+
+extern "C" void karc_terminate();
+extern "C" int karc_exception_pending();
+
+// Throw the named std exception with the message `what` (std/src/throw.cpp),
+// so headers that cannot include <stdexcept> can still throw one.
+void karc_throw_out_of_range(const char* what);
+void karc_throw_invalid_argument(const char* what);
+void karc_throw_length_error(const char* what);
+void karc_throw_bad_function_call();
+void karc_throw_bad_optional_access();
+void karc_throw_bad_variant_access();
+void karc_throw_bad_any_cast();
+
+namespace std {
+
+class exception {
+public:
+    exception() {}
+    virtual ~exception() {}
+    virtual const char* what() const { return "std::exception"; }
+};
+
+extern "C" char* karc_exception_keep();
+extern "C" const char* karc_exception_names();
+extern "C" void karc_exception_restore(char* object, const char* chain);
+
+// The exception being handled, kept alive past its handler.
+class exception_ptr {
+public:
+    exception_ptr() : object_(0), names_(0) {}
+    exception_ptr(nullptr_t) : object_(0), names_(0) {}
+    explicit operator bool() const { return object_ != 0; }
+    bool operator==(const exception_ptr& other) const { return object_ == other.object_; }
+    bool operator!=(const exception_ptr& other) const { return object_ != other.object_; }
+    char* object_;
+    const char* names_;
+};
+inline exception_ptr current_exception() {
+    exception_ptr taken;
+    taken.object_ = karc_exception_keep();
+    taken.names_ = karc_exception_names();
+    return taken;
+}
+inline void rethrow_exception(exception_ptr taken) {
+    if (!taken) { karc_terminate(); }
+    karc_exception_restore(taken.object_, taken.names_);
+    throw;
+}
+template <typename E>
+exception_ptr make_exception_ptr(E e) {
+    try {
+        throw e;
+    } catch (...) {
+        return current_exception();
+    }
+    return exception_ptr();
+}
+
+// Nested exceptions. The object throw_with_nested throws is a T that
+// remembers the exception being handled, found again by its address.
+class nested_exception {
+public:
+    nested_exception() : nested_(current_exception()) {}
+    virtual ~nested_exception() {}
+    void rethrow_nested() const { rethrow_exception(nested_); }
+    exception_ptr nested_ptr() const { return nested_; }
+
+private:
+    exception_ptr nested_;
+};
+struct karc_nesting {
+    const void* object;
+    exception_ptr nested;
+};
+inline karc_nesting* karc_nestings() {
+    static karc_nesting table[64];
+    return table;
+}
+inline void karc_nest(const void* object, exception_ptr nested) {
+    karc_nesting* table = karc_nestings();
+    for (int i = 0; i < 64; i++) {
+        if (table[i].object == 0 || table[i].object == object) {
+            table[i].object = object;
+            table[i].nested = nested;
+            return;
+        }
+    }
+}
+inline exception_ptr karc_nested_of(const void* object) {
+    karc_nesting* table = karc_nestings();
+    for (int i = 0; i < 64; i++) {
+        if (table[i].object == object) { return table[i].nested; }
+    }
+    return exception_ptr();
+}
+template <typename T>
+struct karc_nested : T {
+    karc_nested(const T& value) : T(value) { karc_nest(this, current_exception()); }
+    karc_nested(const karc_nested& other) : T(other) { karc_nest(this, karc_nested_of(&other)); }
+};
+template <typename T>
+void throw_with_nested(T value) { throw karc_nested<T>(value); }
+template <typename E>
+void rethrow_if_nested(const E& handled) {
+    exception_ptr nested = karc_nested_of(&handled);
+    if (nested) { rethrow_exception(nested); }
+}
+
+class bad_exception : public exception {
+public:
+    const char* what() const override { return "std::bad_exception"; }
+};
+
+class bad_alloc : public exception {
+public:
+    const char* what() const override { return "std::bad_alloc"; }
+};
+
+class bad_array_new_length : public bad_alloc {
+public:
+    const char* what() const override { return "std::bad_array_new_length"; }
+};
+
+typedef void (*terminate_handler)();
+
+inline void terminate() { karc_terminate(); }
+inline int uncaught_exceptions() { return 0; }
+inline bool uncaught_exception() { return false; }
+
+}
+
+#endif

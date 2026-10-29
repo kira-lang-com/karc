@@ -1,0 +1,507 @@
+// Function templates, instantiated where a call names one: the template
+// arguments are deduced from the static types of the call's arguments, the
+// substituted tokens are parsed into the tree, and the new declarations are
+// added to the module. The instance's body is lowered after the functions
+// before it, as the module loop reaches it.
+
+// The function templates named `name` that can take `argumentCount`
+// arguments, those with exactly that many parameters first.
+function functionTemplateCandidates(tree: CppTree, name: String, argumentCount: Int) -> [Int] {
+    var exact: [Int] = []
+    var other: [Int] = []
+    for i in 0..tree.templates.count {
+        let t = tree.templates[i]
+        if !t.isClass && t.owner == "" && (t.name == name || qualifiedNamesMatch(t.name, name)) {
+            let count = templateParameters(t.tokens).count
+            if count == argumentCount { exact.append(i) } else if count > argumentCount || (t.pack >= 0 && argumentCount + 1 >= count) { other.append(i) }
+        }
+    }
+    for i in other { exact.append(i) }
+    return exact
+}
+// The instance of the function template `name` a call `e` names: the first
+// candidate whose arguments deduce; -1 for none.
+function templateInstanceFor(state: borrow mut Lowerer, call: CallExpression, span: Span, name: String) -> Int {
+    var explicit: [String] = []
+    if call.explicitArguments > 0 { explicit = state.tree.explicitArguments[call.explicitArguments - 1] }
+    // The first instance that takes the arguments exactly, else the first
+    // that takes them at all, else the first made.
+    var first = -1
+    var taking = -1
+    for template in functionTemplateCandidates(state.tree, name, call.arguments.count) {
+        let instance = instantiateFunction(state, template, call.arguments, explicit, span)
+        if instance >= 0 {
+            let fn = state.tree.functions[instance]
+            if exactArguments(state, fn, call.arguments) { return instance }
+            if taking < 0 && takesArguments(state, fn, call.arguments) { taking = instance }
+            if first < 0 { first = instance }
+        }
+    }
+    if taking >= 0 { return taking }
+    return first
+}
+// Whether `fn` can take the call's arguments: not too many, and none of a
+// kind its parameter cannot receive. A function template is tried when not.
+function takesArguments(state: borrow mut Lowerer, fn: CppFunction, arguments: [ExprId]) -> Bool {
+    if overflowsParameters(fn, arguments.count) { return false }
+    for i in 0..arguments.count {
+        if i < fn.parameters.count && fn.parameters[i].name == "..." { return true }
+        if i < fn.parameters.count && argumentFit(state, fn.parameters[i], staticType(state, arguments[i])) == 0 { return false }
+    }
+    return true
+}
+function hasFunctionTemplate(tree: CppTree, name: String) -> Bool {
+    for t in tree.templates {
+        if !t.isClass && t.owner == "" && (t.name == name || qualifiedNamesMatch(t.name, name)) { return true }
+    }
+    return false
+}
+function exactArguments(state: borrow mut Lowerer, fn: CppFunction, arguments: [ExprId]) -> Bool {
+    if fn.parameters.count != arguments.count { return false }
+    for i in 0..arguments.count {
+        if argumentFit(state, fn.parameters[i], staticType(state, arguments[i])) != 3 { return false }
+    }
+    return true
+}
+// Whether a call passes more arguments than `fn` takes.
+function overflowsParameters(fn: CppFunction, argumentCount: Int) -> Bool {
+    return argumentCount > fn.parameters.count && !isVariadicFunction(fn)
+}
+// The parameter declarations of a function template: its tokens between the
+// first `(` and the matching `)`, split at top-level commas.
+function templateParameters(tokens: [Token]) -> [[Token]] {
+    var result: [[Token]] = []
+    var current: [Token] = []
+    var depth = 0
+    var open = false
+    for i in 0..tokens.count {
+        let t = tokens[i]
+        if !open {
+            // The `()` of `operator()` is its name, not its parameters.
+            let callOperator = (i > 0 && tokens[i - 1].kind == .Ident && tokens[i - 1].text == "operator") ||
+                (i > 1 && tokens[i - 1].kind == .LParen && tokens[i - 2].kind == .Ident && tokens[i - 2].text == "operator")
+            if t.kind == .LParen && !callOperator { open = true }
+        } else if depth == 0 && t.kind == .RParen {
+            if current.count > 0 { result.append(current) }
+            return result
+        } else if depth == 0 && t.kind == .Comma {
+            result.append(current)
+            current = []
+        } else {
+            if t.kind == .LParen || t.kind == .Lt { depth = depth + 1 }
+            if t.kind == .RParen || t.kind == .Gt { depth = depth - 1 }
+            current.append(t)
+        }
+    }
+    return result
+}
+function variadicClass(tree: CppTree, name: String) -> Bool {
+    for t in tree.templates {
+        if t.isClass && t.name == name && t.pack >= 0 { return true }
+    }
+    return false
+}
+// The number of template arguments in the list starting at `start` (after
+// its `<`), or -1 when it holds a pack expansion.
+function patternShape(parameter: [Token], start: Int) -> Int {
+    var count = 1
+    var depth = 0
+    for j in start..parameter.count {
+        let t = parameter[j]
+        if t.kind == .Ellipsis { return -1 }
+        if t.kind == .Lt { depth = depth + 1 }
+        if t.kind == .Gt || t.kind == .Shr {
+            if depth == 0 { return count }
+            depth = depth - 1
+        }
+        if depth == 0 && t.kind == .Comma { count = count + 1 }
+    }
+    return count
+}
+// What one parameter declaration says about template parameter `name` given
+// an argument of type `argument`: "" when it does not mention it.
+function deduceFrom(tree: CppTree, parameter: [Token], name: String, argument: String) -> String {
+    let fromInstance = deduceFromInstance(tree, parameter, name, argument)
+    if fromInstance.count > 0 { return fromInstance[0] }
+    var found = false
+    var stars = 0
+    var depth = 0
+    for t in parameter {
+        if t.kind == .Lt { depth = depth + 1 }
+        if t.kind == .Gt { depth = depth - 1 }
+        if t.kind == .Ident && t.text == name && depth == 0 { found = true }
+        else if found && t.kind == .Star { stars = stars + 1 }
+        else if found && t.kind == .Lt { return "" }
+    }
+    if !found || argument == "" || argument == "@braced" { return "" }
+    var deduced = argument
+    if isArrayType(deduced) {
+        deduced = joinText(["*[0 x ", arrayElementType(deduced), "]"])
+    }
+    for _ in 0..stars {
+        if !isPointerType(deduced) { return "" }
+        deduced = elementOfPointer(deduced)
+    }
+    return deduced
+}
+// `name` as the argument list of a class template in `parameter`, as in
+// `const vector<T>&`: the arguments of the class instance `argument` from
+// that position on (one for a parameter, the rest for a pack); empty when
+// the parameter does not have that form.
+function deduceFromInstance(tree: CppTree, parameter: [Token], name: String, argument: String) -> [String] {
+    var instance = argument
+    while isPointerType(instance) { instance = elementOfPointer(instance) }
+    if !isClassType(instance) { return [] }
+    let bare = nominalName(instance)
+    for i in 0..parameter.count {
+        if parameter[i].kind == .Ident && i + 1 < parameter.count && parameter[i + 1].kind == .Lt {
+            var position = 0
+            var depth = 0
+            for j in (i + 2)..parameter.count {
+                let t = parameter[j]
+                if t.kind == .Lt { depth = depth + 1 }
+                if t.kind == .Gt || t.kind == .Shr {
+                    if depth == 0 { return [] }
+                    depth = depth - 1
+                }
+                if depth == 0 && t.kind == .Comma { position = position + 1 }
+                if depth == 0 && t.kind == .Ident && t.text == name {
+                    // `tuple<A>` does not match a tuple of three; `map<K, V>`
+                    // matches a map whose comparator was defaulted.
+                    let shape = patternShape(parameter, i + 2)
+                    for record in tree.instances {
+                        if record.name == bare && qualifiedNamesMatch(record.template, parameter[i].text) && position < record.arguments.count &&
+                            (shape < 0 || shape == record.arguments.count || (shape < record.arguments.count && !variadicClass(tree, record.template))) {
+                            var result: [String] = []
+                            for k in position..record.arguments.count { result.append(record.arguments[k]) }
+                            return result
+                        }
+                    }
+                    return []
+                }
+            }
+        }
+    }
+    return []
+}
+// The instance of function template `index` for the call's arguments, as an
+// index into the tree's functions, or -1 when deduction fails.
+// The template arguments of `template` for a call with `arguments`: the
+// explicit ones, then those the argument types imply; empty if one is not.
+function deduceTemplate(state: borrow mut Lowerer, template: CppTemplate, arguments: [ExprId], explicit: [String]) -> [String] {
+    var types: [String] = []
+    for argument in arguments { types.append(staticType(state, argument)) }
+    let parameters = templateParameters(template.tokens)
+    var deduced: [String] = []
+    for name in template.params {
+        if deduced.count == template.pack { return deducePack(state.tree, template, parameters, types, explicit, deduced) }
+        var value = ""
+        let given = deduced.count < explicit.count
+        if given { value = explicit[deduced.count] }
+        for i in 0..parameters.count {
+            if i < types.count && !given {
+                // Every parameter that names it must agree, as C++ requires:
+                // `sort(policy, first, last)` does not match sort(I, I, C).
+                var found = deduceFrom(state.tree, parameters[i], name, types[i])
+                if types[i] == "@braced" { found = deduceFromList(state, parameters[i], name, arguments[i]) }
+                if found != "" {
+                    if value == "" { value = found } else if found != value { return [] }
+                }
+            }
+        }
+        if value == "" && template.defaults[deduced.count].count > 0 { value = "@default" }
+        if value == "" { return [] }
+        deduced.append(value)
+    }
+    return deduced
+}
+// `max({1, 2})` for a parameter `initializer_list<T>`: T is the type of
+// the list's first element.
+function deduceFromList(state: borrow mut Lowerer, parameter: [Token], name: String, argument: ExprId) -> String {
+    let items = bracedPayloadArguments(state.tree.expressions[argument.value])
+    if items.count == 0 { return "" }
+    for i in 0..parameter.count {
+        if parameter[i].kind == .Ident && unqualifiedName(parameter[i].text) == "initializer_list" && i + 3 < parameter.count &&
+            parameter[i + 1].kind == .Lt && parameter[i + 2].kind == .Ident && parameter[i + 2].text == name && parameter[i + 3].kind == .Gt {
+            return staticType(state, items[0])
+        }
+    }
+    return ""
+}
+// `deduced` followed by the elements of the template's pack: the remaining
+// explicit arguments, or else the types of the arguments its function
+// parameter pack receives.
+function deducePack(tree: CppTree, template: CppTemplate, parameters: [[Token]], types: [String], explicit: [String], deduced: [String]) -> [String] {
+    var result = deduced
+    if explicit.count > deduced.count {
+        for i in deduced.count..explicit.count { result.append(explicit[i]) }
+        return result
+    }
+    let name = template.params[template.pack]
+    for at in 0..parameters.count {
+        var declaresPack = false
+        for t in parameters[at] {
+            if t.kind == .Ellipsis { declaresPack = true }
+        }
+        if declaresPack {
+            if at < types.count {
+                let fromInstance = deduceFromInstance(tree, parameters[at], name, types[at])
+                if fromInstance.count > 0 {
+                    for value in fromInstance { result.append(value) }
+                    return result
+                }
+            }
+            for i in at..types.count {
+                let value = deduceFrom(tree, parameters[at], name, types[i])
+                if value == "" { return [] }
+                result.append(value)
+            }
+            return result
+        }
+    }
+    return result
+}
+// Whether deduction gave every template argument.
+function deducedAll(template: CppTemplate, deduced: [String]) -> Bool {
+    if template.pack >= 0 { return deduced.count >= template.pack }
+    return deduced.count == template.params.count
+}
+// An `auto` function's result type, worked out with its parameters (and
+// `this`) bound to the scratch storage: nothing is emitted for them.
+function resultWithParameters(state: borrow mut Lowerer, fn: CppFunction, index: Int) -> String {
+    let saved = state.active
+    let savedFunction = state.functionIndex
+    state.functionIndex = index
+    let owner = methodOwnerType(state.tree, fn.name)
+    if owner != "" { bindForInference(state, "this", joinText(["*[0 x ", owner, "]"])) }
+    for parameter in fn.parameters { bindForInference(state, parameter.name, parameterClassOf(parameter)) }
+    let result = lambdaResult(state, fn, "")
+    state.active = saved
+    state.functionIndex = savedFunction
+    return result
+}
+function bindForInference(state: borrow mut Lowerer, name: String, ty: String) {
+    let slot = state.slots
+    state.slots = state.slots + 1
+    // Marked like a global so the function's return does not free it.
+    state.slotsData.append(Slot { ty = ty, element = "", reference = false, global = "@parameter", address = state.slotsData[0].address })
+    bind(state, name, slot)
+}
+// Settles every `auto` result from `first` on, as adoptInstance does.
+function settleAutoResults(state: borrow mut Lowerer, first: Int, end: Int) {
+    for i in first..end {
+        let fn = state.tree.functions[i]
+        if fn.returnType == "auto" && !isLambdaFunction(state.tree, fn) {
+            let result = resultWithParameters(state, fn, i)
+            state.tree.functions[i] = CppFunction { name = fn.name, nameSpan = fn.nameSpan, parameters = fn.parameters, returnType = result, body = fn.body, isProto = fn.isProto, internal = fn.internal, cLinkage = fn.cLinkage, refReturn = fn.refReturn, isConst = fn.isConst, span = fn.span }
+        }
+    }
+}
+// The unit's own `auto` functions, settled before any signature is
+// declared, inside a throwaway function that provides the scratch slot.
+function settleUnitAutoResults(state: borrow mut Lowerer) {
+    var any = false
+    for fn in state.tree.functions {
+        if fn.returnType == "auto" && !isLambdaFunction(state.tree, fn) { any = true }
+    }
+    if !any { return }
+    let span = state.tree.functions[0].nameSpan
+    let signature = kSignatureNamed(state, span, "__karc_settle", "unit", sourceSuffix(state.tree.sourceName))
+    let handle = kDeclareFunction(signature)
+    kOpenBody(handle)
+    resetFunctionState(state, 0, handle)
+    declareScratch(state, "i32", "")
+    settleAutoResults(state, 0, state.tree.functions.count)
+    deallocLocals(state)
+    kReturnVoid(state)
+}
+// Takes the tree a parser added an instance to: the new functions are
+// unit-private, and the new records, strings and functions are declared.
+function adoptInstance(state: borrow mut Lowerer, tree: CppTree, firstFunction: Int, firstStruct: Int, firstString: Int) {
+    // The instance's own globals (static members, function-local statics)
+    // come before the tables its classes add.
+    let firstGlobal = state.tree.globals.count
+    state.tree = tree
+    indexFunctions(state.tree)
+    let end = state.tree.functions.count
+    for i in firstFunction..end {
+        let fn = state.tree.functions[i]
+        state.tree.functions[i] = CppFunction { name = fn.name, nameSpan = fn.nameSpan, parameters = fn.parameters, returnType = fn.returnType, body = fn.body, isProto = fn.isProto, internal = true, cLinkage = false, refReturn = fn.refReturn, isConst = fn.isConst, span = fn.span }
+    }
+    declareRecordsFrom(state, firstStruct)
+    declareStringsFrom(state, firstString)
+    declareVtablesFrom(state, firstStruct)
+    declareGlobalsFrom(state, firstGlobal)
+    // An `auto` result is the type of the first return, as for a lambda (a
+    // generic lambda's operator() settles its own). Working it out may make
+    // more instances, which adopt themselves.
+    settleAutoResults(state, firstFunction, end)
+    declareFunctionsFrom(state, firstFunction)
+}
+// An instance's name: overloads of one template name that deduce the same
+// arguments, like equal(I, I, J) and equal(I, I, J, J), are told apart by
+// the overload's position among the templates of that name.
+function overloadInstanceName(tree: CppTree, index: Int, deduced: [String]) -> String {
+    let name = tree.templates[index].name
+    var ordinal = 0
+    for i in 0..index {
+        if tree.templates[i].name == name && tree.templates[i].owner == "" && !tree.templates[i].isClass { ordinal += 1 }
+    }
+    let base = instanceName(name, deduced)
+    if ordinal == 0 { return base }
+    return joinText([base, "__o", decimalText(ordinal)])
+}
+function instantiateFunction(state: borrow mut Lowerer, index: Int, arguments: [ExprId], explicit: [String], span: Span) -> Int {
+    let template = state.tree.templates[index]
+    let found = deduceTemplate(state, template, arguments, explicit)
+    if !deducedAll(template, found) { return -1 }
+    var p = parserForTree(state.tree, templateScope(template.name))
+    let deduced = withTemplateDefaults(p, template, found)
+    if deduced.count == 0 && found.count > 0 { return -1 }
+    let instance = overloadInstanceName(state.tree, index, deduced)
+    for i in 0..state.tree.functions.count {
+        if state.tree.functions[i].name == instance { return i }
+    }
+    let firstFunction = state.tree.functions.count
+    let firstStruct = state.tree.structs.count
+    let firstString = state.tree.strings.count
+    let tokens = renameFunction(instantiateTokens(p, template, deduced, template.tokens), unqualifiedName(template.name), instance)
+    parseSpliced(p, tokens)
+    if substitutionFailed(p.tree, firstFunction) { return -1 }
+    if p.error != "" {
+        // Point at the template's own tokens where the instance stopped.
+        lowerError(state, diagTemplateInstance(), Span { start = p.errorOffset, end = p.errorOffset + 1 })
+        return -1
+    }
+    adoptInstance(state, p.tree, firstFunction, firstStruct, firstString)
+    for i in firstFunction..state.tree.functions.count {
+        if state.tree.functions[i].name == instance { return i }
+    }
+    return -1
+}
+// `deduced` with each `@default` replaced by its default argument, read
+// with the arguments before it; empty when a default names a type that
+// does not exist (`typename = enable_if_t<false>`).
+function withTemplateDefaults(p: borrow mut Parser, template: CppTemplate, deduced: [String]) -> [String] {
+    var result: [String] = []
+    for i in 0..deduced.count {
+        if deduced[i] != "@default" {
+            result.append(deduced[i])
+        } else {
+            let substituted = substituteTokens(p, template, result, template.defaults[i])
+            var value = ""
+            if template.valueParams[i] {
+                if substituted.count > 0 && substituted[0].kind == .Number { value = decimalText(substituted[0].number) } else { value = "0" }
+            } else {
+                value = parseTypeFromTokens(p, substituted)
+            }
+            if mentionsMissing(value) { return [] }
+            result.append(value)
+        }
+    }
+    return result
+}
+// Whether the instance's signature names a type that does not exist, as
+// `enable_if_t<false, int>` as a result type does.
+function substitutionFailed(tree: CppTree, firstFunction: Int) -> Bool {
+    for i in firstFunction..tree.functions.count {
+        let fn = tree.functions[i]
+        if mentionsMissing(fn.returnType) { return true }
+        for parameter in fn.parameters {
+            if mentionsMissing(parameter.declType) { return true }
+        }
+    }
+    return false
+}
+// A member function template of `owner` named `name` for `arguments`,
+// instantiated as a member of that class; -1 when there is none.
+function instantiateMember(state: borrow mut Lowerer, owner: String, name: String, arguments: [ExprId]) -> Int {
+    for t in 0..state.tree.templates.count {
+        let template = state.tree.templates[t]
+        if template.owner != "" && unqualifiedName(template.name) == name && methodOwnerType(state.tree, template.name) == owner &&
+            (template.pack >= 0 || templateParameters(template.tokens).count >= arguments.count) {
+            let found = deduceTemplate(state, template, arguments, [])
+            var resolver = parserForTree(state.tree, templateScope(template.name))
+            var deduced = found
+            if deducedAll(template, found) { deduced = withTemplateDefaults(resolver, template, found) }
+            if deducedAll(template, found) && (deduced.count > 0 || found.count == 0) {
+                var keyPieces: [String] = [decimalText(t)]
+                for argument in deduced {
+                    keyPieces.append("|")
+                    keyPieces.append(argument)
+                }
+                let key = joinText(keyPieces)
+                for instance in state.memberInstances {
+                    if instance.key == key { return instance.index }
+                }
+                let firstFunction = state.tree.functions.count
+                let firstStruct = state.tree.structs.count
+                let firstString = state.tree.strings.count
+                var p = parserForTree(resolver.tree, templateScope(template.name))
+                let tokens = instantiateTokens(p, template, deduced, template.tokens)
+                parseMemberInstance(p, template.owner, tokens)
+                if p.error == "" && !substitutionFailed(p.tree, firstFunction) {
+                    adoptInstance(state, p.tree, firstFunction, firstStruct, firstString)
+                    for i in firstFunction..state.tree.functions.count {
+                        if unqualifiedName(state.tree.functions[i].name) == name {
+                            settleGenericOperator(state, i)
+                            state.memberInstances.append(MemberInstanceEntry { key = key, index = i })
+                            return i
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return -1
+}
+// A generic lambda's operator() instance: its `auto` result is its first
+// return's type, and it is declared now, as a lambda's operator() is only
+// once the lambda object exists.
+function settleGenericOperator(state: borrow mut Lowerer, index: Int) {
+    let fn = state.tree.functions[index]
+    if !isLambdaFunction(state.tree, fn) { return }
+    if fn.returnType == "auto" {
+        let result = lambdaResult(state, fn, methodOwnerType(state.tree, fn.name))
+        state.tree.functions[index] = CppFunction { name = fn.name, nameSpan = fn.nameSpan, parameters = fn.parameters, returnType = result, body = fn.body, isProto = fn.isProto, internal = fn.internal, cLinkage = fn.cLinkage, refReturn = fn.refReturn, isConst = fn.isConst, span = fn.span }
+    }
+    declareFunctionAt(state, index)
+}
+// The declaration with its name replaced by the instance's; calls inside it
+// still name the template.
+function renameFunction(tokens: [Token], name: String, instance: String) -> [Token] {
+    if utf8Count(name) > 8 && utf8Slice(name, 0, 8) == "operator" { return renameOperator(tokens, instance) }
+    var result: [Token] = []
+    var renamed = false
+    for t in tokens {
+        if !renamed && t.kind == .Ident && t.text == name {
+            renamed = true
+            result.append(Token { space = false, spelling = "", kind = .Ident, text = instance, number = 0, start = t.start, end = t.end, line = t.line })
+        } else {
+            result.append(t)
+        }
+    }
+    return result
+}
+// An operator template's `operator@` becomes one identifier naming the
+// instance, which calls reach through the instance, not the symbol.
+function renameOperator(tokens: [Token], instance: String) -> [Token] {
+    var result: [Token] = []
+    var i = 0
+    var renamed = false
+    while i < tokens.count {
+        let t = tokens[i]
+        if !renamed && t.kind == .Ident && t.text == "operator" {
+            renamed = true
+            result.append(Token { space = false, spelling = "", kind = .Ident, text = instance, number = 0, start = t.start, end = t.end, line = t.line })
+            i = i + 1
+            // `operator()` spells its symbol with the parentheses.
+            if i + 1 < tokens.count && tokens[i].kind == .LParen && tokens[i + 1].kind == .RParen { i = i + 2 }
+            while i < tokens.count && tokens[i].kind != .LParen { i = i + 1 }
+        } else {
+            result.append(t)
+            i = i + 1
+        }
+    }
+    return result
+}

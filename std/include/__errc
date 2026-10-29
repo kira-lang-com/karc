@@ -1,0 +1,35 @@
+// std::errc, the portable error conditions, shared by <charconv> and
+// <system_error>; the values are the Linux errno numbers.
+#ifndef KARC_STD_ERRC
+#define KARC_STD_ERRC
+
+namespace std {
+
+enum class errc {
+    ok = 0,
+    operation_not_permitted = 1,
+    no_such_file_or_directory = 2,
+    interrupted = 4,
+    io_error = 5,
+    bad_file_descriptor = 9,
+    resource_unavailable_try_again = 11,
+    not_enough_memory = 12,
+    permission_denied = 13,
+    file_exists = 17,
+    not_a_directory = 20,
+    is_a_directory = 21,
+    invalid_argument = 22,
+    too_many_files_open = 24,
+    no_space_on_device = 28,
+    argument_out_of_domain = 33,
+    result_out_of_range = 34,
+    function_not_supported = 38,
+    directory_not_empty = 39,
+    value_too_large = 75,
+    operation_not_supported = 95,
+    timed_out = 110
+};
+
+}
+
+#endif

@@ -1,0 +1,323 @@
+// <ranges>: the range algorithms of std::ranges over whole containers, and
+// lazy views composed with `|`: iota, filter, transform, take, drop,
+// reverse, keys and values. A view holds a container by pointer (through
+// ref_view) and another view by value.
+#ifndef KARC_STD_RANGES
+#define KARC_STD_RANGES
+
+#include <cstddef>
+#include <utility>
+#include <iterator>
+#include <algorithm>
+#include <numeric>
+
+#include <initializer_list>
+
+namespace std {
+namespace ranges {
+
+template <typename R> auto begin(R& range) { return range.begin(); }
+template <typename R> auto end(R& range) { return range.end(); }
+template <typename R> size_t size(R& range) { return (size_t)(range.end() - range.begin()); }
+template <typename R> bool empty(R& range) { return !(range.begin() != range.end()); }
+
+template <typename R> void sort(R& range) { std::sort(range.begin(), range.end()); }
+template <typename R, typename C> void sort(R& range, C less) { std::sort(range.begin(), range.end(), less); }
+template <typename R> void stable_sort(R& range) { std::stable_sort(range.begin(), range.end()); }
+template <typename R> void reverse(R& range) { std::reverse(range.begin(), range.end()); }
+template <typename R, typename V> void fill(R& range, const V& value) { std::fill(range.begin(), range.end(), value); }
+template <typename R, typename V> auto find(R& range, const V& value) { return std::find(range.begin(), range.end(), value); }
+template <typename R, typename P> auto find_if(R& range, P predicate) { return std::find_if(range.begin(), range.end(), predicate); }
+template <typename R, typename V> long count(R& range, const V& value) { return std::count(range.begin(), range.end(), value); }
+template <typename R, typename P> long count_if(R& range, P predicate) { return std::count_if(range.begin(), range.end(), predicate); }
+template <typename R, typename P> bool any_of(R& range, P predicate) { return std::any_of(range.begin(), range.end(), predicate); }
+template <typename R, typename P> bool all_of(R& range, P predicate) { return std::all_of(range.begin(), range.end(), predicate); }
+template <typename R, typename P> bool none_of(R& range, P predicate) { return std::none_of(range.begin(), range.end(), predicate); }
+template <typename R, typename F> void for_each(R& range, F action) { std::for_each(range.begin(), range.end(), action); }
+template <typename R, typename O> O copy(R& range, O out) { return std::copy(range.begin(), range.end(), out); }
+template <typename R, typename O, typename F> O transform(R& range, O out, F operation) { return std::transform(range.begin(), range.end(), out, operation); }
+template <typename R> auto min_element(R& range) { return std::min_element(range.begin(), range.end()); }
+template <typename R> auto max_element(R& range) { return std::max_element(range.begin(), range.end()); }
+template <typename R, typename V> bool contains(R& range, const V& value) { return std::find(range.begin(), range.end(), value) != range.end(); }
+template <typename R, typename S> bool equal(R& a, S& b) { return std::equal(a.begin(), a.end(), b.begin(), b.end()); }
+template <typename R, typename V, typename F> V fold_left(R& range, V initial, F combine) { return std::accumulate(range.begin(), range.end(), initial, combine); }
+template <typename R> auto min(R& range) { return *std::min_element(range.begin(), range.end()); }
+template <typename R> auto max(R& range) { return *std::max_element(range.begin(), range.end()); }
+template <typename T> const T& min(const T& a, const T& b) { return b < a ? b : a; }
+template <typename T> const T& max(const T& a, const T& b) { return a < b ? b : a; }
+template <typename T> T min(initializer_list<T> items) { return std::min(items); }
+template <typename T> T max(initializer_list<T> items) { return std::max(items); }
+template <typename R, typename C> auto min_element(R& range, C less) { return std::min_element(range.begin(), range.end(), less); }
+template <typename R, typename C> auto max_element(R& range, C less) { return std::max_element(range.begin(), range.end(), less); }
+template <typename R, typename P> auto find_if_not(R& range, P predicate) { return std::find_if_not(range.begin(), range.end(), predicate); }
+template <typename R> auto adjacent_find(R& range) { return std::adjacent_find(range.begin(), range.end()); }
+template <typename R, typename V> auto lower_bound(R& range, const V& value) { return std::lower_bound(range.begin(), range.end(), value); }
+template <typename R, typename V> auto upper_bound(R& range, const V& value) { return std::upper_bound(range.begin(), range.end(), value); }
+template <typename R, typename V> bool binary_search(R& range, const V& value) { return std::binary_search(range.begin(), range.end(), value); }
+template <typename R> bool is_sorted(R& range) { return std::is_sorted(range.begin(), range.end()); }
+template <typename R> auto unique(R& range) { return std::unique(range.begin(), range.end()); }
+template <typename R, typename V> auto remove(R& range, const V& value) { return std::remove(range.begin(), range.end(), value); }
+template <typename R, typename P> auto remove_if(R& range, P predicate) { return std::remove_if(range.begin(), range.end(), predicate); }
+template <typename R, typename V> void replace(R& range, const V& old, const V& replacement) { std::replace(range.begin(), range.end(), old, replacement); }
+template <typename R, typename O, typename P> O copy_if(R& range, O out, P predicate) { return std::copy_if(range.begin(), range.end(), out, predicate); }
+template <typename R, typename P> auto partition(R& range, P predicate) { return std::partition(range.begin(), range.end(), predicate); }
+template <typename R> bool next_permutation(R& range) { return std::next_permutation(range.begin(), range.end()); }
+template <typename R> bool prev_permutation(R& range) { return std::prev_permutation(range.begin(), range.end()); }
+template <typename R, typename G> void shuffle(R& range, G& generator) { std::shuffle(range.begin(), range.end(), generator); }
+template <typename R, typename F> void generate(R& range, F generator) { std::generate(range.begin(), range.end(), generator); }
+template <typename R, typename V> void iota(R& range, V value) { std::iota(range.begin(), range.end(), value); }
+template <typename R, typename O> O reverse_copy(R& range, O out) { return std::reverse_copy(range.begin(), range.end(), out); }
+
+// A container, borrowed.
+template <typename C>
+class ref_view {
+public:
+    ref_view(C& container) : container_(&container) {}
+    auto begin() { return container_->begin(); }
+    auto end() { return container_->end(); }
+
+private:
+    C* container_;
+};
+
+template <typename I, typename P>
+class filter_iterator {
+public:
+    filter_iterator(I current, I last, P* predicate) : current_(current), last_(last), predicate_(predicate) { skip(); }
+    // A class iterator's element may be a temporary, so it is returned by
+    // value; the pointer specialization below returns a reference.
+    auto operator*() { return *current_; }
+    filter_iterator& operator++() {
+        ++current_;
+        skip();
+        return *this;
+    }
+    bool operator!=(const filter_iterator& other) const { return current_ != other.current_; }
+    bool operator==(const filter_iterator& other) const { return !(current_ != other.current_); }
+
+private:
+    void skip() {
+        while (current_ != last_ && !(*predicate_)(*current_)) { ++current_; }
+    }
+    I current_;
+    I last_;
+    P* predicate_;
+};
+template <typename T, typename P>
+class filter_iterator<T*, P> {
+public:
+    filter_iterator(T* current, T* last, P* predicate) : current_(current), last_(last), predicate_(predicate) { skip(); }
+    T& operator*() { return *current_; }
+    filter_iterator& operator++() {
+        ++current_;
+        skip();
+        return *this;
+    }
+    bool operator!=(const filter_iterator& other) const { return current_ != other.current_; }
+    bool operator==(const filter_iterator& other) const { return !(current_ != other.current_); }
+
+private:
+    void skip() {
+        while (current_ != last_ && !(*predicate_)(*current_)) { ++current_; }
+    }
+    T* current_;
+    T* last_;
+    P* predicate_;
+};
+template <typename I, typename P>
+filter_iterator<I, P> karc_filter_iterator(I current, I last, P* predicate) { return filter_iterator<I, P>(current, last, predicate); }
+
+template <typename V, typename P>
+class filter_view {
+public:
+    filter_view(V base, P predicate) : base_(base), predicate_(predicate) {}
+    auto begin() { return karc_filter_iterator(base_.begin(), base_.end(), &predicate_); }
+    auto end() { return karc_filter_iterator(base_.end(), base_.end(), &predicate_); }
+
+private:
+    V base_;
+    P predicate_;
+};
+
+template <typename I, typename F>
+class transform_iterator {
+public:
+    transform_iterator(I current, F* function) : current_(current), function_(function) {}
+    auto operator*() { return (*function_)(*current_); }
+    transform_iterator& operator++() {
+        ++current_;
+        return *this;
+    }
+    bool operator!=(const transform_iterator& other) const { return current_ != other.current_; }
+    bool operator==(const transform_iterator& other) const { return !(current_ != other.current_); }
+
+private:
+    I current_;
+    F* function_;
+};
+template <typename I, typename F>
+transform_iterator<I, F> karc_transform_iterator(I current, F* function) { return transform_iterator<I, F>(current, function); }
+
+template <typename V, typename F>
+class transform_view {
+public:
+    transform_view(V base, F function) : base_(base), function_(function) {}
+    auto begin() { return karc_transform_iterator(base_.begin(), &function_); }
+    auto end() { return karc_transform_iterator(base_.end(), &function_); }
+
+private:
+    V base_;
+    F function_;
+};
+
+template <typename I>
+class take_iterator {
+public:
+    take_iterator(I current, I last, long left) : current_(current), last_(last), left_(left) {}
+    auto operator*() { return *current_; }
+    take_iterator& operator++() {
+        ++current_;
+        left_--;
+        return *this;
+    }
+    bool karc_done() const { return left_ <= 0 || !(current_ != last_); }
+    bool operator!=(const take_iterator& other) const { return karc_done() != other.karc_done(); }
+    bool operator==(const take_iterator& other) const { return karc_done() == other.karc_done(); }
+
+private:
+    I current_;
+    I last_;
+    long left_;
+};
+template <typename T>
+class take_iterator<T*> {
+public:
+    take_iterator(T* current, T* last, long left) : current_(current), last_(last), left_(left) {}
+    T& operator*() { return *current_; }
+    take_iterator& operator++() {
+        ++current_;
+        left_--;
+        return *this;
+    }
+    bool karc_done() const { return left_ <= 0 || !(current_ != last_); }
+    bool operator!=(const take_iterator& other) const { return karc_done() != other.karc_done(); }
+    bool operator==(const take_iterator& other) const { return karc_done() == other.karc_done(); }
+
+private:
+    T* current_;
+    T* last_;
+    long left_;
+};
+template <typename I>
+take_iterator<I> karc_take_iterator(I current, I last, long left) { return take_iterator<I>(current, last, left); }
+
+template <typename V>
+class take_view {
+public:
+    take_view(V base, long count) : base_(base), count_(count) {}
+    auto begin() { return karc_take_iterator(base_.begin(), base_.end(), count_); }
+    auto end() { return karc_take_iterator(base_.end(), base_.end(), 0); }
+
+private:
+    V base_;
+    long count_;
+};
+
+template <typename V>
+class drop_view {
+public:
+    drop_view(V base, long count) : base_(base), count_(count) {}
+    auto begin() {
+        auto first = base_.begin();
+        auto last = base_.end();
+        for (long i = 0; i < count_ && first != last; i++) { ++first; }
+        return first;
+    }
+    auto end() { return base_.end(); }
+
+private:
+    V base_;
+    long count_;
+};
+
+template <typename V>
+class reverse_view {
+public:
+    reverse_view(V base) : base_(base) {}
+    auto begin() { return make_reverse_iterator(base_.end()); }
+    auto end() { return make_reverse_iterator(base_.begin()); }
+
+private:
+    V base_;
+};
+
+template <typename T>
+class iota_iterator {
+public:
+    iota_iterator() : value_() {}
+    iota_iterator(T value) : value_(value) {}
+    const T& operator*() const { return value_; }
+    iota_iterator& operator++() {
+        ++value_;
+        return *this;
+    }
+    iota_iterator& operator--() {
+        --value_;
+        return *this;
+    }
+    bool operator!=(const iota_iterator& other) const { return value_ != other.value_; }
+    bool operator==(const iota_iterator& other) const { return value_ == other.value_; }
+
+private:
+    T value_;
+};
+
+// Counts up from `first`, to `last` or without end.
+template <typename T>
+class iota_view {
+public:
+    iota_view(T first, T last) : first_(first), last_(last) {}
+    iota_iterator<T> begin() const { return iota_iterator<T>(first_); }
+    iota_iterator<T> end() const { return iota_iterator<T>(last_); }
+
+private:
+    T first_;
+    T last_;
+};
+
+// The adaptors `|` applies; karc_all lifts a container into a ref_view and
+// passes a view through.
+template <typename V, typename P> filter_view<V, P> karc_all(const filter_view<V, P>& view) { return view; }
+template <typename V, typename F> transform_view<V, F> karc_all(const transform_view<V, F>& view) { return view; }
+template <typename V> take_view<V> karc_all(const take_view<V>& view) { return view; }
+template <typename V> drop_view<V> karc_all(const drop_view<V>& view) { return view; }
+template <typename V> reverse_view<V> karc_all(const reverse_view<V>& view) { return view; }
+template <typename T> iota_view<T> karc_all(const iota_view<T>& view) { return view; }
+template <typename C> ref_view<C> karc_all(C& container) { return ref_view<C>(container); }
+
+template <typename P> struct karc_filter_adaptor { P predicate; template <typename V> auto karc_apply(V base) { return filter_view<V, P>(base, predicate); } };
+template <typename F> struct karc_transform_adaptor { F function; template <typename V> auto karc_apply(V base) { return transform_view<V, F>(base, function); } };
+struct karc_take_adaptor { long count; template <typename V> auto karc_apply(V base) { return take_view<V>(base, count); } };
+struct karc_drop_adaptor { long count; template <typename V> auto karc_apply(V base) { return drop_view<V>(base, count); } };
+struct karc_reverse_adaptor { int unused; template <typename V> auto karc_apply(V base) { return reverse_view<V>(base); } };
+
+}
+
+namespace views {
+template <typename P> ranges::karc_filter_adaptor<P> filter(P predicate) { ranges::karc_filter_adaptor<P> a{predicate}; return a; }
+template <typename F> ranges::karc_transform_adaptor<F> transform(F function) { ranges::karc_transform_adaptor<F> a{function}; return a; }
+inline ranges::karc_take_adaptor take(long count) { ranges::karc_take_adaptor a{count}; return a; }
+inline ranges::karc_drop_adaptor drop(long count) { ranges::karc_drop_adaptor a{count}; return a; }
+static ranges::karc_reverse_adaptor reverse;
+template <typename T> ranges::iota_view<T> iota(T first, T last) { return ranges::iota_view<T>(first, last); }
+template <typename T> ranges::iota_view<T> iota(T first) { return ranges::iota_view<T>(first, (T)2147483647); }
+}
+
+template <typename R, typename A>
+auto operator|(R& range, A adaptor) { return adaptor.karc_apply(ranges::karc_all(range)); }
+template <typename R, typename A>
+auto operator|(const R& range, A adaptor) { return adaptor.karc_apply(ranges::karc_all(range)); }
+
+}
+
+#endif

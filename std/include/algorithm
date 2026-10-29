@@ -1,0 +1,615 @@
+// <algorithm>: the algorithms over iterator ranges. They are templates over
+// the iterator type, so they take element pointers (vector, string, array,
+// deque, map, set) and class iterators (list) alike; list iterators also
+// support + and -, walking the list. Sorting, heaps, merging and
+// permutations are in <__algorithm_sort>.
+#ifndef KARC_STD_ALGORITHM
+#define KARC_STD_ALGORITHM
+
+#include <cstddef>
+#include <utility>
+#include <iterator>
+#include <initializer_list>
+
+namespace std {
+
+// GCC's __gcd, which programs written for libstdc++ use.
+template <typename T>
+T __gcd(T a, T b) {
+    while (b != 0) {
+        T rest = a % b;
+        a = b;
+        b = rest;
+    }
+    return a;
+}
+
+struct karc_less_than {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a < b; }
+    int unused;
+};
+
+struct karc_equal {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a == b; }
+    int unused;
+};
+
+template <typename T>
+const T& min(const T& a, const T& b) {
+    if (b < a) { return b; }
+    return a;
+}
+template <typename T, typename C>
+const T& min(const T& a, const T& b, C less) {
+    if (less(b, a)) { return b; }
+    return a;
+}
+template <typename T>
+const T& max(const T& a, const T& b) {
+    if (a < b) { return b; }
+    return a;
+}
+template <typename T, typename C>
+const T& max(const T& a, const T& b, C less) {
+    if (less(a, b)) { return b; }
+    return a;
+}
+template <typename T>
+T min(initializer_list<T> items) {
+    const T* best = items.begin();
+    for (const T* at = items.begin(); at != items.end(); at++) {
+        if (*at < *best) { best = at; }
+    }
+    return *best;
+}
+template <typename T>
+T max(initializer_list<T> items) {
+    const T* best = items.begin();
+    for (const T* at = items.begin(); at != items.end(); at++) {
+        if (*best < *at) { best = at; }
+    }
+    return *best;
+}
+template <typename T, typename C>
+T min(initializer_list<T> items, C less) {
+    const T* best = items.begin();
+    for (const T* at = items.begin(); at != items.end(); at++) {
+        if (less(*at, *best)) { best = at; }
+    }
+    return *best;
+}
+template <typename T, typename C>
+T max(initializer_list<T> items, C less) {
+    const T* best = items.begin();
+    for (const T* at = items.begin(); at != items.end(); at++) {
+        if (less(*best, *at)) { best = at; }
+    }
+    return *best;
+}
+template <typename T>
+pair<T, T> minmax(const T& a, const T& b) {
+    pair<T, T> result{a, b};
+    if (b < a) {
+        result.first = b;
+        result.second = a;
+    }
+    return result;
+}
+template <typename T>
+const T& clamp(const T& value, const T& low, const T& high) {
+    if (value < low) { return low; }
+    if (high < value) { return high; }
+    return value;
+}
+
+template <typename I, typename P>
+bool all_of(I first, I last, P predicate) {
+    for (; first != last; ++first) {
+        if (!predicate(*first)) { return false; }
+    }
+    return true;
+}
+template <typename I, typename P>
+bool any_of(I first, I last, P predicate) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) { return true; }
+    }
+    return false;
+}
+template <typename I, typename P>
+bool none_of(I first, I last, P predicate) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) { return false; }
+    }
+    return true;
+}
+template <typename I, typename F>
+F for_each(I first, I last, F action) {
+    for (; first != last; ++first) { action(*first); }
+    return action;
+}
+template <typename I, typename N, typename F>
+I for_each_n(I first, N count, F action) {
+    for (N i = 0; i < count; i++) {
+        action(*first);
+        ++first;
+    }
+    return first;
+}
+template <typename I, typename V>
+long count(I first, I last, const V& value) {
+    long total = 0;
+    for (; first != last; ++first) {
+        if (*first == value) { total++; }
+    }
+    return total;
+}
+template <typename I, typename P>
+long count_if(I first, I last, P predicate) {
+    long total = 0;
+    for (; first != last; ++first) {
+        if (predicate(*first)) { total++; }
+    }
+    return total;
+}
+template <typename I, typename V>
+I find(I first, I last, const V& value) {
+    for (; first != last; ++first) {
+        if (*first == value) { return first; }
+    }
+    return last;
+}
+template <typename I, typename P>
+I find_if(I first, I last, P predicate) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) { return first; }
+    }
+    return last;
+}
+template <typename I, typename P>
+I find_if_not(I first, I last, P predicate) {
+    for (; first != last; ++first) {
+        if (!predicate(*first)) { return first; }
+    }
+    return last;
+}
+template <typename I, typename J>
+I find_first_of(I first, I last, J choices, J choicesEnd) {
+    for (; first != last; ++first) {
+        for (J c = choices; c != choicesEnd; ++c) {
+            if (*first == *c) { return first; }
+        }
+    }
+    return last;
+}
+template <typename I>
+I adjacent_find(I first, I last) {
+    if (first == last) { return last; }
+    I next = first;
+    ++next;
+    for (; next != last; ++next) {
+        if (*first == *next) { return first; }
+        first = next;
+    }
+    return last;
+}
+template <typename I, typename J>
+I search(I first, I last, J pattern, J patternEnd) {
+    for (;; ++first) {
+        I at = first;
+        J p = pattern;
+        for (;; ++at) {
+            if (p == patternEnd) { return first; }
+            if (at == last) { return last; }
+            if (!(*at == *p)) { break; }
+            ++p;
+        }
+    }
+    return last;
+}
+template <typename I, typename J>
+I find_end(I first, I last, J pattern, J patternEnd) {
+    if (pattern == patternEnd) { return last; }
+    I found = last;
+    for (;;) {
+        I at = search(first, last, pattern, patternEnd);
+        if (at == last) { return found; }
+        found = at;
+        first = at;
+        ++first;
+    }
+    return found;
+}
+template <typename I, typename N, typename V>
+I search_n(I first, I last, N count, const V& value) {
+    for (; first != last; ++first) {
+        I at = first;
+        N run = 0;
+        while (at != last && run < count && *at == value) {
+            ++at;
+            run++;
+        }
+        if (run == count) { return first; }
+    }
+    return last;
+}
+template <typename I, typename J>
+pair<I, J> mismatch(I first, I last, J other) {
+    while (first != last && *first == *other) {
+        ++first;
+        ++other;
+    }
+    pair<I, J> result{first, other};
+    return result;
+}
+template <typename I, typename J>
+bool equal(I first, I last, J other) {
+    for (; first != last; ++first) {
+        if (!(*first == *other)) { return false; }
+        ++other;
+    }
+    return true;
+}
+template <typename I, typename J>
+bool equal(I first, I last, J other, J otherEnd) {
+    for (; first != last; ++first) {
+        if (other == otherEnd || !(*first == *other)) { return false; }
+        ++other;
+    }
+    return other == otherEnd;
+}
+template <typename I, typename J>
+bool lexicographical_compare(I first, I last, J other, J otherEnd) {
+    for (; first != last; ++first) {
+        if (other == otherEnd || *other < *first) { return false; }
+        if (*first < *other) { return true; }
+        ++other;
+    }
+    return other != otherEnd;
+}
+
+template <typename I, typename O>
+O copy(I first, I last, O out) {
+    for (; first != last; ++first) {
+        *out = *first;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename O, typename P>
+O copy_if(I first, I last, O out, P predicate) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) {
+            *out = *first;
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I, typename N, typename O>
+O copy_n(I first, N count, O out) {
+    for (N i = 0; i < count; i++) {
+        *out = *first;
+        ++first;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename O>
+O copy_backward(I first, I last, O outEnd) {
+    while (first != last) {
+        --last;
+        --outEnd;
+        *outEnd = *last;
+    }
+    return outEnd;
+}
+template <typename I, typename O>
+O move(I first, I last, O out) { return copy(first, last, out); }
+template <typename I, typename O>
+O move_backward(I first, I last, O outEnd) { return copy_backward(first, last, outEnd); }
+template <typename I, typename V>
+void fill(I first, I last, const V& value) {
+    for (; first != last; ++first) { *first = value; }
+}
+template <typename I, typename N, typename V>
+I fill_n(I first, N count, const V& value) {
+    for (N i = 0; i < count; i++) {
+        *first = value;
+        ++first;
+    }
+    return first;
+}
+template <typename I, typename O, typename F>
+O transform(I first, I last, O out, F operation) {
+    for (; first != last; ++first) {
+        *out = operation(*first);
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename J, typename O, typename F>
+O transform(I first, I last, J other, O out, F operation) {
+    for (; first != last; ++first) {
+        *out = operation(*first, *other);
+        ++other;
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename G>
+void generate(I first, I last, G generator) {
+    for (; first != last; ++first) { *first = generator(); }
+}
+template <typename I, typename N, typename G>
+I generate_n(I first, N count, G generator) {
+    for (N i = 0; i < count; i++) {
+        *first = generator();
+        ++first;
+    }
+    return first;
+}
+template <typename I, typename V>
+void replace(I first, I last, const V& old, const V& replacement) {
+    for (; first != last; ++first) {
+        if (*first == old) { *first = replacement; }
+    }
+}
+template <typename I, typename P, typename V>
+void replace_if(I first, I last, P predicate, const V& replacement) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) { *first = replacement; }
+    }
+}
+template <typename I, typename O, typename V>
+O replace_copy(I first, I last, O out, const V& old, const V& replacement) {
+    for (; first != last; ++first) {
+        if (*first == old) { *out = replacement; } else { *out = *first; }
+        ++out;
+    }
+    return out;
+}
+template <typename I, typename V>
+I remove(I first, I last, const V& value) {
+    I out = first;
+    for (; first != last; ++first) {
+        if (!(*first == value)) {
+            if (out != first) { *out = *first; }
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I, typename P>
+I remove_if(I first, I last, P predicate) {
+    I out = first;
+    for (; first != last; ++first) {
+        if (!predicate(*first)) {
+            if (out != first) { *out = *first; }
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I, typename O, typename V>
+O remove_copy(I first, I last, O out, const V& value) {
+    for (; first != last; ++first) {
+        if (!(*first == value)) {
+            *out = *first;
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I, typename O, typename P>
+O remove_copy_if(I first, I last, O out, P predicate) {
+    for (; first != last; ++first) {
+        if (!predicate(*first)) {
+            *out = *first;
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I>
+I unique(I first, I last) {
+    if (first == last) { return last; }
+    I out = first;
+    ++first;
+    for (; first != last; ++first) {
+        if (!(*out == *first)) {
+            ++out;
+            if (out != first) { *out = *first; }
+        }
+    }
+    ++out;
+    return out;
+}
+template <typename I, typename P>
+I unique(I first, I last, P same) {
+    if (first == last) { return last; }
+    I out = first;
+    ++first;
+    for (; first != last; ++first) {
+        if (!same(*out, *first)) {
+            ++out;
+            if (out != first) { *out = *first; }
+        }
+    }
+    ++out;
+    return out;
+}
+template <typename I, typename O>
+O unique_copy(I first, I last, O out) {
+    if (first == last) { return out; }
+    I kept = first;
+    *out = *first;
+    ++out;
+    for (++first; first != last; ++first) {
+        if (!(*kept == *first)) {
+            *out = *first;
+            ++out;
+            kept = first;
+        }
+    }
+    return out;
+}
+template <typename I, typename J>
+void iter_swap(I a, J b) { swap(*a, *b); }
+template <typename I, typename J>
+J swap_ranges(I first, I last, J other) {
+    for (; first != last; ++first) {
+        swap(*first, *other);
+        ++other;
+    }
+    return other;
+}
+template <typename I>
+void reverse(I first, I last) {
+    while (first != last) {
+        --last;
+        if (first == last) { return; }
+        swap(*first, *last);
+        ++first;
+    }
+}
+template <typename I, typename O>
+O reverse_copy(I first, I last, O out) {
+    while (first != last) {
+        --last;
+        *out = *last;
+        ++out;
+    }
+    return out;
+}
+// Rotates [first, last) so middle comes first, by three reversals.
+template <typename I>
+I rotate(I first, I middle, I last) {
+    if (first == middle) { return last; }
+    if (middle == last) { return first; }
+    I result = first + (last - middle);
+    reverse(first, middle);
+    reverse(middle, last);
+    reverse(first, last);
+    return result;
+}
+template <typename I, typename O>
+O rotate_copy(I first, I middle, I last, O out) {
+    out = copy(middle, last, out);
+    return copy(first, middle, out);
+}
+template <typename I, typename G>
+void shuffle(I first, I last, G& generator) {
+    long n = last - first;
+    for (long i = n - 1; i > 0; i--) {
+        long j = (long)(generator() % (unsigned long)(i + 1));
+        swap(*(first + i), *(first + j));
+    }
+}
+
+template <typename I, typename P>
+bool is_partitioned(I first, I last, P predicate) {
+    for (; first != last && predicate(*first); ++first) {}
+    for (; first != last; ++first) {
+        if (predicate(*first)) { return false; }
+    }
+    return true;
+}
+template <typename I, typename P>
+I partition(I first, I last, P predicate) {
+    I out = first;
+    for (; first != last; ++first) {
+        if (predicate(*first)) {
+            if (out != first) { swap(*out, *first); }
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename I, typename O, typename U, typename P>
+pair<O, U> partition_copy(I first, I last, O yes, U no, P predicate) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) {
+            *yes = *first;
+            ++yes;
+        } else {
+            *no = *first;
+            ++no;
+        }
+    }
+    pair<O, U> result{yes, no};
+    return result;
+}
+template <typename I, typename O, typename P, typename V>
+O replace_copy_if(I first, I last, O out, P predicate, const V& replacement) {
+    for (; first != last; ++first) {
+        if (predicate(*first)) { *out = replacement; } else { *out = *first; }
+        ++out;
+    }
+    return out;
+}
+// Moves the elements `count` places toward the front, returning the new
+// end; toward the back, returning the new beginning.
+template <typename I>
+I shift_left(I first, I last, long count) {
+    if (count <= 0) { return last; }
+    if (count >= last - first) { return first; }
+    I from = first + count;
+    for (; from != last; ++from) {
+        *first = std::move(*from);
+        ++first;
+    }
+    return first;
+}
+template <typename I>
+I shift_right(I first, I last, long count) {
+    if (count <= 0) { return first; }
+    if (count >= last - first) { return last; }
+    I to = last;
+    I from = last - count;
+    while (from != first) {
+        --from;
+        --to;
+        *to = std::move(*from);
+    }
+    return first + count;
+}
+// Selection sampling: each element is taken with the chance that fills the
+// remaining places, so the sample keeps the input order.
+template <typename I, typename O, typename G>
+O sample(I first, I last, O out, long count, G& generator) {
+    long left = last - first;
+    for (; first != last && count > 0; ++first) {
+        unsigned long draw = (unsigned long)generator() % (unsigned long)left;
+        if ((long)draw < count) {
+            *out = *first;
+            ++out;
+            count--;
+        }
+        left--;
+    }
+    return out;
+}
+template <typename I, typename P>
+I partition_point(I first, I last, P predicate) {
+    long count = last - first;
+    while (count > 0) {
+        long half = count / 2;
+        I middle = first + half;
+        if (predicate(*middle)) {
+            first = middle + 1;
+            count = count - half - 1;
+        } else {
+            count = half;
+        }
+    }
+    return first;
+}
+
+}
+
+#include <__algorithm_sort>
+
+#endif

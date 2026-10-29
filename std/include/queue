@@ -1,0 +1,110 @@
+// <queue>: std::queue over a deque (or another container with front,
+// push_back and pop_front), and std::priority_queue, a binary heap over a
+// vector ordered by C, largest first under the default less.
+#ifndef KARC_STD_QUEUE
+#define KARC_STD_QUEUE
+
+#include <cstddef>
+#include <deque>
+#include <vector>
+#include <utility>
+#include <functional>
+
+namespace std {
+
+template <typename T, typename S = deque<T>>
+class queue {
+public:
+    typedef T value_type;
+    typedef S container_type;
+    typedef size_t size_type;
+
+    queue() {}
+    explicit queue(const S& items) : items_(items) {}
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    T& front() { return items_.front(); }
+    T& back() { return items_.back(); }
+    void push(const T& value) { items_.push_back(value); }
+    template <typename... Args>
+    void emplace(Args&&... args) { items_.emplace_back(std::forward<Args>(args)...); }
+    void pop() { items_.pop_front(); }
+    void swap(queue& other) { items_.swap(other.items_); }
+
+private:
+    S items_;
+};
+
+template <typename T, typename S = vector<T>, typename C = less<T>>
+class priority_queue {
+public:
+    typedef T value_type;
+    typedef S container_type;
+    typedef C value_compare;
+    typedef size_t size_type;
+
+    priority_queue() {}
+    explicit priority_queue(const C& less) : less_(less) {}
+    priority_queue(const C& less, const S& items) : items_(items), less_(less) { heapify(); }
+    template <typename I>
+    priority_queue(I first, I last) {
+        for (; first != last; ++first) { items_.push_back(*first); }
+        heapify();
+    }
+    template <typename I>
+    priority_queue(I first, I last, const C& less) : less_(less) {
+        for (; first != last; ++first) { items_.push_back(*first); }
+        heapify();
+    }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    const T& top() const { return items_[0]; }
+    void push(const T& value) {
+        items_.push_back(value);
+        siftUp(items_.size() - 1);
+    }
+    template <typename... Args>
+    void emplace(Args&&... args) { push(T(std::forward<Args>(args)...)); }
+    void pop() {
+        size_t last = items_.size() - 1;
+        std::swap(items_[0], items_[last]);
+        items_.pop_back();
+        siftDown(0);
+    }
+    void swap(priority_queue& other) {
+        items_.swap(other.items_);
+        std::swap(less_, other.less_);
+    }
+
+private:
+    void heapify() {
+        for (size_t i = items_.size() / 2; i > 0; i--) { siftDown(i - 1); }
+    }
+    void siftUp(size_t child) {
+        while (child > 0) {
+            size_t parent = (child - 1) / 2;
+            if (!less_(items_[parent], items_[child])) { return; }
+            std::swap(items_[parent], items_[child]);
+            child = parent;
+        }
+    }
+    void siftDown(size_t parent) {
+        size_t count = items_.size();
+        while (true) {
+            size_t largest = parent;
+            size_t left = parent * 2 + 1;
+            size_t right = left + 1;
+            if (left < count && less_(items_[largest], items_[left])) { largest = left; }
+            if (right < count && less_(items_[largest], items_[right])) { largest = right; }
+            if (largest == parent) { return; }
+            std::swap(items_[parent], items_[largest]);
+            parent = largest;
+        }
+    }
+    S items_;
+    C less_;
+};
+
+}
+
+#endif

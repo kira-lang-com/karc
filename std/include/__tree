@@ -1,0 +1,370 @@
+// Part of <map> and <set>: an AVL tree of nodes with parent links, so
+// iterators walk it in key order and stay valid until their node is erased.
+// A header node stands for end(): its left child is the root. Nodes come
+// from the container's allocator.
+#ifndef KARC_STD_TREE
+#define KARC_STD_TREE
+
+#include <cstddef>
+#include <cstdlib>
+#include <new>
+#include <utility>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <cstring>
+#include <__allocator>
+
+namespace std {
+
+template <typename V>
+struct karc_tree_node {
+    karc_tree_node<V>* left;
+    karc_tree_node<V>* right;
+    karc_tree_node<V>* parent;
+    // The subtree's height; -1 marks the header.
+    int height;
+    V value;
+};
+
+template <typename V>
+karc_tree_node<V>* karc_tree_leftmost(karc_tree_node<V>* at) {
+    while (at->left != 0) { at = at->left; }
+    return at;
+}
+template <typename V>
+karc_tree_node<V>* karc_tree_rightmost(karc_tree_node<V>* at) {
+    while (at->right != 0) { at = at->right; }
+    return at;
+}
+template <typename V>
+karc_tree_node<V>* karc_tree_next(karc_tree_node<V>* at) {
+    if (at->right != 0) { return karc_tree_leftmost(at->right); }
+    karc_tree_node<V>* parent = at->parent;
+    while (parent->height != -1 && at == parent->right) {
+        at = parent;
+        parent = parent->parent;
+    }
+    return parent;
+}
+template <typename V>
+karc_tree_node<V>* karc_tree_previous(karc_tree_node<V>* at) {
+    if (at->height == -1) { return karc_tree_rightmost(at->left); }
+    if (at->left != 0) { return karc_tree_rightmost(at->left); }
+    karc_tree_node<V>* parent = at->parent;
+    while (parent->height != -1 && at == parent->left) {
+        at = parent;
+        parent = parent->parent;
+    }
+    return parent;
+}
+
+template <typename V>
+class karc_tree_iterator {
+public:
+    karc_tree_iterator() : node_(0) {}
+    karc_tree_iterator(karc_tree_node<V>* node) : node_(node) {}
+    V& operator*() const { return node_->value; }
+    V* operator->() const { return &node_->value; }
+    karc_tree_iterator& operator++() {
+        node_ = karc_tree_next(node_);
+        return *this;
+    }
+    karc_tree_iterator operator++(int) {
+        karc_tree_iterator old(node_);
+        node_ = karc_tree_next(node_);
+        return old;
+    }
+    karc_tree_iterator& operator--() {
+        node_ = karc_tree_previous(node_);
+        return *this;
+    }
+    karc_tree_iterator operator--(int) {
+        karc_tree_iterator old(node_);
+        node_ = karc_tree_previous(node_);
+        return old;
+    }
+    bool operator==(const karc_tree_iterator& other) const { return node_ == other.node_; }
+    bool operator!=(const karc_tree_iterator& other) const { return node_ != other.node_; }
+    karc_tree_node<V>* node_;
+};
+
+// The key of a stored value: the value itself in a set, its first in a map.
+template <typename T>
+struct karc_set_key {
+    const T& operator()(const T& value) const { return value; }
+    int unused;
+};
+template <typename K, typename V>
+struct karc_map_key {
+    const K& operator()(const pair<K, V>& entry) const { return entry.first; }
+    int unused;
+};
+
+// Values V ordered by C on their keys K, which KeyOf reads. Unique inserts
+// refuse an equal key; multi inserts go after the equal keys already there.
+template <typename K, typename V, typename KeyOf, typename C, typename A>
+class karc_tree {
+public:
+    karc_tree() : header_(0), size_(0) { init(); }
+    karc_tree(const C& less) : header_(0), size_(0), less_(less) { init(); }
+    karc_tree(const C& less, const A& alloc) : header_(0), size_(0), less_(less), alloc_(alloc) { init(); }
+    karc_tree(const karc_tree& other) : header_(0), size_(0), less_(other.less_), alloc_(other.alloc_) {
+        init();
+        copyFrom(other);
+    }
+    karc_tree(karc_tree&& other) : header_(other.header_), size_(other.size_), less_(other.less_), alloc_(other.alloc_) {
+        other.header_ = 0;
+        other.size_ = 0;
+        other.init();
+    }
+    ~karc_tree() {
+        clear();
+        freeNode(header_);
+    }
+    A get_allocator() const { return alloc_; }
+    karc_tree& operator=(const karc_tree& other) {
+        if (this == &other) { return *this; }
+        clear();
+        less_ = other.less_;
+        copyFrom(other);
+        return *this;
+    }
+    karc_tree& operator=(karc_tree&& other) {
+        swap(other);
+        return *this;
+    }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    C key_comp() const { return less_; }
+    karc_tree_iterator<V> begin() const {
+        if (header_->left == 0) { return karc_tree_iterator<V>(header_); }
+        return karc_tree_iterator<V>(karc_tree_leftmost(header_->left));
+    }
+    karc_tree_iterator<V> end() const { return karc_tree_iterator<V>(header_); }
+
+    karc_tree_iterator<V> lower_bound(const K& key) const {
+        karc_tree_node<V>* result = header_;
+        karc_tree_node<V>* at = header_->left;
+        while (at != 0) {
+            if (!less_(key_(at->value), key)) {
+                result = at;
+                at = at->left;
+            } else {
+                at = at->right;
+            }
+        }
+        return karc_tree_iterator<V>(result);
+    }
+    karc_tree_iterator<V> upper_bound(const K& key) const {
+        karc_tree_node<V>* result = header_;
+        karc_tree_node<V>* at = header_->left;
+        while (at != 0) {
+            if (less_(key, key_(at->value))) {
+                result = at;
+                at = at->left;
+            } else {
+                at = at->right;
+            }
+        }
+        return karc_tree_iterator<V>(result);
+    }
+    karc_tree_iterator<V> find(const K& key) const {
+        karc_tree_iterator<V> found = lower_bound(key);
+        if (found.node_ != header_ && !less_(key, key_(found.node_->value))) { return found; }
+        return end();
+    }
+    size_t count(const K& key) const {
+        size_t total = 0;
+        karc_tree_iterator<V> last = upper_bound(key);
+        for (karc_tree_iterator<V> at = lower_bound(key); at != last; ++at) { total++; }
+        return total;
+    }
+
+    pair<karc_tree_iterator<V>, bool> insertUnique(const V& value) {
+        karc_tree_node<V>* parent = header_;
+        karc_tree_node<V>* at = header_->left;
+        bool goLeft = true;
+        while (at != 0) {
+            parent = at;
+            if (less_(key_(value), key_(at->value))) {
+                goLeft = true;
+                at = at->left;
+            } else if (less_(key_(at->value), key_(value))) {
+                goLeft = false;
+                at = at->right;
+            } else {
+                return pair<karc_tree_iterator<V>, bool>(karc_tree_iterator<V>(at), false);
+            }
+        }
+        return pair<karc_tree_iterator<V>, bool>(karc_tree_iterator<V>(link(parent, goLeft, value)), true);
+    }
+    karc_tree_iterator<V> insertMulti(const V& value) {
+        karc_tree_node<V>* parent = header_;
+        karc_tree_node<V>* at = header_->left;
+        bool goLeft = true;
+        while (at != 0) {
+            parent = at;
+            goLeft = less_(key_(value), key_(at->value));
+            if (goLeft) { at = at->left; } else { at = at->right; }
+        }
+        return karc_tree_iterator<V>(link(parent, goLeft, value));
+    }
+    // Erases the node at `position`, returning the one after it.
+    karc_tree_iterator<V> erase(karc_tree_iterator<V> position) {
+        karc_tree_node<V>* doomed = position.node_;
+        karc_tree_node<V>* next = karc_tree_next(doomed);
+        karc_tree_node<V>* from = 0;
+        if (doomed->left != 0 && doomed->right != 0) {
+            // The successor takes the doomed node's place in the tree.
+            karc_tree_node<V>* heir = next;
+            if (heir->parent == doomed) {
+                from = heir;
+            } else {
+                from = heir->parent;
+                from->left = heir->right;
+                if (heir->right != 0) { heir->right->parent = from; }
+                heir->right = doomed->right;
+                heir->right->parent = heir;
+            }
+            heir->left = doomed->left;
+            heir->left->parent = heir;
+            heir->parent = doomed->parent;
+            heir->height = doomed->height;
+            replaceChild(doomed->parent, doomed, heir);
+        } else {
+            karc_tree_node<V>* child = doomed->left != 0 ? doomed->left : doomed->right;
+            if (child != 0) { child->parent = doomed->parent; }
+            replaceChild(doomed->parent, doomed, child);
+            from = doomed->parent;
+        }
+        doomed->value.~V();
+        freeNode(doomed);
+        size_--;
+        rebalance(from);
+        return karc_tree_iterator<V>(next);
+    }
+    size_t eraseKey(const K& key) {
+        size_t total = 0;
+        karc_tree_iterator<V> last = upper_bound(key);
+        karc_tree_iterator<V> at = lower_bound(key);
+        while (at != last) {
+            at = erase(at);
+            total++;
+        }
+        return total;
+    }
+    void clear() {
+        destroy(header_->left);
+        header_->left = 0;
+        size_ = 0;
+    }
+    void swap(karc_tree& other) {
+        karc_tree_node<V>* header = header_;
+        header_ = other.header_;
+        other.header_ = header;
+        size_t size = size_;
+        size_ = other.size_;
+        other.size_ = size;
+        C less = less_;
+        less_ = other.less_;
+        other.less_ = less;
+        A alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+    }
+
+private:
+    void init() {
+        header_ = newNode();
+        header_->height = -1;
+    }
+    void copyFrom(const karc_tree& other) {
+        for (karc_tree_iterator<V> at = other.begin(); at != other.end(); ++at) { insertMulti(*at); }
+    }
+    void destroy(karc_tree_node<V>* at) {
+        if (at == 0) { return; }
+        destroy(at->left);
+        destroy(at->right);
+        at->value.~V();
+        freeNode(at);
+    }
+    karc_tree_node<V>* link(karc_tree_node<V>* parent, bool goLeft, const V& value) {
+        karc_tree_node<V>* added = newNode();
+        new (&added->value) V(value);
+        added->parent = parent;
+        added->height = 1;
+        if (parent == header_ || goLeft) { parent->left = added; } else { parent->right = added; }
+        size_++;
+        rebalance(parent);
+        return added;
+    }
+    // A node is allocated from A as enough of its values to hold it.
+    typedef typename A::value_type Unit;
+    static size_t nodeUnits() { return (sizeof(karc_tree_node<V>) + sizeof(Unit) - 1) / sizeof(Unit); }
+    karc_tree_node<V>* newNode() {
+        Unit* raw = alloc_.allocate(nodeUnits());
+        memset(raw, 0, nodeUnits() * sizeof(Unit));
+        return (karc_tree_node<V>*)raw;
+    }
+    void freeNode(karc_tree_node<V>* node) { alloc_.deallocate((Unit*)node, nodeUnits()); }
+    void replaceChild(karc_tree_node<V>* parent, karc_tree_node<V>* old, karc_tree_node<V>* replacement) {
+        if (parent == header_ || parent->left == old) { parent->left = replacement; } else { parent->right = replacement; }
+    }
+    static int heightOf(karc_tree_node<V>* at) { return at == 0 ? 0 : at->height; }
+    static void measure(karc_tree_node<V>* at) {
+        int left = heightOf(at->left);
+        int right = heightOf(at->right);
+        at->height = (left > right ? left : right) + 1;
+    }
+    karc_tree_node<V>* rotateLeft(karc_tree_node<V>* at) {
+        karc_tree_node<V>* up = at->right;
+        at->right = up->left;
+        if (up->left != 0) { up->left->parent = at; }
+        up->parent = at->parent;
+        replaceChild(at->parent, at, up);
+        up->left = at;
+        at->parent = up;
+        measure(at);
+        measure(up);
+        return up;
+    }
+    karc_tree_node<V>* rotateRight(karc_tree_node<V>* at) {
+        karc_tree_node<V>* up = at->left;
+        at->left = up->right;
+        if (up->right != 0) { up->right->parent = at; }
+        up->parent = at->parent;
+        replaceChild(at->parent, at, up);
+        up->right = at;
+        at->parent = up;
+        measure(at);
+        measure(up);
+        return up;
+    }
+    // Restores the height balance from `at` up to the root.
+    void rebalance(karc_tree_node<V>* at) {
+        while (at != header_) {
+            measure(at);
+            int balance = heightOf(at->left) - heightOf(at->right);
+            if (balance > 1) {
+                if (heightOf(at->left->left) < heightOf(at->left->right)) { rotateLeft(at->left); }
+                at = rotateRight(at);
+            } else if (balance < -1) {
+                if (heightOf(at->right->right) < heightOf(at->right->left)) { rotateRight(at->right); }
+                at = rotateLeft(at);
+            }
+            at = at->parent;
+        }
+    }
+
+    karc_tree_node<V>* header_;
+    size_t size_;
+    C less_;
+    KeyOf key_;
+    A alloc_;
+};
+
+}
+
+#endif

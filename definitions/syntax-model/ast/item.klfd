@@ -1,0 +1,118 @@
+struct CppField {
+    let name: String
+    let nameSpan: Span
+    let declType: String
+    // The default member initializer, `int count = 0;`; none when absent.
+    let fallback: ExprId
+}
+struct CppParam {
+    let name: String
+    let declType: String
+    let reference: Bool
+    // The default argument, or none.
+    let fallback: ExprId
+    // Declared `&&`: preferred for temporaries and std::move.
+    let rvalue: Bool
+}
+struct CppTypedef {
+    let name: String
+    let declType: String
+}
+// A bit-field member of class `owner`: `width` bits at bit `offset` of a
+// `declType` unit that starts `unitOffset` bytes from the start of the
+// storage member `storage` (before it when negative).
+// A bit-field member of class `owner`: `width` bits at bit `offset` of a
+// `declType` unit that starts `unitOffset` bytes from the start of the
+// storage member `storage` (before it when negative).
+struct CppBitField {
+    let owner: String
+    let name: String
+    let storage: String
+    let declType: String
+    let unitOffset: Int
+    let offset: Int
+    let width: Int
+    // A default member initializer, or none.
+    let fallback: ExprId
+}
+struct CppEnumConstant {
+    let name: String
+    let value: Int
+}
+struct CppFunction {
+    let name: String
+    let nameSpan: Span
+    let parameters: [CppParam]
+    let returnType: String
+    let body: [StmtId]
+    let isProto: Bool
+    let internal: Bool
+    // Declared inside `extern "C"`: named by its identifier alone, so it links
+    // against a platform C symbol.
+    let cLinkage: Bool
+    // The declared result is a reference: the function returns an address that
+    // callers read or write through.
+    let refReturn: Bool
+    // A `const` member function: an overload apart from the non-const one.
+    let isConst: Bool
+    let span: Span
+}
+struct CppGlobal {
+    let name: String
+    let nameSpan: Span
+    let declType: String
+    let arraySize: Int
+    let initValue: Int
+    let hasInit: Bool
+    let initList: [Int]
+    let internal: Bool
+    let span: Span
+}
+struct CppStruct {
+    let name: String
+    let nameSpan: Span
+    let fields: [CppField]
+    let internal: Bool
+    // An instance of a class template: its record is named after the instance.
+    let instance: Bool
+    let span: Span
+}
+// A template: its parameters and the tokens of the declaration it
+// introduces, substituted and parsed again for each instance.
+// A template: its parameters and the tokens of the declaration it
+// introduces, substituted and parsed again for each instance.
+struct CppTemplate {
+    let name: String
+    let params: [String]
+    let valueParams: [Bool]
+    let defaults: [[Token]]
+    let tokens: [Token]
+    let isClass: Bool
+    // The class a member function template belongs to, "" for others.
+    let owner: String
+    // The index of the parameter pack, the last parameter; -1 for none.
+    let pack: Int
+}
+struct CppSpecialization {
+    // The template specialized, the specialization's own parameters (none
+    // for an explicit one), the argument patterns and the declaration's
+    // tokens without them.
+    let template: String
+    let params: [String]
+    let patterns: [[Token]]
+    let tokens: [Token]
+}
+struct CppInstance {
+    let name: String
+    let template: String
+    let arguments: [String]
+}
+struct UsingDirective {
+    let scope: String
+    let target: String
+    let order: Int
+}
+struct BaseRelation {
+    let owner: String
+    let base: String
+}

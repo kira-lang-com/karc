@@ -1,0 +1,140 @@
+// Hash indexes over the lowering's names, so lookups do not scan every
+// function: declared slots by the name before `#`, tree functions by bare
+// name.
+
+// The part of a slot name before its `#suffix`.
+function slotBase(name: String) -> String {
+    let count = utf8Count(name)
+    var i = count
+    while i > 0 {
+        i = i - 1
+        if utf8Byte(name, i) == 35 { return utf8Slice(name, 0, i) }
+    }
+    return name
+}
+function slotBucket(name: String) -> Int {
+    return sourceHash(slotBase(name)) % symbolBucketCount()
+}
+// Declares a lowered function slot and links it into the name hash.
+function addFunctionSlot(state: borrow mut Lowerer, name: String, parameters: [String], result: String, handle: KirFunctionBuilder, noThrow: Bool) -> Int {
+    if state.slotHeads.count == 0 {
+        for _ in 0..symbolBucketCount() { state.slotHeads.append(-1) }
+    }
+    let bucket = slotBucket(name)
+    let index = state.functionSlots.count
+    state.functionSlots.append(FunctionSlot {
+        name = name,
+        next = state.slotHeads[bucket],
+        parameters = parameters,
+        result = result,
+        handle = handle,
+        noThrow = noThrow
+    })
+    state.slotHeads[bucket] = index
+    return index
+}
+// Indexes the tree's functions added since the last call by bare name.
+function indexFunctions(tree: borrow mut CppTree) {
+    if tree.nameHeads.count == 0 {
+        for _ in 0..symbolBucketCount() { tree.nameHeads.append(-1) }
+        for _ in 0..declarationBucketCount() { tree.ownerHeads.append(-1) }
+    }
+    while tree.functionIndex.count < tree.functions.count {
+        let i = tree.functionIndex.count
+        let name = tree.functions[i].name
+        let bare = unqualifiedName(name)
+        let owner = methodOwnerType(tree, name)
+        let bucket = sourceHash(bare) % symbolBucketCount()
+        let ownerBucket = sourceHash(owner) % declarationBucketCount()
+        tree.functionIndex.append(FunctionIndexEntry {
+            bare = bare,
+            owner = owner,
+            nameNext = tree.nameHeads[bucket],
+            ownerNext = tree.ownerHeads[ownerBucket]
+        })
+        tree.nameHeads[bucket] = i
+        tree.ownerHeads[ownerBucket] = i
+    }
+}
+// Indexes the structs added since the last call by name.
+function indexStructs(tree: borrow mut CppTree) {
+    if tree.structHeads.count == 0 {
+        for _ in 0..declarationBucketCount() { tree.structHeads.append(-1) }
+    }
+    while tree.structIndex.count < tree.structs.count {
+        let i = tree.structIndex.count
+        let bucket = sourceHash(tree.structs[i].name) % declarationBucketCount()
+        tree.structIndex.append(StructIndexEntry { next = tree.structHeads[bucket] })
+        tree.structHeads[bucket] = i
+    }
+}
+// The first struct named exactly `name`, or -1; any not indexed yet are
+// scanned.
+function structNamed(tree: CppTree, name: String) -> Int {
+    var found = -1
+    if tree.structHeads.count > 0 {
+        var i = tree.structHeads[sourceHash(name) % declarationBucketCount()]
+        while i >= 0 {
+            if tree.structs[i].name == name { found = i }
+            i = tree.structIndex[i].next
+        }
+    }
+    if found >= 0 { return found }
+    for i in tree.structIndex.count..tree.structs.count {
+        if tree.structs[i].name == name { return i }
+    }
+    return -1
+}
+// The member functions of class `owner`, in tree order; any not indexed
+// yet are scanned.
+function functionsOwnedIn(tree: CppTree, owner: String) -> [Int] {
+    var newestFirst: [Int] = []
+    if tree.ownerHeads.count > 0 {
+        var i = tree.ownerHeads[sourceHash(owner) % declarationBucketCount()]
+        while i >= 0 {
+            if tree.functionIndex[i].owner == owner { newestFirst.append(i) }
+            i = tree.functionIndex[i].ownerNext
+        }
+    }
+    var found: [Int] = []
+    var k = newestFirst.count
+    while k > 0 {
+        k = k - 1
+        found.append(newestFirst[k])
+    }
+    for i in tree.functionIndex.count..tree.functions.count {
+        if methodOwnerType(tree, tree.functions[i].name) == owner { found.append(i) }
+    }
+    return found
+}
+// The tree functions named `bare` (without scope), in tree order; any not
+// indexed yet are scanned.
+function functionsNamedIn(tree: CppTree, bare: String) -> [Int] {
+    var newestFirst: [Int] = []
+    if tree.nameHeads.count > 0 {
+        var i = tree.nameHeads[sourceHash(bare) % symbolBucketCount()]
+        while i >= 0 {
+            if tree.functionIndex[i].bare == bare { newestFirst.append(i) }
+            i = tree.functionIndex[i].nameNext
+        }
+    }
+    var found: [Int] = []
+    var k = newestFirst.count
+    while k > 0 {
+        k = k - 1
+        found.append(newestFirst[k])
+    }
+    for i in tree.functionIndex.count..tree.functions.count {
+        if unqualifiedName(tree.functions[i].name) == bare { found.append(i) }
+    }
+    return found
+}
+function ownerOf(tree: CppTree, index: Int) -> String {
+    if index < tree.functionIndex.count { return tree.functionIndex[index].owner }
+    return methodOwnerType(tree, tree.functions[index].name)
+}
+function functionsNamed(state: borrow mut Lowerer, bare: String) -> [Int] {
+    indexFunctions(state.tree)
+    indexStructs(state.tree)
+    return functionsNamedIn(state.tree, bare)
+}

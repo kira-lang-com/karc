@@ -1,0 +1,61 @@
+// <condition_variable>: waiting runs the tasks other threads queued (see
+// <__thread_tasks>) until the predicate holds; with nothing left to run
+// while it still does not, the program would wait forever, so it
+// terminates.
+#ifndef KARC_STD_CONDITION_VARIABLE
+#define KARC_STD_CONDITION_VARIABLE
+
+#include <mutex>
+#include <exception>
+#include <chrono>
+#include <__thread_tasks>
+
+namespace std {
+
+enum class cv_status { no_timeout, timeout };
+
+class condition_variable {
+public:
+    condition_variable() : unused_(0) {}
+    void notify_one() {}
+    void notify_all() {}
+    template <typename L>
+    void wait(L& lock) {
+        lock.unlock();
+        karc_task_run_one();
+        lock.lock();
+    }
+    template <typename L, typename P>
+    void wait(L& lock, P ready) {
+        while (!ready()) {
+            lock.unlock();
+            bool ran = karc_task_run_one();
+            lock.lock();
+            if (!ran && !ready()) { terminate(); }
+        }
+    }
+    template <typename L, typename D>
+    cv_status wait_for(L& lock, const D& duration) {
+        wait(lock);
+        return cv_status::no_timeout;
+    }
+    template <typename L, typename D, typename P>
+    bool wait_for(L& lock, const D& duration, P ready) {
+        while (!ready()) {
+            lock.unlock();
+            bool ran = karc_task_run_one();
+            lock.lock();
+            if (!ran) { return ready(); }
+        }
+        return true;
+    }
+
+private:
+    int unused_;
+};
+
+typedef condition_variable condition_variable_any;
+
+}
+
+#endif

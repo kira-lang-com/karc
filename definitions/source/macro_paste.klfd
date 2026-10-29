@@ -1,0 +1,32 @@
+function pasteToken(state: borrow mut Preprocessor, left: Token, right: Token, at: Token) -> Token {
+    if left.kind == .Placemark { return right }
+    if right.kind == .Placemark { return left }
+    let spelling = joinText([sourceSpelling(left), sourceSpelling(right)])
+    let lexed = lexUnspliced(spelling)
+    if lexed.error != "" || lexed.tokens.count != 2 || lexed.tokens[0].kind == .Other {
+        ppError(state, diagMacroOperator(), at)
+        return left
+    }
+    return retag(lexed.tokens[0], at)
+}
+
+function pasteMacro(state: borrow mut Preprocessor, source: [Token], at: Token) -> [Token] {
+    var out: [Token] = []
+    var i = 0
+    while i < source.count {
+        let t = source[i]
+        if t.kind == .HashHash {
+            let last = out.count - 1
+            out[last] = pasteToken(state, out[last], source[i + 1], at)
+            i = i + 2
+        } else {
+            out.append(t)
+            i = i + 1
+        }
+    }
+    var result: [Token] = []
+    for t in out {
+        if t.kind != .Placemark { result.append(t) }
+    }
+    return result
+}

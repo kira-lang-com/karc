@@ -1,0 +1,110 @@
+// Bit-fields, laid out as the Itanium C++ ABI does. A run of bit-fields is
+// one byte-array member, `__karc_bitsN`, starting where the members before
+// it end. Each bit-field is read and written through a unit of its declared
+// type at an offset that is a multiple of that type's size, measured from
+// the start of the class, so a unit may begin in the bytes before the run;
+// a bit-field never crosses its unit. A zero-length array of the widest
+// unit type at the end gives the class that unit's alignment.
+
+// The integer type a bit-field of `ty` is stored in.
+function bitUnitType(ty: String) -> String {
+    if ty == "i1" { return "u8" }
+    return ty
+}
+// The class's members after `field`: a bit-field joins or opens a run.
+function withMember(p: borrow mut Parser, owner: String, fields: [CppField], field: CppField) -> [CppField] {
+    let width = p.pendingBitWidth
+    p.pendingBitWidth = -1
+    var result = fields
+    if width < 0 {
+        result.append(field)
+        return result
+    }
+    return withBits(p, owner, result, field.name, field.nameSpan, field.declType, width, field.fallback)
+}
+// `width` bits for member `name` (none when "": padding or `: 0`).
+function withBits(p: borrow mut Parser, owner: String, fields: [CppField], name: String, nameSpan: Span, declType: String, width: Int, fallback: ExprId) -> [CppField] {
+    var result = fields
+    let unit = bitUnitType(declType)
+    let unitBits = typeSize(p.tree, unit) * 8
+    // The run continues when the last member is a run; in a union every
+    // member starts at the beginning.
+    let inUnion = containsText(p.tree.unions, owner)
+    var open = !inUnion && result.count > 0 && isBitStorage(result[result.count - 1].name)
+    var regionByte = membersEnd(p.tree, result)
+    if inUnion { regionByte = 0 }
+    var used = 0
+    var storage = joinText(["__karc_bits", decimalText(p.tree.bitFields.count)])
+    if open {
+        storage = result[result.count - 1].name
+        regionByte = membersEnd(p.tree, withoutLastField(result))
+        used = bitsUsed(p.tree, owner, storage)
+    }
+    // Positions are bits from the start of the class.
+    var position = regionByte * 8 + used
+    if width == 0 {
+        position = roundUp(position, unitBits)
+    } else if position % unitBits + width > unitBits {
+        position = roundUp(position, unitBits)
+    }
+    let unitStart = position / unitBits * (unitBits / 8)
+    p.tree.bitFields.append(CppBitField { owner = owner, name = name, storage = storage, declType = unit, unitOffset = unitStart - regionByte, offset = position - unitStart * 8, width = width, fallback = fallback })
+    let end = position + width - regionByte * 8
+    let bytes = (end + 7) / 8
+    let storageField = CppField { name = storage, nameSpan = nameSpan, declType = joinText(["[", decimalText(bytes), " x u8]"]), fallback = noExpr() }
+    if open {
+        result[result.count - 1] = storageField
+    } else {
+        result.append(storageField)
+    }
+    return result
+}
+function isBitStorage(name: String) -> Bool {
+    return utf8Count(name) > 11 && utf8Slice(name, 0, 11) == "__karc_bits"
+}
+// The bits of run `storage` in use, from its start: the end of its last
+// bit-field.
+function bitsUsed(tree: CppTree, owner: String, storage: String) -> Int {
+    var used = 0
+    for b in tree.bitFields {
+        let end = b.unitOffset * 8 + b.offset + b.width
+        if b.owner == owner && b.storage == storage && end > used { used = end }
+    }
+    return used
+}
+function withoutLastField(fields: [CppField]) -> [CppField] {
+    var result: [CppField] = []
+    for i in 0..(fields.count - 1) { result.append(fields[i]) }
+    return result
+}
+// Where the members so far end, laid out in order.
+function membersEnd(tree: CppTree, fields: [CppField]) -> Int {
+    var offset = 0
+    for field in fields {
+        offset = roundUp(offset, typeAlign(tree, field.declType)) + typeSize(tree, field.declType)
+    }
+    return offset
+}
+// At the end of a class body: its bit-fields' units' alignment.
+function withBitAlignment(p: borrow Parser, owner: String, fields: [CppField], span: Span) -> [CppField] {
+    var widest = ""
+    var widestAlign = 0
+    for b in p.tree.bitFields {
+        if b.owner == owner && typeAlign(p.tree, b.declType) > widestAlign {
+            widest = b.declType
+            widestAlign = typeAlign(p.tree, b.declType)
+        }
+    }
+    var result = fields
+    if widest != "" {
+        result.append(CppField { name = "__karc_bit_align", nameSpan = span, declType = joinText(["[0 x ", widest, "]"]), fallback = noExpr() })
+    }
+    return result
+}
+// `T : width;` without a name: padding bits.
+function unnamedBitField(p: borrow mut Parser, owner: String, fields: [CppField], fieldType: String) -> [CppField] {
+    let colon = consume(p)
+    let width = constantExpression(p, expression(p, 9))
+    expect(p, .Semicolon)
+    return withBits(p, owner, fields, "", tokenSpan(colon), fieldType, width, noExpr())
+}

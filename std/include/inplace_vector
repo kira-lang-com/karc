@@ -1,0 +1,199 @@
+// <inplace_vector>: std::inplace_vector<T, N>, a vector whose elements live
+// in the object, at most N of them. Growing past N throws std::bad_alloc;
+// the try_ forms return null instead.
+#ifndef KARC_STD_INPLACE_VECTOR
+#define KARC_STD_INPLACE_VECTOR
+
+#include <cstddef>
+#include <new>
+#include <exception>
+#include <stdexcept>
+#include <utility>
+#include <initializer_list>
+#include <iterator>
+
+namespace std {
+
+template <typename T, size_t N>
+class inplace_vector {
+public:
+    typedef T* iterator;
+    typedef const T* const_iterator;
+    typedef T value_type;
+    typedef size_t size_type;
+    typedef T& reference;
+    typedef const T& const_reference;
+
+    inplace_vector() : size_(0) {}
+    inplace_vector(size_t count) : size_(0) { resize(count); }
+    inplace_vector(size_t count, const T& value) : size_(0) {
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+    }
+    inplace_vector(initializer_list<T> list) : size_(0) {
+        for (const T* item = list.begin(); item != list.end(); item++) { push_back(*item); }
+    }
+    template <typename I>
+    inplace_vector(I first, I last) : size_(0) {
+        for (; first != last; ++first) { push_back(*first); }
+    }
+    inplace_vector(const inplace_vector& other) : size_(0) {
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.data()[i]); }
+    }
+    inplace_vector(inplace_vector&& other) : size_(0) {
+        for (size_t i = 0; i < other.size_; i++) { push_back(std::move(other.data()[i])); }
+        other.clear();
+    }
+    ~inplace_vector() { clear(); }
+    inplace_vector& operator=(const inplace_vector& other) {
+        if (this == &other) { return *this; }
+        clear();
+        for (size_t i = 0; i < other.size_; i++) { push_back(other.data()[i]); }
+        return *this;
+    }
+    inplace_vector& operator=(inplace_vector&& other) {
+        if (this == &other) { return *this; }
+        clear();
+        for (size_t i = 0; i < other.size_; i++) { push_back(std::move(other.data()[i])); }
+        other.clear();
+        return *this;
+    }
+
+    // One member of each, const, serves const and non-const objects.
+    T* data() const { return (T*)words_; }
+    size_t size() const { return size_; }
+    static constexpr size_t capacity() { return N; }
+    static constexpr size_t max_size() { return N; }
+    bool empty() const { return size_ == 0; }
+    static void reserve(size_t wanted) {
+        if (wanted > N) { throw bad_alloc(); }
+    }
+    static void shrink_to_fit() {}
+
+    T& operator[](size_t index) const { return data()[index]; }
+    T& at(size_t index) const {
+        if (index >= size_) { throw out_of_range("inplace_vector::at"); }
+        return data()[index];
+    }
+    T& front() const { return data()[0]; }
+    T& back() const { return data()[size_ - 1]; }
+    T* begin() const { return data(); }
+    T* end() const { return data() + size_; }
+    const T* cbegin() const { return data(); }
+    const T* cend() const { return data() + size_; }
+
+    void push_back(const T& value) {
+        if (size_ == N) { throw bad_alloc(); }
+        new (&data()[size_]) T(value);
+        size_++;
+    }
+    void push_back(T&& value) {
+        if (size_ == N) { throw bad_alloc(); }
+        new (&data()[size_]) T(std::move(value));
+        size_++;
+    }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        if (size_ == N) { throw bad_alloc(); }
+        new (&data()[size_]) T(std::forward<Args>(args)...);
+        size_++;
+        return data()[size_ - 1];
+    }
+    T* try_push_back(const T& value) {
+        if (size_ == N) { return nullptr; }
+        new (&data()[size_]) T(value);
+        size_++;
+        return &data()[size_ - 1];
+    }
+    template <typename... Args>
+    T* try_emplace_back(Args&&... args) {
+        if (size_ == N) { return nullptr; }
+        new (&data()[size_]) T(std::forward<Args>(args)...);
+        size_++;
+        return &data()[size_ - 1];
+    }
+    T& unchecked_push_back(const T& value) {
+        new (&data()[size_]) T(value);
+        size_++;
+        return data()[size_ - 1];
+    }
+    template <typename... Args>
+    T& unchecked_emplace_back(Args&&... args) {
+        new (&data()[size_]) T(std::forward<Args>(args)...);
+        size_++;
+        return data()[size_ - 1];
+    }
+    void pop_back() {
+        if (size_ == 0) { return; }
+        size_--;
+        data()[size_].~T();
+    }
+    void clear() {
+        while (size_ > 0) { pop_back(); }
+    }
+    void resize(size_t count) {
+        if (count > N) { throw bad_alloc(); }
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) {
+            new (&data()[size_]) T();
+            size_++;
+        }
+    }
+    void resize(size_t count, const T& value) {
+        if (count > N) { throw bad_alloc(); }
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) { push_back(value); }
+    }
+    T* insert(T* position, const T& value) {
+        size_t index = position - data();
+        push_back(value);
+        rotateBack(index, 1);
+        return data() + index;
+    }
+    template <typename... Args>
+    T* emplace(T* position, Args&&... args) {
+        size_t index = position - data();
+        emplace_back(std::forward<Args>(args)...);
+        rotateBack(index, 1);
+        return data() + index;
+    }
+    T* erase(T* position) { return erase(position, position + 1); }
+    T* erase(T* first, T* last) {
+        size_t index = first - data();
+        size_t count = last - first;
+        if (count == 0) { return first; }
+        for (size_t i = index; i + count < size_; i++) { data()[i] = std::move(data()[i + count]); }
+        for (size_t i = 0; i < count; i++) { pop_back(); }
+        return data() + index;
+    }
+    void swap(inplace_vector& other) {
+        inplace_vector held(std::move(other));
+        other = std::move(*this);
+        *this = std::move(held);
+    }
+    bool operator==(const inplace_vector& other) const {
+        if (size_ != other.size_) { return false; }
+        for (size_t i = 0; i < size_; i++) {
+            if (!(data()[i] == other.data()[i])) { return false; }
+        }
+        return true;
+    }
+    bool operator!=(const inplace_vector& other) const { return !(*this == other); }
+
+private:
+    void rotateBack(size_t index, size_t count) {
+        // The `count` elements just appended move to `index`.
+        for (size_t moved = 0; moved < count; moved++) {
+            for (size_t i = size_ - count + moved; i > index + moved; i--) {
+                T held = std::move(data()[i]);
+                data()[i] = std::move(data()[i - 1]);
+                data()[i - 1] = std::move(held);
+            }
+        }
+    }
+    long words_[(N * sizeof(T) + 7) / 8 + 1];
+    size_t size_;
+};
+
+}
+
+#endif

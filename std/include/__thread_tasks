@@ -1,0 +1,31 @@
+// The std's cooperative scheduler (std/src/thread.cpp). KArc programs run
+// on one thread, so a std::thread's function is a task that runs to
+// completion when something waits for it: join, a condition variable, a
+// future, yield or sleep. Waiting first runs the tasks started before.
+#ifndef KARC_STD_THREAD_TASKS
+#define KARC_STD_THREAD_TASKS
+
+namespace std {
+
+class karc_task {
+public:
+    karc_task() : started_(false), finished_(false), id_(0) {}
+    virtual ~karc_task() {}
+    virtual void run() = 0;
+    bool started_;
+    bool finished_;
+    unsigned long id_;
+};
+
+}
+
+// Queues `task` to run; returns its id.
+unsigned long karc_task_start(std::karc_task* task);
+// Runs the oldest queued task that has not started; false when none is left.
+bool karc_task_run_one();
+// Runs `task` now unless it already ran or is running.
+void karc_task_finish(std::karc_task* task);
+// The id of the running task, 0 for main.
+unsigned long karc_task_current();
+
+#endif

@@ -1,0 +1,16 @@
+// <strstream>: the deprecated char-array streams, as their string-stream
+// counterparts.
+#ifndef KARC_STD_STRSTREAM
+#define KARC_STD_STRSTREAM
+
+#include <sstream>
+
+namespace std {
+
+typedef ostringstream ostrstream;
+typedef istringstream istrstream;
+typedef stringstream strstream;
+
+}
+
+#endif

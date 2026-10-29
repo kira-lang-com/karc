@@ -1,0 +1,133 @@
+struct StmtId {
+    let value: Int
+}
+function noStmt() -> StmtId {
+    return StmtId { value = -1 }
+}
+struct LocalDeclaration {
+    let name: String
+    let declType: String
+    let reference: Int
+    let initializer: ExprId
+}
+struct ArrayDeclaration {
+    let name: String
+    let elementType: String
+    let size: Int
+    let initializer: ExprId
+}
+struct StructDeclaration {
+    let name: String
+    let declType: String
+    let initializer: ExprId
+}
+struct AssignmentStatement {
+    let place: ExprId
+    let value: ExprId
+}
+struct ReturnStatement {
+    let marker: String
+    let value: ExprId
+}
+struct WhileStatement {
+    let condition: ExprId
+    let body: [StmtId]
+    let initializer: Optional<LocalDeclaration>
+}
+struct ForStatement {
+    let condition: ExprId
+    let body: [StmtId]
+    let control: [StmtId]
+}
+struct IfStatement {
+    let condition: ExprId
+    let initializer: Optional<LocalDeclaration>
+    let body: [StmtId]
+    let elseBody: [StmtId]
+}
+struct SwitchStatement {
+    let expression: ExprId
+    let body: [StmtId]
+}
+struct RangeForStatement {
+    let name: String
+    let declType: String
+    let reference: Int
+    let range: ExprId
+    let body: [StmtId]
+}
+struct GlobalInitialization {
+    let name: String
+    let declType: String
+    let arraySize: Int
+    let initializer: ExprId
+}
+struct TryStatement {
+    let body: [StmtId]
+    let handlers: [CatchStatement]
+}
+struct CatchStatement {
+    let name: String
+    let declType: String
+    let reference: Int
+    let body: [StmtId]
+    let span: Span
+}
+enum StatementKind {
+    Declare(LocalDeclaration)
+    IfInit(LocalDeclaration)
+    Assignment(AssignmentStatement)
+    ArrayDecl(ArrayDeclaration)
+    StructDecl(StructDeclaration)
+    Group([StmtId])
+    DeclGroup([StmtId])
+    ExprStmt(ExprId)
+    Return(ReturnStatement)
+    While(WhileStatement)
+    DoWhile(WhileStatement)
+    For(ForStatement)
+    If(IfStatement)
+    Switch(SwitchStatement)
+    Case(ExprId)
+    Default
+    Break
+    Continue
+    Label(String)
+    Goto(String)
+    RangeFor(RangeForStatement)
+    GlobalInit(GlobalInitialization)
+    Try(TryStatement)
+}
+// Arena-backed expression node. Child references remain typed IDs, while each
+// variant carries only the payload that is valid for that expression shape.
+struct Statement {
+    let kind: StatementKind
+    let span: Span
+}
+function statementDeclaresName(statement: Statement, name: String) -> Bool {
+    match statement.kind {
+        Declare(decl) -> return decl.name == name
+        IfInit(decl) -> return decl.name == name
+        ArrayDecl(decl) -> return decl.name == name
+        StructDecl(decl) -> return decl.name == name
+        RangeFor(loop) -> return loop.name == name
+        Assignment -> return false
+        Group -> return false
+        DeclGroup -> return false
+        ExprStmt -> return false
+        Return -> return false
+        While -> return false
+        DoWhile -> return false
+        For -> return false
+        If -> return false
+        Switch -> return false
+        Case -> return false
+        Default -> return false
+        Break -> return false
+        Continue -> return false
+        Label -> return false
+        Goto -> return false
+        GlobalInit -> return false
+        Try -> return false
+    }
+}

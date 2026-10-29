@@ -1,0 +1,14 @@
+construct Programs() extends Corpus {
+    let cases: [CorpusCase] = [
+        CorpusCase {
+            name = "std-strings-allocation-classes-and-printf",
+            sources = ["std/app.cpp"],
+            stdout = "drop loop\ndrop loop\ndrop heap!\nklf std\n[ab  |0007] -12 ff\n"
+        },
+        CorpusCase {
+            name = "fibonacci-application",
+            sources = ["../examples/fibonacci/app.cpp"],
+            exit = 55
+        }
+    ]
+}

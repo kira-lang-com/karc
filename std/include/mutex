@@ -1,0 +1,59 @@
+// <mutex>: std::mutex and its lock guards. KArc programs run on one thread,
+// so a mutex only tracks whether it is held.
+#ifndef KARC_STD_MUTEX
+#define KARC_STD_MUTEX
+
+namespace std {
+
+class mutex {
+public:
+    mutex() : held_(false) {}
+    void lock() { held_ = true; }
+    bool try_lock() {
+        if (held_) { return false; }
+        held_ = true;
+        return true;
+    }
+    void unlock() { held_ = false; }
+
+private:
+    bool held_;
+};
+
+using recursive_mutex = mutex;
+
+template <typename M>
+class lock_guard {
+public:
+    lock_guard(M& held) : held_(&held) { held_->lock(); }
+    ~lock_guard() { held_->unlock(); }
+
+private:
+    M* held_;
+};
+
+template <typename M>
+class unique_lock {
+public:
+    unique_lock(M& held) : held_(&held), owns_(true) { held_->lock(); }
+    ~unique_lock() {
+        if (owns_) { held_->unlock(); }
+    }
+    void lock() {
+        held_->lock();
+        owns_ = true;
+    }
+    void unlock() {
+        held_->unlock();
+        owns_ = false;
+    }
+    bool owns_lock() const { return owns_; }
+
+private:
+    M* held_;
+    bool owns_;
+};
+
+}
+
+#endif

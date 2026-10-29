@@ -1,0 +1,175 @@
+// Lowering state and value/place records.
+
+struct Binding {
+    let name: String
+    let slot: Int
+}
+struct TypeCacheEntry {
+    let key: String
+    let handle: KirType
+}
+struct GuardedTemporary {
+    let slot: Int
+    let flag: KirAddress
+}
+struct AdapterEntry {
+    let callee: Int
+    let handle: KirFunctionBuilder
+}
+struct MemberInstanceEntry {
+    let key: String
+    let index: Int
+}
+struct AddedStringEntry {
+    let text: String
+    let index: Int
+}
+struct Slot {
+    let ty: String
+    let element: String
+    var reference: Bool
+    let global: String
+    let address: KirAddress
+}
+struct JumpTarget {
+    let block: KirBlockBuilder
+    let scope: Int
+}
+struct NamedJumpTarget {
+    let name: String
+    let block: KirBlockBuilder
+    var defined: Bool
+    let span: Span
+}
+struct SwitchMarkerTarget {
+    let statement: StmtId
+    let block: KirBlockBuilder
+}
+struct TryTarget {
+    let block: KirBlockBuilder
+    let scope: Int
+}
+struct HandlerEntry {
+    let storage: KirValue
+    let ty: String
+}
+struct ThunkEntry {
+    let key: String
+    let handle: KirFunctionBuilder
+}
+struct LoweredFunctionEntry {
+    var key: String
+    var result: String
+}
+struct FunctionSlot {
+    let name: String
+    let next: Int
+    let parameters: [String]
+    let result: String
+    let handle: KirFunctionBuilder
+    let noThrow: Bool
+}
+struct Value {
+    let reference: KirValue
+    let boolean: Bool
+    let wide: Bool
+    // The KIR pointer type when this value is a pointer (e.g. "*[0 x i8]"),
+    // otherwise "" for an integer value.
+    let pointer: String
+    // True for an unsigned integer value, so extensions zero-extend and
+    // division, remainder, shift-right and comparisons use unsigned opcodes.
+    let unsigned: Bool
+    let floating: Bool
+}
+// An addressable location: the KIR address to load/store, the type stored
+// there, and whether that type is unsigned.
+struct Place {
+    let address: KirAddress
+    let ty: String
+    let unsigned: Bool
+    // A bit-field: `bitWidth` bits at `bitOffset` of the unit at `address`
+    // (lowering/lower_bits.klfd); a width of 0 is the whole object.
+    let bitOffset: Int
+    let bitWidth: Int
+}
+// The KIR type of a value: its pointer type when a pointer, i1 for a boolean,
+// i64 when wide, else i32.
+function valueType(value: Value) -> String {
+    if value.pointer != "" { return value.pointer }
+    if value.boolean { return "i1" }
+    if value.floating { return "f64" }
+    if value.wide { return "i64" }
+    return "i32"
+}
+// The KIR parameter type of a karc parameter type. A struct passed by value is
+// handed over as a pointer to the caller's copy.
+function parameterKirType(t: String) -> String {
+    if isClassType(t) { return joinText(["*[0 x ", t, "]"]) }
+    return t
+}
+struct Lowerer {
+    var tree: CppTree
+    let builder: KirModuleBuilder
+    // The karc type spelling to `KirType` memo.
+    var typeCache: [TypeCacheEntry]
+    var structTypes: [KirType]
+    // Lowered functions hashed by the name before `#`.
+    var functionSlots: [FunctionSlot]
+    var slotHeads: [Int]
+    // Per tree function, cached lowered key and the result type it was made for.
+    var loweredFunctions: [LoweredFunctionEntry]
+    var globalHandles: [KirGlobal]
+    var stringHandles: [KirGlobal]
+    // The function being lowered and its current control-flow cursors.
+    var functionIndex: Int
+    var functionHandle: Optional<KirFunctionBuilder>
+    var entryBlock: Optional<KirBlockBuilder>
+    var currentBlock: Optional<KirBlockBuilder>
+    var sret: Optional<KirValue>
+    var bindings: [Binding]
+    var active: Int
+    var slots: Int
+    var slotsData: [Slot]
+    var breakTargets: [JumpTarget]
+    var breakDepth: Int
+    var continueTargets: [JumpTarget]
+    var continueDepth: Int
+    var labels: [NamedJumpTarget]
+    var switchMarkers: [SwitchMarkerTarget]
+    // The first slot that is a local rather than `this` or a parameter.
+    var localsFrom: Int
+    // Class temporaries of the current statement, and whether the last call
+    // returned a reference.
+    var temporaries: [Int]
+    var lastCallReference: Bool
+    // The next callFunction may dispatch through the vtable.
+    var dispatchNext: Bool
+    // Member function template instances made so far.
+    var memberInstances: [MemberInstanceEntry]
+    // Enclosing try blocks of the function being lowered.
+    var tryTargets: [TryTarget]
+    var tryDepth: Int
+    var unwinding: Bool
+    // The handlers being lowered, innermost last.
+    var handlers: [HandlerEntry]
+    // Per function of the tree, what `noThrowFunctions` found.
+    var noThrowFunctions: [Bool]
+    // Whether the unit sees the std's exception runtime (<exception> declares
+    // it); a unit that does not neither throws nor checks.
+    var exceptionsEnabled: Bool
+    // Strings the lowering adds (exception type chains).
+    var addedStrings: [AddedStringEntry]
+    var terminated: Bool
+    var failed: Bool
+    // The coroutine resume function being lowered.
+    var coroutineFrame: Optional<KirValue>
+    var frameOffset: Int
+    var resumeBlocks: [KirBlockBuilder]
+    var finalBlock: Optional<KirBlockBuilder>
+    // Thunks for secondary-base tables, by implementation and offset.
+    var thunks: [ThunkEntry]
+    // Temporaries made in one branch of a conditional and their guard flags.
+    var guardedTemporaries: [GuardedTemporary]
+    // C functions given KArc-ABI adapters.
+    var adapters: [AdapterEntry]
+}

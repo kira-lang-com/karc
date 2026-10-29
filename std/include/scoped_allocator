@@ -1,0 +1,30 @@
+// <scoped_allocator>: std::scoped_allocator_adaptor, which allocates
+// through its outer allocator. KArc's containers take no allocator, so no
+// inner allocator is ever handed down.
+#ifndef KARC_STD_SCOPED_ALLOCATOR
+#define KARC_STD_SCOPED_ALLOCATOR
+
+#include <memory>
+
+namespace std {
+
+template <typename Outer>
+class scoped_allocator_adaptor {
+public:
+    typedef typename Outer::value_type value_type;
+    scoped_allocator_adaptor() {}
+    scoped_allocator_adaptor(const Outer& outer) : outer_(outer) {}
+    value_type* allocate(size_t count) { return outer_.allocate(count); }
+    void deallocate(value_type* pointer, size_t count) { outer_.deallocate(pointer, count); }
+    Outer& outer_allocator() { return outer_; }
+    Outer& inner_allocator() { return outer_; }
+    bool operator==(const scoped_allocator_adaptor& other) const { return true; }
+    bool operator!=(const scoped_allocator_adaptor& other) const { return false; }
+
+private:
+    Outer outer_;
+};
+
+}
+
+#endif

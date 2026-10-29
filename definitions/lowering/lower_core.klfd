@@ -1,0 +1,518 @@
+// Lowering core: the Value/Place/Lowerer model, the karc-type to `KirType`
+// bridge, and the name, slot and block helpers. Emission flows through the
+// kir.klfd builder; this file never calls a `klf.kir.*` service directly.
+
+function lowerError(state: borrow mut Lowerer, code: Int, span: Span) {
+    state.failed = true
+    reportAt(code, span.start, diagnosticOffset(span.start), diagnosticOffset(span.end))
+}
+// The index of a memoised type, or -1.
+function typeSlot(state: Lowerer, key: String) -> Int {
+    for i in 0..state.typeCache.count {
+        if state.typeCache[i].key == key { return i }
+    }
+    return -1
+}
+// Materialise a karc type spelling as a `KirType` handle, memoised per module.
+// Record types are registered by `declareRecords` before any of this runs, so a
+// nominal spelling resolves to the record the module already declares.
+function kirType(state: borrow mut Lowerer, t: String) -> KirType {
+    let found = typeSlot(state, t)
+    if found >= 0 { return state.typeCache[found].handle }
+    let handle = buildKirType(state, t)
+    state.typeCache.append(TypeCacheEntry { key = t, handle = handle })
+    return handle
+}
+function buildKirType(state: borrow mut Lowerer, t: String) -> KirType {
+    match t {
+        "unit" -> return kir_type_unit()
+        "ptr" -> return kir_type_pointer()
+        "i1" -> return kir_type_integer(1)
+        "i8", "u8" -> return kir_type_integer(8)
+        "i16", "u16" -> return kir_type_integer(16)
+        "i32", "u32" -> return kir_type_integer(32)
+        "i64", "u64" -> return kir_type_integer(64)
+        "f32" -> return kir_type_float(32)
+        "f64" -> return kir_type_float(64)
+        else -> {}
+    }
+    if isFnPtrType(t) {
+        var parameters: [KirType] = []
+        for p in fnPtrParameterTypes(t) {
+            parameters.append(kirType(state, p))
+        }
+        let result = kirType(state, fnPtrReturn(t))
+        for p in parameters {
+            kir_type_parameter(p)
+        }
+        return kir_type_function(result)
+    }
+    if isPointerType(t) {
+        let inner = kirType(state, arrayOfPointer(t))
+        return kir_type_address(inner)
+    }
+    if isArrayType(t) {
+        let element = kirType(state, arrayElementType(t))
+        return kir_type_array(arrayLength(t), element)
+    }
+    if isClassType(t) {
+        let index = structIndex(state, nominalName(t))
+        if index >= 0 { return state.structTypes[index] }
+    }
+    return kir_type_integer(32)
+}
+function structIndex(state: Lowerer, name: String) -> Int {
+    return structNamed(state.tree, name)
+}
+function fieldIndexOf(s: CppStruct, fieldName: String) -> Int {
+    for i in 0..s.fields.count {
+        let f = s.fields[i]
+        if f.name == fieldName { return i }
+    }
+    return -1
+}
+// The handle of a function declared by `declareFunctions`, by source name.
+function functionSlot(state: Lowerer, name: String) -> Int {
+    if state.slotHeads.count == 0 { return -1 }
+    var fallback = -1
+    var i = state.slotHeads[slotBucket(name)]
+    while i >= 0 {
+        if state.functionSlots[i].name == name { return i }
+        if (fallback < 0 || i < fallback) && utf8Count(state.functionSlots[i].name) > utf8Count(name) &&
+            utf8Slice(state.functionSlots[i].name, 0, utf8Count(name)) == name &&
+            utf8Byte(state.functionSlots[i].name, utf8Count(name)) == 35 {
+            fallback = i
+        }
+        i = state.functionSlots[i].next
+    }
+    return fallback
+}
+// A function named from inside the one being lowered: as written, else in
+// that function's enclosing namespaces and classes, innermost first.
+function functionSlotInScope(state: Lowerer, name: String) -> Int {
+    // `::name`: the global one.
+    if utf8Count(name) > 2 && utf8Byte(name, 0) == 58 && utf8Byte(name, 1) == 58 { return functionSlot(state, utf8Slice(name, 2, utf8Count(name))) }
+    let direct = functionSlot(state, name)
+    if direct >= 0 || hasScope(name) { return direct }
+    var scope = state.tree.functions[state.functionIndex].name
+    while hasScope(scope) {
+        scope = scopeOf(scope)
+        let found = functionSlot(state, joinText([scope, "::", name]))
+        if found >= 0 { return found }
+    }
+    return -1
+}
+function parameterSuffix(parameterTypes: [String]) -> Int {
+    var hash = 17
+    for parameterType in parameterTypes {
+        for i in 0..utf8Count(parameterType) {
+            hash = (hash * 31 + utf8Byte(parameterType, i)) % 100000000
+        }
+    }
+    return hash
+}
+function sourceSuffix(name: String) -> Int {
+    var hash = 17
+    for i in 0..utf8Count(name) {
+        hash = (hash * 31 + utf8Byte(name, i)) % 100000000
+    }
+    return hash
+}
+function functionSuffix(tree: CppTree, fn: CppFunction) -> Int {
+    var parameterTypes: [String] = []
+    if isClassType(fn.returnType) {
+        parameterTypes.append(joinText(["*[0 x ", fn.returnType, "]"]))
+    }
+    let owner = methodOwnerType(tree, fn.name)
+    if owner != "" {
+        parameterTypes.append(joinText(["*[0 x ", owner, "]"]))
+    }
+    for parameter in fn.parameters {
+        let parameterType = parameterKirType(parameter.declType)
+        // `T*`, `T&` and `T&&` overloads share a KIR type but not a name.
+        if parameter.rvalue && parameter.reference {
+            parameterTypes.append(joinText(["&&", parameterType]))
+        } else if parameter.reference {
+            parameterTypes.append(joinText(["&", parameterType]))
+        } else {
+            parameterTypes.append(parameterType)
+        }
+    }
+    if fn.isConst { parameterTypes.append("const") }
+    var hash = parameterSuffix(parameterTypes)
+    if fn.internal {
+        hash = (hash * 31 + sourceSuffix(tree.sourceName) + fn.nameSpan.start) % 100000000
+    }
+    if hash < 0 { hash = -hash }
+    return hash
+}
+function valueSuffix(args: [Value], result: String) -> Int {
+    var parameterTypes: [String] = []
+    for arg in args {
+        parameterTypes.append(valueType(arg))
+    }
+    return parameterSuffix(parameterTypes)
+}
+function lowerFunctionKey(tree: CppTree, fn: CppFunction) -> String {
+    return joinText([fn.name, "#", decimalText(functionSuffix(tree, fn))])
+}
+// A function's lowered key, cached; settling an `auto` result changes it.
+function cachedFunctionKey(state: borrow mut Lowerer, index: Int) -> String {
+    while state.loweredFunctions.count < state.tree.functions.count {
+        state.loweredFunctions.append(LoweredFunctionEntry { key = "", result = "" })
+    }
+    let fn = state.tree.functions[index]
+    if state.loweredFunctions[index].key == "" || state.loweredFunctions[index].result != fn.returnType {
+        state.loweredFunctions[index].key = lowerFunctionKey(state.tree, fn)
+        state.loweredFunctions[index].result = fn.returnType
+    }
+    return state.loweredFunctions[index].key
+}
+function functionSlotForFunction(state: borrow mut Lowerer, index: Int) -> Int {
+    return functionSlot(state, cachedFunctionKey(state, index))
+}
+function lookup(state: Lowerer, name: String) -> Int {
+    for offset in 0..state.active {
+        let i = state.active - offset - 1
+        if state.bindings[i].name == name { return state.bindings[i].slot }
+    }
+    return -1
+}
+function bind(state: borrow mut Lowerer, name: String, slot: Int) {
+    let binding = Binding { name = name, slot = slot }
+    if state.active < state.bindings.count {
+        state.bindings[state.active] = binding
+    } else {
+        state.bindings.append(binding)
+    }
+    state.active = state.active + 1
+}
+function declare(state: borrow mut Lowerer, name: String, ty: String, elementType: String, span: Span) -> Int {
+    let existing = lookup(state, name)
+    if existing >= 0 && state.slotsData[existing].global == "" {
+        lowerError(state, diagDuplicateLocal(), span)
+    }
+    let address = kStackAlloc(state, ty)
+    let slot = state.slots
+    state.slots = state.slots + 1
+    state.slotsData.append(Slot { ty = ty, element = elementType, reference = false, global = "", address = address })
+    bind(state, name, slot)
+    return slot
+}
+function deallocLocals(state: borrow mut Lowerer) {
+    for offset in 0..state.slots {
+        let slot = state.slots - offset - 1
+        if state.slotsData[slot].global == "" {
+            kStackDealloc(state, state.slotsData[slot].address)
+        }
+    }
+}
+// Slot 0 is an unnamed scratch slot, so an error path still has a real address
+// to hand back. No C++ identifier is empty, so `lookup` never finds it.
+function scratchPlace(state: Lowerer) -> Place {
+    return Place { address = state.slotsData[0].address, ty = "i32", unsigned = false, bitOffset = 0, bitWidth = 0 }
+}
+function pushBreak(state: borrow mut Lowerer, block: KirBlockBuilder) {
+    let target = JumpTarget { block = block, scope = state.active }
+    if state.breakDepth < state.breakTargets.count {
+        state.breakTargets[state.breakDepth] = target
+    } else {
+        state.breakTargets.append(target)
+    }
+    state.breakDepth = state.breakDepth + 1
+}
+function pushContinue(state: borrow mut Lowerer, block: KirBlockBuilder) {
+    let target = JumpTarget { block = block, scope = state.active }
+    if state.continueDepth < state.continueTargets.count {
+        state.continueTargets[state.continueDepth] = target
+    } else {
+        state.continueTargets.append(target)
+    }
+    state.continueDepth = state.continueDepth + 1
+}
+function typeWidth(ty: String) -> Int {
+    match ty {
+        "i1" -> return 1
+        "i8", "u8" -> return 8
+        "i16", "u16" -> return 16
+        "i64", "u64" -> return 64
+        "f32", "f64" -> return 64
+        else -> return 32
+    }
+}
+function parseFloatLiteral(text: String) -> Float {
+    let size = utf8Count(text)
+    var i = 0
+    var negative = false
+    if i < size && utf8Byte(text, i) == 45 {
+        negative = true
+        i = i + 1
+    }
+    var whole: Int = 0
+    var largeWhole: Float = 0.0
+    var widened = false
+    var wholeEnd = i
+    for cursor in i..size {
+        let byte = utf8Byte(text, cursor)
+        if byte == 39 {
+            wholeEnd = cursor + 1
+        } else if digit(byte) {
+            let value = byte - 48
+            if !widened && (whole > 922337203685477580 || (whole == 922337203685477580 && value > 7)) {
+                largeWhole = whole as Float
+                widened = true
+            }
+            if widened { largeWhole = largeWhole * 10.0 + (value as Float) }
+            else { whole = whole * 10 + value }
+            wholeEnd = cursor + 1
+        } else {
+            break
+        }
+    }
+    i = wholeEnd
+    var result: Float = whole as Float
+    if widened { result = largeWhole }
+    if i < size && utf8Byte(text, i) == 46 {
+        i = i + 1
+        var fraction: Float = 0.0
+        var scale: Float = 1.0
+        var fractionEnd = i
+        for cursor in i..size {
+            let byte = utf8Byte(text, cursor)
+            if byte == 39 {
+                fractionEnd = cursor + 1
+            } else if digit(byte) {
+                fraction = fraction * 10.0 + ((byte - 48) as Float)
+                scale = scale * 10.0
+                fractionEnd = cursor + 1
+            } else {
+                break
+            }
+        }
+        i = fractionEnd
+        result = result + fraction / scale
+    }
+    var exponent: Int = 0
+    var exponentNegative = false
+    if i < size && (utf8Byte(text, i) == 101 || utf8Byte(text, i) == 69) {
+        i = i + 1
+        if i < size && utf8Byte(text, i) == 45 {
+            exponentNegative = true
+            i = i + 1
+        } else if i < size && utf8Byte(text, i) == 43 {
+            i = i + 1
+        }
+        var exponentEnd = i
+        for cursor in i..size {
+            let byte = utf8Byte(text, cursor)
+            if byte == 39 {
+                exponentEnd = cursor + 1
+            } else if digit(byte) {
+                exponent = exponent * 10 + byte - 48
+                exponentEnd = cursor + 1
+            } else {
+                break
+            }
+        }
+        i = exponentEnd
+    }
+    var power: Float = 1.0
+    for _ in 0..exponent {
+        power = power * 10.0
+    }
+    if exponentNegative { result = result / power }
+    else { result = result * power }
+    if negative { return 0.0 - result }
+    return result
+}
+// Convert a value to `targetType`: the C++ zero/nonzero test for bool, a
+// truncation to a narrower type, or a sign/zero extension to a wider one.
+function convert(state: borrow mut Lowerer, value: Value, targetType: String) -> Value {
+    if value.pointer != "" {
+        let address = toAddr64(state, value)
+        let scalar = Value { reference = address, boolean = false, wide = true, pointer = "", unsigned = false, floating = false }
+        return convert(state, scalar, targetType)
+    }
+    let source = valueType(value)
+    let uns = isUnsignedType(targetType)
+    if targetType == "f64" {
+        if value.floating {
+            return Value { reference = value.reference, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+        }
+        var integer = value
+        if typeWidth(source) < 64 { integer = convert(state, value, "i64") }
+        let result = kI64ToF64(state, integer.reference)
+        return Value { reference = result, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+    }
+    if value.floating {
+        let integer = kF64ToI64(state, value.reference)
+        let converted = Value { reference = integer, boolean = false, wide = true, pointer = "", unsigned = false, floating = false }
+        match targetType {
+            "i64", "u64" -> return converted
+            else -> return convert(state, converted, targetType)
+        }
+    }
+    if typeWidth(source) == typeWidth(targetType) && value.pointer == "" && targetType != "i1" {
+        return Value { reference = value.reference, boolean = value.boolean, wide = value.wide, pointer = value.pointer, unsigned = uns, floating = false }
+    }
+    if source == targetType {
+        return Value { reference = value.reference, boolean = value.boolean, wide = value.wide, pointer = value.pointer, unsigned = uns, floating = false }
+    }
+    if targetType == "i1" {
+        let zero = kConstInt(state, source, 0)
+        let result = kIcmp(state, "ne", value.reference, zero)
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    var result = value.reference
+    if typeWidth(targetType) < typeWidth(source) {
+        result = kTrunc(state, value.reference, targetType)
+    } else {
+        var op: String = "sext"
+        if value.unsigned || source == "i1" { op = "zext" }
+        result = kExtend(state, op, value.reference, targetType)
+    }
+    return Value { reference = result, boolean = false, wide = typeWidth(targetType) == 64, pointer = "", unsigned = uns, floating = false }
+}
+// An i32 constant as a value.
+function intValue(state: borrow mut Lowerer, n: Int) -> Value {
+    return Value { reference = kConstInt(state, "i32", n), boolean = false, wide = false, pointer = "", unsigned = false, floating = false }
+}
+// The i32 zero used on an error-recovery path.
+function zeroValue(state: borrow mut Lowerer) -> Value {
+    return intValue(state, 0)
+}
+// Promote a value to at least int width (bool/char become i32; long stays i64).
+function asInt(state: borrow mut Lowerer, value: Value) -> Value {
+    if value.floating { return convert(state, value, "i64") }
+    if value.pointer != "" { return convert(state, value, "i64") }
+    if value.boolean {
+        return convert(state, value, "i32")
+    }
+    return value
+}
+function asBool(state: borrow mut Lowerer, value: Value) -> Value {
+    if value.floating {
+        let zero = kConstFloat(state, "0.0")
+        let result = kFcmp(state, "ne", value.reference, zero)
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    return convert(state, value, "i1")
+}
+// Reconstruct a value of `sourceType` (e.g. a call result) and promote a
+// narrow type back to int for expression use.
+function promoteFromType(state: borrow mut Lowerer, reference: KirValue, sourceType: String) -> Value {
+    if isPointerType(sourceType) || isFnPtrType(sourceType) {
+        return Value { reference = reference, boolean = false, wide = true, pointer = sourceType, unsigned = false, floating = false }
+    }
+    let uns = isUnsignedType(sourceType)
+    match sourceType {
+        "f32", "f64" -> return Value { reference = reference, boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+        "i32", "u32" -> return Value { reference = reference, boolean = false, wide = false, pointer = "", unsigned = uns, floating = false }
+        "i64", "u64" -> return Value { reference = reference, boolean = false, wide = true, pointer = "", unsigned = uns, floating = false }
+        else -> {}
+    }
+    if typeWidth(sourceType) == 32 {
+        return Value { reference = reference, boolean = false, wide = false, pointer = "", unsigned = uns, floating = false }
+    }
+    var op: String = "sext"
+    if sourceType == "i1" || uns { op = "zext" }
+    let extended = kExtend(state, op, reference, "i32")
+    return Value { reference = extended, boolean = false, wide = false, pointer = "", unsigned = uns, floating = false }
+}
+// Load a local, promoting a narrow slot (i8/i1) to int for expression use;
+// int and long load at their own width.
+function loadLocal(state: borrow mut Lowerer, slot: Int) -> Value {
+    let slotType = state.slotsData[slot].ty
+    let loaded = kLoad(state, state.slotsData[slot].address)
+    return promoteFromType(state, loaded, slotType)
+}
+// Coerce a value to `targetType`'s KIR value: a pointer target bitcasts a
+// pointer (or makes a null from an integer such as 0), a scalar target converts.
+function coerceRef(state: borrow mut Lowerer, value: Value, targetType: String) -> KirValue {
+    if isPointerType(targetType) {
+        if value.pointer != "" {
+            if value.pointer == targetType {
+                return value.reference
+            }
+            let from = elementOfPointer(value.pointer)
+            let to = elementOfPointer(targetType)
+            if isClassType(from) && isClassType(to) && isBaseOf(state, to, from) {
+                return upcast(state, value.reference, from, to)
+            }
+            return kBitcast(state, value.reference, targetType)
+        }
+        return kNull(state, targetType)
+    }
+    if isFnPtrType(targetType) {
+        if value.pointer == targetType { return value.reference }
+        // `void (*)(void*)` and a function taking `void*` spell the pointer
+        // parameter apart.
+        if value.pointer != "" && isFnPtrType(value.pointer) { return kBitcast(state, value.reference, targetType) }
+        return kNull(state, targetType)
+    }
+    return convert(state, value, targetType).reference
+}
+// Store a value into a local, converting to the slot's declared type. A pointer
+// slot stores a pointer value directly (bitcasting a differing pointer type) or
+// a null pointer when given an integer such as `0`.
+function storeLocal(state: borrow mut Lowerer, slot: Int, value: Value) {
+    let slotType = state.slotsData[slot].ty
+    let reference = coerceRef(state, value, slotType)
+    kStore(state, reference, state.slotsData[slot].address)
+}
+function toAddr64(state: borrow mut Lowerer, v: Value) -> KirValue {
+    if v.pointer != "" {
+        return kBitcast(state, v.reference, "i64")
+    }
+    let widened = convert(state, v, "i64")
+    return widened.reference
+}
+// Slot 1 is an unnamed scratch `[1 x i32]`, so an error path still has an
+// array-typed address to index.
+function scratchIndexable(state: Lowerer) -> Place {
+    return Place { address = state.slotsData[1].address, ty = "i32", unsigned = false, bitOffset = 0, bitWidth = 0 }
+}
+function sizeOfExpression(state: borrow mut Lowerer, id: ExprId) -> Int {
+    let expr = state.tree.expressions[id.value]
+    var needsPlace = false
+    match expr.kind {
+        Name(named) -> {
+            var slot = lookup(state, named.name)
+            if slot < 0 { slot = ensureGlobalSlot(state, named.name) }
+            if slot >= 0 {
+                if state.slotsData[slot].reference { return typeSize(state.tree, elementOfPointer(state.slotsData[slot].ty)) }
+                return typeSize(state.tree, state.slotsData[slot].ty)
+            }
+        }
+        Cast(cast) -> return typeSize(state.tree, cast.ty)
+        AddrOf -> return 8
+        Field -> { needsPlace = true }
+        Index -> { needsPlace = true }
+        Deref -> { needsPlace = true }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit(string) -> {
+            let units = literalUnits(state.tree.strings[string.index], string.prefix)
+            return (units.count + 1) * typeSize(state.tree, literalElement(string.prefix))
+        }
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        Sizeof -> {}
+        Call -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if needsPlace {
+        let place = emitPlace(state, id)
+        if place.ty != "" { return typeSize(state.tree, place.ty) }
+    }
+    let ty = staticType(state, id)
+    if ty != "" && ty != "@braced" { return typeSize(state.tree, ty) }
+    return 4
+}

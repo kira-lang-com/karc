@@ -1,0 +1,57 @@
+// <generator>: std::generator<T>, a coroutine yielding a sequence of T that
+// a range-for walks. Each value is copied into the promise when yielded.
+#ifndef KARC_STD_GENERATOR
+#define KARC_STD_GENERATOR
+
+#include <coroutine>
+
+namespace std {
+
+struct __karc_generator_sentinel {};
+
+template <class T>
+class generator {
+public:
+    struct promise_type {
+        T value_;
+        generator get_return_object() { return generator(coroutine_handle<promise_type>::from_promise(*this)); }
+        suspend_always initial_suspend() { return suspend_always(); }
+        suspend_always final_suspend() noexcept { return suspend_always(); }
+        suspend_always yield_value(T value) {
+            value_ = value;
+            return suspend_always();
+        }
+        void return_void() {}
+        void unhandled_exception() {}
+    };
+    struct iterator {
+        coroutine_handle<promise_type> handle_;
+        iterator& operator++() {
+            handle_.resume();
+            return *this;
+        }
+        void operator++(int) { handle_.resume(); }
+        T& operator*() const { return handle_.promise().value_; }
+        bool operator==(__karc_generator_sentinel) const { return handle_.done(); }
+        bool operator!=(__karc_generator_sentinel) const { return !handle_.done(); }
+    };
+    generator(coroutine_handle<promise_type> handle) : handle_(handle) {}
+    generator(generator&& other) : handle_(other.handle_) { other.handle_ = nullptr; }
+    generator(const generator& other) = delete;
+    ~generator() {
+        if (handle_) { handle_.destroy(); }
+    }
+    iterator begin() {
+        handle_.resume();
+        iterator it{handle_};
+        return it;
+    }
+    __karc_generator_sentinel end() { return __karc_generator_sentinel(); }
+
+private:
+    coroutine_handle<promise_type> handle_;
+};
+
+}
+
+#endif

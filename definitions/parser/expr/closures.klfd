@@ -1,0 +1,383 @@
+// Lambdas. `[captures](params) -> R { body }` becomes a class
+// `__karc_lambda_N` with one field per capture and an operator(), and the
+// expression becomes a `@lambda::N` call that builds the object. Capture
+// fields are typed `auto` until the lowering knows the captured variables;
+// a capture by reference is the field `&name`.
+
+function flushDeferred(p: borrow mut Parser) {
+    if p.deferredFunctions.count == 0 { return }
+    for fn in p.deferredFunctions { p.tree.functions.append(fn) }
+    p.deferredFunctions = []
+}
+// An identifier token at or before `position`: the class and its operator()
+// are named in KIR from a source span, which must be an identifier.
+function nearestIdentifierSpan(p: borrow Parser, position: Int) -> Span {
+    var i = position
+    while i > 0 {
+        let t = p.tokens[i]
+        if t.kind == .Ident { return tokenSpan(t) }
+        i = i - 1
+    }
+    return tokenSpan(p.tokens[0])
+}
+struct LambdaCaptures {
+    let fields: [CppField]
+    let defaultCapture: String
+}
+struct LambdaSignature {
+    let parameters: [CppParam]
+    let parameterStart: Int
+    let parameterEnd: Int
+    let returnType: String
+    let resultStart: Int
+    let resultEnd: Int
+}
+function parseLambdaCaptures(p: borrow mut Parser) -> LambdaCaptures {
+    var fields: [CppField] = []
+    var defaultCapture = ""
+    while peekKind(p) != .RBracket && peekKind(p) != .End && p.error == "" {
+        var byReference = false
+        if peekKind(p) == .Amp {
+            consume(p)
+            byReference = true
+        }
+        if peekKind(p) == .Assign {
+            consume(p)
+            defaultCapture = "="
+        } else if peekKind(p) == .Ident {
+            let name = consume(p)
+            if name.text == "this" {
+                fields.append(CppField { name = "__karc_outer", nameSpan = tokenSpan(name), declType = "auto", fallback = noExpr() })
+            } else {
+                var fieldName = name.text
+                if byReference { fieldName = joinText(["&", name.text]) }
+                var init = noExpr()
+                if peekKind(p) == .Assign {
+                    consume(p)
+                    init = expression(p, 0)
+                }
+                fields.append(CppField { name = fieldName, nameSpan = tokenSpan(name), declType = "auto", fallback = init })
+            }
+        } else if byReference {
+            defaultCapture = "&"
+        }
+        if peekKind(p) == .Comma { consume(p) }
+    }
+    expect(p, .RBracket)
+    return LambdaCaptures { fields = fields, defaultCapture = defaultCapture }
+}
+function parseLambdaSignature(p: borrow mut Parser) -> LambdaSignature {
+    var parameters: [CppParam] = []
+    var parameterStart = p.position
+    var parameterEnd = p.position
+    if peekKind(p) == .LParen {
+        consume(p)
+        parameterStart = p.position
+        while peekKind(p) != .RParen && peekKind(p) != .End && p.error == "" {
+            parameters.append(parseParameter(p))
+            if peekKind(p) == .Comma { consume(p) }
+        }
+        parameterEnd = p.position
+        expect(p, .RParen)
+    }
+    while peekKind(p) == .Ident && isLambdaSpecifier(peek(p).text) { consume(p) }
+    var returnType = "auto"
+    var resultStart = p.position
+    var resultEnd = p.position
+    if peekKind(p) == .Arrow {
+        consume(p)
+        resultStart = p.position
+        returnType = parseTypeToken(p)
+        resultEnd = p.position
+    }
+    return LambdaSignature {
+        parameters = parameters,
+        parameterStart = parameterStart,
+        parameterEnd = parameterEnd,
+        returnType = returnType,
+        resultStart = resultStart,
+        resultEnd = resultEnd
+    }
+}
+function rewriteLambdaCaptures(p: borrow mut Parser, initialFields: [CppField], defaultCapture: String, parameters: [CppParam], firstExpression: Int, firstStatement: Int, anchor: Span) -> [CppField] {
+    var fields = initialFields
+    var capturesThis = defaultCapture != ""
+    for field in fields {
+        if field.name == "__karc_outer" { capturesThis = true }
+    }
+    if capturesThis {
+        for i in firstExpression..p.tree.expressions.count {
+            let e = p.tree.expressions[i]
+            match e.kind {
+                Name(named) -> {
+                    if named.name == "this" {
+                        p.tree.expressions[i] = Expr { kind = .Name(NameExpression { name = "__karc_outer", explicitArguments = named.explicitArguments, valueUse = named.valueUse }), span = e.span, nameSpan = e.nameSpan }
+                    }
+                }
+                NumberLit -> {}
+                FloatLit -> {}
+                StringLit -> {}
+                Neg -> {}
+                Positive -> {}
+                Not -> {}
+                BitNot -> {}
+                AddrOf -> {}
+                Deref -> {}
+                Sizeof -> {}
+                Cast -> {}
+                Call -> {}
+                Field -> {}
+                Index -> {}
+                PreStep -> {}
+                PostStep -> {}
+                Binary -> {}
+                Ternary -> {}
+                New -> {}
+                Delete -> {}
+            }
+        }
+    }
+    if defaultCapture != "" && !hasOuterCapture(fields) {
+        fields.append(CppField { name = "__karc_outer", nameSpan = anchor, declType = "auto", fallback = noExpr() })
+    }
+    if defaultCapture != "" {
+        for i in firstExpression..p.tree.expressions.count {
+            let e = p.tree.expressions[i]
+            match e.kind {
+                Name(named) -> {
+                    if isCapturable(p, named.name, parameters, fields, firstStatement) {
+                        var fieldName = named.name
+                        if defaultCapture == "&" { fieldName = joinText(["&", named.name]) }
+                        fields.append(CppField { name = fieldName, nameSpan = e.span, declType = "auto", fallback = noExpr() })
+                    }
+                }
+                NumberLit -> {}
+                FloatLit -> {}
+                StringLit -> {}
+                Neg -> {}
+                Positive -> {}
+                Not -> {}
+                BitNot -> {}
+                AddrOf -> {}
+                Deref -> {}
+                Sizeof -> {}
+                Cast -> {}
+                Call -> {}
+                Field -> {}
+                Index -> {}
+                PreStep -> {}
+                PostStep -> {}
+                Binary -> {}
+                Ternary -> {}
+                New -> {}
+                Delete -> {}
+            }
+        }
+    }
+    return fields
+}
+function parseLambda(p: borrow mut Parser) -> ExprId {
+    let anchor = nearestIdentifierSpan(p, p.position)
+    let open = consume(p)
+    // Numbered by a count of its own: a lambda inside a lambda is parsed
+    // before the outer one's class is added.
+    let className = joinText(["__karc_lambda_", decimalText(p.lambdas)])
+    p.lambdas = p.lambdas + 1
+    let captures = parseLambdaCaptures(p)
+    var fields = captures.fields
+    let defaultCapture = captures.defaultCapture
+    let signature = parseLambdaSignature(p)
+    let parameters = signature.parameters
+    let returnType = signature.returnType
+    let bodyStart = p.position
+    let firstStruct = p.tree.structs.count
+    let firstDeferred = p.deferredFunctions.count
+    let firstEntity = p.tree.entities.count
+    let firstTemplate = p.tree.templates.count
+    let firstExpression = p.tree.expressions.count
+    let firstStatement = p.tree.statements.count
+    let marks = p.coroutineMarks
+    let outerParameters = p.bodyParameters
+    let outerParametersStart = p.bodyParametersStart
+    p.bodyParameters = parameters
+    p.bodyParametersStart = p.tree.statements.count
+    let body = block(p)
+    p.bodyParameters = outerParameters
+    p.bodyParametersStart = outerParametersStart
+    markCoroutine(p, marks, body)
+    // The keywords were the lambda's, not the enclosing function's.
+    p.coroutineMarks = marks
+    fields = rewriteLambdaCaptures(p, fields, defaultCapture, parameters, firstExpression, firstStatement, anchor)
+    if genericParameters(parameters) {
+        // A generic lambda's operator() is a member template, instantiated
+        // per call like any other; the body parsed above only found the
+        // captures, so what it declared is dropped.
+        let tokens = genericOperatorTokens(p, anchor, signature.parameterStart, signature.parameterEnd, signature.resultStart, signature.resultEnd, bodyStart)
+        dropDeclarationsFrom(p, firstStruct, firstDeferred, firstEntity, firstTemplate, firstExpression, firstStatement)
+        var params: [String] = []
+        var valueParams: [Bool] = []
+        var defaults: [[Token]] = []
+        for t in tokens {
+            if t.kind == .Ident && utf8Count(t.text) > 12 && utf8Slice(t.text, 0, 12) == "__karc_auto_" {
+                params.append(t.text)
+                valueParams.append(false)
+                let none: [Token] = []
+                defaults.append(none)
+            }
+        }
+        p.tree.structs.append(CppStruct { name = className, nameSpan = anchor, fields = fields, internal = true, instance = false, span = spanFrom(p, open.start) })
+        p.tree.templates.append(CppTemplate { name = joinText([className, "::operator()"]), params = params, valueParams = valueParams, defaults = defaults, tokens = tokens, isClass = false, owner = className, pack = -1 })
+        return eCall(p, joinText(["@lambda::", className]), [], spanFrom(p, open.start), anchor, noExpr())
+    }
+    p.tree.structs.append(CppStruct { name = className, nameSpan = anchor, fields = typedCaptures(p, fields), internal = true, instance = false, span = spanFrom(p, open.start) })
+    p.deferredFunctions.append(CppFunction { name = joinText([className, "::operator()"]), nameSpan = anchor, parameters = parameters, returnType = returnType, body = body, isProto = false, internal = true, cLinkage = false, refReturn = false, isConst = false, span = spanFrom(p, open.start) })
+    return eCall(p, joinText(["@lambda::", className]), [], spanFrom(p, open.start), anchor, noExpr())
+}
+// A name the lambda body uses that it neither declares nor receives, and
+// has not captured yet; the lowering drops the ones that are not locals.
+function isCapturable(p: borrow Parser, name: String, parameters: [CppParam], fields: [CppField], firstStatement: Int) -> Bool {
+    if name == "this" || hasScope(name) { return false }
+    for parameter in parameters {
+        if parameter.name == name { return false }
+    }
+    for field in fields {
+        if field.name == name || field.name == joinText(["&", name]) { return false }
+    }
+    for i in firstStatement..p.tree.statements.count {
+        if statementDeclaresName(p.tree.statements[i], name) { return false }
+    }
+    return true
+}
+function hasOuterCapture(fields: [CppField]) -> Bool {
+    for field in fields {
+        if field.name == "__karc_outer" { return true }
+    }
+    return false
+}
+// The captures typed from the locals they name, where the parser knows
+// them: a closure with every capture typed has its layout before it is
+// made, so it can be a template argument (a deleter, a comparator).
+function typedCaptures(p: borrow Parser, fields: [CppField]) -> [CppField] {
+    var typed: [CppField] = []
+    for field in fields {
+        let name = captureName(field)
+        var ty = ""
+        if hasExpr(field.fallback) { ty = guessType(p, field.fallback, 1) } else { ty = localDeclaredType(p, name) }
+        if ty != "" && utf8Byte(field.name, 0) == 38 { ty = joinText(["*[0 x ", ty, "]"]) }
+        if ty == "" || ty == "auto" { ty = "auto" }
+        typed.append(CppField { name = field.name, nameSpan = field.nameSpan, declType = ty, fallback = field.fallback })
+    }
+    return typed
+}
+// The type of the local `name` of the function being parsed, "" if the
+// parser cannot tell (a parameter, a global, an `auto` it cannot type).
+function localDeclaredType(p: borrow Parser, name: String) -> String {
+    var i = p.tree.statements.count
+    while i > p.bodyStart {
+        i = i - 1
+        let stmt = p.tree.statements[i]
+        match stmt.kind {
+            Declare(decl) -> {
+                if decl.name == name {
+                    if isDeducedSpelling(decl.declType) {
+                        if !hasExpr(decl.initializer) { return "" }
+                        return guessType(p, decl.initializer, 1)
+                    }
+                    if decl.reference == -1 { return elementOfPointer(decl.declType) }
+                    return decl.declType
+                }
+            }
+            StructDecl(decl) -> {
+                if decl.name == name {
+                    if decl.declType == "auto" {
+                        if !hasExpr(decl.initializer) { return "" }
+                        return guessType(p, decl.initializer, 1)
+                    }
+                    return decl.declType
+                }
+            }
+            IfInit(decl) -> {
+                if decl.name == name { return decl.declType }
+            }
+            ArrayDecl -> {}
+            Assignment -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Case -> {}
+            Default -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    return ""
+}
+function genericParameters(parameters: [CppParam]) -> Bool {
+    for parameter in parameters {
+        if isDeducedSpelling(parameter.declType) { return true }
+    }
+    return false
+}
+// `R operator()(params) { body }` with each `auto` parameter type a template
+// parameter `__karc_auto_N`; the result is `auto` unless the lambda gave one.
+function genericOperatorTokens(p: borrow Parser, anchor: Span, parameterStart: Int, parameterEnd: Int, resultStart: Int, resultEnd: Int, bodyStart: Int) -> [Token] {
+    let at = Token { space = false, spelling = "", kind = .Ident, text = "operator", number = 0, start = anchor.start, end = anchor.end, line = false }
+    var tokens: [Token] = []
+    if resultEnd > resultStart {
+        for i in resultStart..resultEnd { tokens.append(p.tokens[i]) }
+    } else {
+        tokens.append(packToken(.Ident, "auto", 0, at))
+    }
+    tokens.append(at)
+    tokens.append(packToken(.LParen, "(", 0, at))
+    tokens.append(packToken(.RParen, ")", 0, at))
+    tokens.append(packToken(.LParen, "(", 0, at))
+    var autos = 0
+    for i in parameterStart..parameterEnd {
+        let t = p.tokens[i]
+        if t.kind == .Ident && t.text == "auto" {
+            tokens.append(packToken(.Ident, joinText(["__karc_auto_", decimalText(autos)]), 0, t))
+            autos = autos + 1
+        } else {
+            tokens.append(t)
+        }
+    }
+    tokens.append(packToken(.RParen, ")", 0, at))
+    for i in bodyStart..p.position { tokens.append(p.tokens[i]) }
+    return tokens
+}
+function dropDeclarationsFrom(p: borrow mut Parser, firstStruct: Int, firstDeferred: Int, firstEntity: Int, firstTemplate: Int, firstExpression: Int, firstStatement: Int) {
+    var structs: [CppStruct] = []
+    for i in 0..firstStruct { structs.append(p.tree.structs[i]) }
+    p.tree.structs = structs
+    var deferred: [CppFunction] = []
+    for i in 0..firstDeferred { deferred.append(p.deferredFunctions[i]) }
+    p.deferredFunctions = deferred
+    rollbackEntities(p.tree, firstEntity)
+    var templates: [CppTemplate] = []
+    for i in 0..firstTemplate { templates.append(p.tree.templates[i]) }
+    p.tree.templates = templates
+    var expressions: [Expr] = []
+    for i in 0..firstExpression { expressions.append(p.tree.expressions[i]) }
+    p.tree.expressions = expressions
+    var statements: [Statement] = []
+    for i in 0..firstStatement { statements.append(p.tree.statements[i]) }
+    p.tree.statements = statements
+}
+function isLambdaSpecifier(text: String) -> Bool {
+    match text {
+        "mutable", "constexpr", "noexcept" -> return true
+        else -> return false
+    }
+}

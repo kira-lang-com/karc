@@ -1,0 +1,563 @@
+// Source lexer. Token data types live in syntax-model/token.klfd.
+
+function digit(byte: Int) -> Bool {
+    return byte >= 48 && byte <= 57
+}
+function letter(byte: Int) -> Bool {
+    return (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 95
+}
+function unsignedIntegerSuffix(suffix: String) -> Bool {
+    match suffix {
+        "u", "U", "ul", "uL", "Ul", "UL", "lu", "lU", "Lu", "LU", "ull", "uLL", "Ull", "ULL", "llu", "llU", "Llu", "LLU" -> return true
+        else -> return false
+    }
+}
+function hexBitPattern(source: String, start: Int, end: Int) -> Int {
+    var first = 0
+    let firstByte = utf8Byte(source, start + 2)
+    if firstByte >= 48 && firstByte <= 57 { first = firstByte - 48 }
+    else if firstByte >= 97 && firstByte <= 102 { first = firstByte - 97 + 10 }
+    else { first = firstByte - 65 + 10 }
+    var value: Int = 0
+    let digitStart = start + 2
+    for i in digitStart..end {
+        let h = utf8Byte(source, i)
+        if h == 39 { continue }
+        var digitValue: Int = 0
+        if h >= 48 && h <= 57 { digitValue = h - 48 }
+        else if h >= 97 && h <= 102 { digitValue = h - 97 + 10 }
+        else { digitValue = h - 65 + 10 }
+        if first < 8 { value = value * 16 + digitValue }
+    }
+    if first < 8 { return value }
+    var magnitude: Int = 0
+    for i in digitStart..end {
+        let h = utf8Byte(source, i)
+        if h == 39 { continue }
+        var digitValue: Int = 0
+        if h >= 48 && h <= 57 { digitValue = h - 48 }
+        else if h >= 97 && h <= 102 { digitValue = h - 97 + 10 }
+        else { digitValue = h - 65 + 10 }
+        magnitude = magnitude * 16 + (15 - digitValue)
+    }
+    if magnitude == 9223372036854775807 { return 0 - 9223372036854775807 - 1 }
+    return 0 - (magnitude + 1)
+}
+function decimalUnsignedValue(source: String, start: Int, end: Int) -> Int {
+    let limit = "9223372036854775808"
+    var digits: [Int] = []
+    for i in start..end {
+        let c = utf8Byte(source, i)
+        if c != 39 { digits.append(c - 48) }
+    }
+    var aboveLimit = digits.count > 19
+    if !aboveLimit && digits.count == 19 {
+        for k in 0..19 {
+            let limitDigit = utf8Byte(limit, k) - 48
+            if digits[k] > limitDigit { aboveLimit = true; break }
+            if digits[k] < limitDigit { break }
+        }
+    }
+    if !aboveLimit {
+        var value: Int = 0
+        for i in 0..digits.count {
+            value = value * 10 + digits[i]
+        }
+        return value
+    }
+    var reverse: [Int] = []
+    var borrow = 0
+    for offset in 0..digits.count {
+        let position = digits.count - offset - 1
+        let thresholdPosition = position - (digits.count - 19)
+        var limitDigit = 0
+        if thresholdPosition >= 0 { limitDigit = utf8Byte(limit, thresholdPosition) - 48 }
+        var difference = digits[position] - borrow - limitDigit
+        if difference < 0 { difference = difference + 10; borrow = 1 }
+        else { borrow = 0 }
+        reverse.append(difference)
+    }
+    var delta: Int = 0
+    for offset in 0..reverse.count {
+        let position = reverse.count - offset - 1
+        delta = delta * 10 + reverse[position]
+    }
+    return 0 - 9223372036854775807 - 1 + delta
+}
+function token(kind: TokenKind, text: String, number: Int, start: Int, end: Int, line: Bool) -> Token {
+    return Token { space = false, spelling = "", kind = kind, text = text, number = number, start = start, end = end, line = line }
+}
+function sourceToken(source: String, kind: TokenKind, text: String, number: Int, start: Int, end: Int, line: Bool, space: Bool) -> Token {
+    return Token { space = space, spelling = utf8Slice(source, start, end), kind = kind, text = text, number = number, start = start, end = end, line = line }
+}
+// The reserved-word token for an identifier lexeme, or `.Ident` when the lexeme
+// is an ordinary name. The C keyword set of the supported subset.
+function reservedWord(text: String) -> TokenKind {
+    match text {
+        "int" -> return .KwInt
+        "char" -> return .KwChar
+        "bool" -> return .KwBool
+        "long" -> return .KwLong
+        "void" -> return .KwVoid
+        "const" -> return .KwConst
+        "return" -> return .KwReturn
+        "while" -> return .KwWhile
+        "if" -> return .KwIf
+        "else" -> return .KwElse
+        "for" -> return .KwFor
+        "do" -> return .KwDo
+        "switch" -> return .KwSwitch
+        "case" -> return .KwCase
+        "default" -> return .KwDefault
+        "break" -> return .KwBreak
+        "continue" -> return .KwContinue
+        "sizeof" -> return .KwSizeof
+        "struct", "union" -> return .KwStruct
+        "typedef" -> return .KwTypedef
+        "enum" -> return .KwEnum
+        "static" -> return .KwStatic
+        "extern" -> return .KwExtern
+        "inline" -> return .KwInline
+        "register" -> return .KwRegister
+        "volatile" -> return .KwVolatile
+        "unsigned" -> return .KwUnsigned
+        "signed" -> return .KwSigned
+        else -> return .Ident
+    }
+}
+// The token for a one-, two- or three-character operator or delimiter lexeme.
+// Only lexemes the lexer has already validated reach here.
+function punctuation(text: String) -> Optional<TokenKind> {
+    match text {
+        "<<=" -> return .Some(.ShlEq)
+        ">>=" -> return .Some(.ShrEq)
+        "==" -> return .Some(.EqEq)
+        "!=" -> return .Some(.NotEq)
+        "<=>" -> return .Some(.Spaceship)
+        "<=" -> return .Some(.Le)
+        ">=" -> return .Some(.Ge)
+        "++" -> return .Some(.PlusPlus)
+        "--" -> return .Some(.MinusMinus)
+        "+=" -> return .Some(.PlusEq)
+        "-=" -> return .Some(.MinusEq)
+        "*=" -> return .Some(.StarEq)
+        "/=" -> return .Some(.SlashEq)
+        "%=" -> return .Some(.PercentEq)
+        "&&" -> return .Some(.AndAnd)
+        "||" -> return .Some(.OrOr)
+        "&=" -> return .Some(.AmpEq)
+        "|=" -> return .Some(.PipeEq)
+        "^=" -> return .Some(.CaretEq)
+        "<<" -> return .Some(.Shl)
+        ">>" -> return .Some(.Shr)
+        "->" -> return .Some(.Arrow)
+        "##" -> return .Some(.HashHash)
+        "(" -> return .Some(.LParen)
+        ")" -> return .Some(.RParen)
+        "{" -> return .Some(.LBrace)
+        "}" -> return .Some(.RBrace)
+        "[" -> return .Some(.LBracket)
+        "]" -> return .Some(.RBracket)
+        ";" -> return .Some(.Semicolon)
+        "," -> return .Some(.Comma)
+        "." -> return .Some(.Dot)
+        "..." -> return .Some(.Ellipsis)
+        ":" -> return .Some(.Colon)
+        "?" -> return .Some(.Question)
+        "#" -> return .Some(.Hash)
+        "+" -> return .Some(.Plus)
+        "-" -> return .Some(.Minus)
+        "*" -> return .Some(.Star)
+        "/" -> return .Some(.Slash)
+        "%" -> return .Some(.Percent)
+        "<" -> return .Some(.Lt)
+        ">" -> return .Some(.Gt)
+        "=" -> return .Some(.Assign)
+        "!" -> return .Some(.Bang)
+        "&" -> return .Some(.Amp)
+        "|" -> return .Some(.Pipe)
+        "^" -> return .Some(.Caret)
+        "~" -> return .Some(.Tilde)
+        else -> return .None
+    }
+}
+function lexUnspliced(source: String) -> Lexed {
+    var tokens: [Token] = []
+    var i: Int = 0
+    var lineStart: Bool = true
+    var directiveLine: Bool = false
+    var spaceBefore: Bool = true
+    let size = utf8Count(source)
+    while i < size {
+        let c = utf8Byte(source, i)
+        if c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12 {
+            spaceBefore = true
+            if c == 10 || c == 13 {
+                lineStart = true
+                directiveLine = false
+            }
+            i = i + 1
+            continue
+        }
+        if c == 47 && i + 1 < size {
+            let next = utf8Byte(source, i + 1)
+            if next == 47 {
+                spaceBefore = true
+                i = i + 2
+                while i < size && utf8Byte(source, i) != 10 {
+                    i = i + 1
+                }
+                continue
+            }
+            if next == 42 {
+                spaceBefore = true
+                let start = i
+                i = i + 2
+                var closed: Bool = false
+                while i + 1 < size {
+                    if utf8Byte(source, i) == 42 && utf8Byte(source, i + 1) == 47 {
+                        i = i + 2
+                        closed = true
+                        break
+                    }
+                    i = i + 1
+                }
+                if !closed {
+                    return Lexed { tokens = tokens, error = "Unterminated comment", errorOffset = start }
+                }
+                continue
+            }
+        }
+        if c == 82 && i + 2 < size && utf8Byte(source, i + 1) == 34 {
+            let start = i
+            var delimiterEnd = i + 2
+            while delimiterEnd < size && utf8Byte(source, delimiterEnd) != 40 {
+                delimiterEnd = delimiterEnd + 1
+            }
+            if delimiterEnd < size {
+                let delimiter = utf8Slice(source, i + 2, delimiterEnd)
+                let delimiterSize = utf8Count(delimiter)
+                let contentStart = delimiterEnd + 1
+                i = contentStart
+                var closed = false
+                while i < size {
+                    if utf8Byte(source, i) == 41 {
+                        let quote = i + 1 + delimiterSize
+                        if quote < size && utf8Slice(source, i + 1, quote) == delimiter && utf8Byte(source, quote) == 34 {
+                            closed = true
+                            break
+                        }
+                    }
+                    i = i + 1
+                }
+                if !closed { return Lexed { tokens = tokens, error = "Unterminated raw string literal", errorOffset = start } }
+                let raw = utf8Slice(source, contentStart, i)
+                i = i + 1 + delimiterSize + 1
+                tokens.append(sourceToken(source, .Str, raw, 0, start, i, lineStart, spaceBefore))
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+        }
+        if letter(c) {
+            let start = i
+            i = i + 1
+            while i < size && (letter(utf8Byte(source, i)) || digit(utf8Byte(source, i))) {
+                i = i + 1
+            }
+            let text = utf8Slice(source, start, i)
+            let kind = reservedWord(text)
+            if kind == .Ident && !directiveLine && forbiddenIdentifier(text) {
+                return Lexed { tokens = tokens, error = "Keyword or reserved identifier outside subset", errorOffset = start }
+            }
+            tokens.append(sourceToken(source, kind, text, 0, start, i, lineStart, spaceBefore))
+            lineStart = false
+            spaceBefore = false
+            continue
+        }
+        if digit(c) || (c == 46 && i + 1 < size && digit(utf8Byte(source, i + 1))) {
+            let start = i
+            // Binary literal: 0b / 0B followed by binary digits.
+            if c == 48 && i + 2 < size && (utf8Byte(source, i + 1) == 98 || utf8Byte(source, i + 1) == 66) &&
+                (utf8Byte(source, i + 2) == 48 || utf8Byte(source, i + 2) == 49) {
+                i = i + 2
+                var value: Int = 0
+                var bits: Int = 0
+                while i < size && (utf8Byte(source, i) == 48 || utf8Byte(source, i) == 49 || utf8Byte(source, i) == 39) {
+                    if utf8Byte(source, i) != 39 {
+                        value = value * 2 + utf8Byte(source, i) - 48
+                        bits = bits + 1
+                    }
+                    i = i + 1
+                }
+                if bits > 63 { return Lexed { tokens = tokens, error = "Integer literal exceeds 64 bits", errorOffset = start } }
+                let suffixStart = i
+                while i < size && letter(utf8Byte(source, i)) { i = i + 1 }
+                let suffix = utf8Slice(source, suffixStart, i)
+                if suffix != "" && !standardNumberSuffix(suffix, false) {
+                    return Lexed { tokens = tokens, error = "Malformed binary literal", errorOffset = start }
+                }
+                tokens.append(sourceToken(source, .Number, integerSuffixKind(suffix), value, start, i, lineStart, spaceBefore))
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+            // Hexadecimal literal: 0x / 0X followed by hex digits.
+            if c == 48 && i + 1 < size && (utf8Byte(source, i + 1) == 120 || utf8Byte(source, i + 1) == 88) {
+                i = i + 2
+                var value: Int = 0
+                var digits: Int = 0
+                var firstDigit: Int = -1
+                while i < size {
+                    let h = utf8Byte(source, i)
+                    if h == 39 {
+                        if i == start + 2 || i + 1 >= size { return Lexed { tokens = tokens, error = "Malformed hexadecimal literal", errorOffset = start } }
+                        i = i + 1
+                        continue
+                    }
+                    var d: Int = -1
+                    if h >= 48 && h <= 57 { d = h - 48 }
+                    if h >= 97 && h <= 102 { d = h - 97 + 10 }
+                    if h >= 65 && h <= 70 { d = h - 65 + 10 }
+                    if d < 0 { break }
+                    if firstDigit < 0 { firstDigit = d }
+                    if firstDigit < 8 || digits < 15 {
+                        if value > (9223372036854775807 - d) / 16 {
+                            return Lexed { tokens = tokens, error = "Integer literal exceeds 64 bits", errorOffset = start }
+                        }
+                        value = value * 16 + d
+                    }
+                    digits = digits + 1
+                    if digits > 16 { return Lexed { tokens = tokens, error = "Integer literal exceeds 64 bits", errorOffset = start } }
+                    i = i + 1
+                }
+                if digits == 0 { return Lexed { tokens = tokens, error = "Malformed hexadecimal literal", errorOffset = start } }
+                let suffixStart = i
+                while i < size && letter(utf8Byte(source, i)) { i = i + 1 }
+                let suffix = utf8Slice(source, suffixStart, i)
+                if suffix != "" && !standardNumberSuffix(suffix, false) {
+                    return Lexed { tokens = tokens, error = "Malformed hexadecimal literal", errorOffset = start }
+                }
+                var kind = integerSuffixKind(suffix)
+                if digits == 16 && firstDigit >= 8 {
+                    value = hexBitPattern(source, start, suffixStart)
+                    kind = "ul"
+                }
+                tokens.append(sourceToken(source, .Number, kind, value, start, i, lineStart, spaceBefore))
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+            var value: Int = 0
+            var overflow = false
+            var isFloat: Bool = false
+            if c == 46 {
+                isFloat = true
+                i = i + 1
+                while i < size && digit(utf8Byte(source, i)) { i = i + 1 }
+            }
+            while !isFloat && i < size && digit(utf8Byte(source, i)) {
+                let nextDigit = utf8Byte(source, i) - 48
+                if !overflow {
+                    if value > (9223372036854775807 - nextDigit) / 10 {
+                        overflow = true
+                    } else {
+                        value = value * 10 + nextDigit
+                    }
+                }
+                i = i + 1
+            }
+            while i < size && utf8Byte(source, i) == 39 {
+                if i + 1 >= size || !digit(utf8Byte(source, i + 1)) { return Lexed { tokens = tokens, error = "Malformed decimal literal", errorOffset = start } }
+                i = i + 1
+                while i < size && digit(utf8Byte(source, i)) {
+                    let nextDigit = utf8Byte(source, i) - 48
+                    if !overflow {
+                        if value > (9223372036854775807 - nextDigit) / 10 {
+                            overflow = true
+                        } else {
+                            value = value * 10 + nextDigit
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+            if !isFloat && i < size && utf8Byte(source, i) == 46 && i + 1 < size && digit(utf8Byte(source, i + 1)) {
+                isFloat = true
+                i = i + 1
+                while i < size && (digit(utf8Byte(source, i)) || utf8Byte(source, i) == 39) { i = i + 1 }
+            }
+            if i < size && (utf8Byte(source, i) == 101 || utf8Byte(source, i) == 69) {
+                isFloat = true
+                i = i + 1
+                if i < size && (utf8Byte(source, i) == 43 || utf8Byte(source, i) == 45) { i = i + 1 }
+                let exponentStart = i
+                while i < size && (digit(utf8Byte(source, i)) || utf8Byte(source, i) == 39) { i = i + 1 }
+                if i == exponentStart { return Lexed { tokens = tokens, error = "Malformed decimal literal", errorOffset = start } }
+            }
+            let suffixStart = i
+            while i < size && letter(utf8Byte(source, i)) { i = i + 1 }
+            let suffix = utf8Slice(source, suffixStart, i)
+            if suffix != "" && !standardNumberSuffix(suffix, isFloat) {
+                // `1.5s`, `100ms`: a user-defined literal.
+                while i < size && (letter(utf8Byte(source, i)) || digit(utf8Byte(source, i))) { i = i + 1 }
+                var literal = token(.Number, "", value, start, suffixStart, lineStart)
+                if isFloat { literal = token(.Float, utf8Slice(source, start, suffixStart), 0, start, suffixStart, lineStart) }
+                for t in literalCall(literal, utf8Slice(source, suffixStart, i), i) { tokens.append(t) }
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+            if isFloat {
+                tokens.append(sourceToken(source, .Float, utf8Slice(source, start, suffixStart), 0, start, i, lineStart, spaceBefore))
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+            if suffix != "" && !standardNumberSuffix(suffix, false) {
+                return Lexed { tokens = tokens, error = "Malformed decimal literal", errorOffset = start }
+            }
+            var kind = integerSuffixKind(suffix)
+            if overflow {
+                if !unsignedIntegerSuffix(suffix) { return Lexed { tokens = tokens, error = "Integer literal exceeds 64 bits", errorOffset = start } }
+                value = decimalUnsignedValue(source, start, suffixStart)
+                kind = "ul"
+            }
+            tokens.append(sourceToken(source, .Number, kind, value, start, i, lineStart, spaceBefore))
+            lineStart = false
+            spaceBefore = false
+            continue
+        }
+        if c == 39 {
+            // Character literal: one character or a simple escape, as an int.
+            let start = i
+            i = i + 1
+            if i >= size {
+                return Lexed { tokens = tokens, error = "Unterminated character literal", errorOffset = start }
+            }
+            var code: Int = 0
+            let ch = utf8Byte(source, i)
+            if ch == 92 {
+                i = i + 1
+                if i >= size {
+                    return Lexed { tokens = tokens, error = "Unterminated character literal", errorOffset = start }
+                }
+                code = escapeCode(source, i)
+                i = i + escapeLength(source, i) - 1
+                i = i + 1
+            } else {
+                code = ch
+                i = i + 1
+            }
+            if i >= size || utf8Byte(source, i) != 39 {
+                return Lexed { tokens = tokens, error = "Unterminated character literal", errorOffset = start }
+            }
+            i = i + 1
+            tokens.append(sourceToken(source, .Number, "char", code, start, i, lineStart, spaceBefore))
+            lineStart = false
+            spaceBefore = false
+            continue
+        }
+        if c == 34 {
+            // String literal: the raw inner text (escapes kept) is stored and
+            // re-escaped into a KIR byte string at emission.
+            let start = i
+            i = i + 1
+            while i < size && utf8Byte(source, i) != 34 {
+                if utf8Byte(source, i) == 92 {
+                    i = i + 2
+                } else {
+                    i = i + 1
+                }
+            }
+            if i >= size {
+                return Lexed { tokens = tokens, error = "Unterminated string literal", errorOffset = start }
+            }
+            let raw = utf8Slice(source, start + 1, i)
+            i = i + 1
+            let naming = raw == "" && tokens.count > 0 && tokens[tokens.count - 1].kind == .Ident && tokens[tokens.count - 1].text == "operator"
+            var suffixStart = i
+            if naming {
+                while suffixStart < size && (utf8Byte(source, suffixStart) == 32 || utf8Byte(source, suffixStart) == 9) { suffixStart = suffixStart + 1 }
+            }
+            if naming && suffixStart < size && letter(utf8Byte(source, suffixStart)) {
+                var suffixEnd = suffixStart
+                while suffixEnd < size && (letter(utf8Byte(source, suffixEnd)) || digit(utf8Byte(source, suffixEnd))) { suffixEnd = suffixEnd + 1 }
+                let suffix = utf8Slice(source, suffixStart, suffixEnd)
+                let literal = token(.Str, raw, 0, start, i, lineStart)
+                i = suffixEnd
+                if naming {
+                    // `operator""ms`: the function a `ms` literal calls.
+                    let named = tokens[tokens.count - 1]
+                    var kept: [Token] = []
+                    for k in 0..(tokens.count - 1) { kept.append(tokens[k]) }
+                    // Spanning the suffix: a function's KIR name is taken
+                    // from an identifier's span.
+                    kept.append(token(.Ident, literalOperatorName(suffix), 0, suffixStart, i, named.line))
+                    tokens = kept
+                } else {
+                    for t in literalCall(literal, suffix, i) { tokens.append(t) }
+                }
+                lineStart = false
+                spaceBefore = false
+                continue
+            }
+            tokens.append(sourceToken(source, .Str, raw, 0, start, i, lineStart, spaceBefore))
+            lineStart = false
+            spaceBefore = false
+            continue
+        }
+        // Three-character shift-assignment operators, before the two-character
+        // shift and comparison operators.
+        if i + 2 < size {
+            let triple = utf8Slice(source, i, i + 3)
+            match punctuation(triple) {
+                Some(kind) -> {
+                    tokens.append(sourceToken(source, kind, triple, 0, i, i + 3, lineStart, spaceBefore))
+                    lineStart = false
+                    spaceBefore = false
+                    i = i + 3
+                    continue
+                }
+                None -> {}
+            }
+        }
+        // Two-character comparison, compound-assignment and step operators,
+        // recognized before splitting into single characters.
+        if i + 1 < size {
+            let pair = utf8Slice(source, i, i + 2)
+            if pair == "??" {
+                return Lexed { tokens = tokens, error = "Operator outside subset", errorOffset = i }
+            }
+            match punctuation(pair) {
+                Some(kind) -> {
+                    tokens.append(sourceToken(source, kind, pair, 0, i, i + 2, lineStart, spaceBefore))
+                    lineStart = false
+                    spaceBefore = false
+                    i = i + 2
+                    continue
+                }
+                None -> {}
+            }
+        }
+        let text = utf8Slice(source, i, i + 1)
+        match punctuation(text) {
+            Some(kind) -> {
+                tokens.append(sourceToken(source, kind, text, 0, i, i + 1, lineStart, spaceBefore))
+                if text == "#" && lineStart { directiveLine = true }
+                lineStart = false
+                spaceBefore = false
+                i = i + 1
+                continue
+            }
+            None -> {}
+        }
+        tokens.append(sourceToken(source, .Other, text, 0, i, i + 1, lineStart, spaceBefore))
+        lineStart = false
+        spaceBefore = false
+        i = i + 1
+    }
+    tokens.append(sourceToken(source, .End, "", 0, size, size, lineStart, spaceBefore))
+    return Lexed { tokens = tokens, error = "", errorOffset = 0 }
+}
+// The floating-point builtins, one per KIR float operation.

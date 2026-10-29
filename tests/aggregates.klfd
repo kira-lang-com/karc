@@ -1,0 +1,82 @@
+import Testing
+
+@Test
+function compilesArrayParameters() {
+    expect!(run("""
+        int sum(int a[], int n) { int s = 0; for (int i = 0; i < n; i++) { s += a[i]; } return s; } int main() { int arr[5]; for (int i = 0; i < 5; i++) { arr[i] = i + 1; } return sum(arr, 5); }
+        """) == 15)
+    expect!(run("""
+        int fill(int a[], int n) { for (int i = 0; i < n; i++) { a[i] = i * 10; } return 0; } int main() { int arr[4]; fill(arr, 4); return arr[3]; }
+        """) == 30)
+    expect!(run("int first(int* a) { return a[0]; } int main() { int x[3]; x[0] = 42; return first(x); }") == 42)
+    expect!(run("""
+        int len(char b[]) { int n = 0; while (b[n] != 0) { n = n + 1; } return n; } int main() { char s[4]; s[0] = 'h'; s[1] = 'i'; s[2] = 0; return len(s); }
+        """) == 2)
+    expect!(run("""
+        int at(int* a, int i) { return a[i]; } int mid(int* a) { return at(a, 1); } int main() { int x[3]; x[1] = 77; return mid(x); }
+        """) == 77)
+}
+
+@Test
+function compilesEnums() {
+    expect!(run("enum Color { RED, GREEN, BLUE }; int main() { return GREEN; }") == 1)
+    expect!(run("enum Color { RED, GREEN, BLUE }; int main() { return RED + BLUE; }") == 2)
+    expect!(run("enum E { A = 5, B, C = 10, D }; int main() { return A + B + C + D; }") == 32)
+    expect!(run("enum Color { RED, GREEN, BLUE }; int main() { enum Color c = BLUE; return c; }") == 2)
+    expect!(run("""
+        enum Flags { NONE = 0, READ = 1, WRITE = 2, RW = 3 }; int main() { int f = READ | WRITE; if (f == RW) { return 42; } return 0; }
+        """) == 42)
+}
+
+@Test
+function compilesFileScopeGlobals() {
+    expect!(run("int counter = 5; int main() { return counter; }") == 5)
+    expect!(run("int counter; int main() { counter = 7; return counter; }") == 7)
+    expect!(run("""
+        int table[3]; int main() { table[0] = 1; table[1] = 2; table[2] = 4; return table[0] + table[1] + table[2]; }
+        """) == 7)
+    expect!(run("int n = 0; void bump() { n = n + 1; } int main() { bump(); bump(); bump(); return n; }") == 3)
+}
+
+@Test
+function compilesStringLiterals() {
+    expect!(run("""
+        int slen(char* s) { int n = 0; while (s[n] != 0) { n = n + 1; } return n; } int main() { return slen("hello"); }
+        """) == 5)
+    expect!(run("""
+        int slen(char* s) { int n = 0; while (s[n] != 0) { n = n + 1; } return n; } int main() { return slen(""); }
+        """) == 0)
+    expect!(run("""
+        int slen(char* s) { int n = 0; while (s[n] != 0) { n = n + 1; } return n; } int main() { return slen("a\\nb"); }
+        """) == 3)
+    expect!(run("""
+        int scmp(char* a, char* b) { int i = 0; while (a[i] != 0 && a[i] == b[i]) { i = i + 1; } return a[i] - b[i]; } int main() { return scmp("abc", "abc"); }
+        """) == 0)
+    expect!(run("""
+        int scmp(char* a, char* b) { int i = 0; while (a[i] != 0 && a[i] == b[i]) { i = i + 1; } return a[i] - b[i]; } int main() { int d = scmp("abc", "abd"); return d < 0 ? 1 : 0; }
+        """) == 1)
+}
+
+@Test
+function compilesStructValueReturns() {
+    expect!(run("""
+        struct P { int x; int y; }; struct P make(int a, int b) { struct P r; r.x = a; r.y = b; return r; } int main() { struct P p = make(3, 4); return p.x + p.y; }
+        """) == 7)
+    expect!(run("""
+        struct DivT { int q; int rem; }; struct DivT divmod(int a, int b) { struct DivT d; d.q = a / b; d.rem = a % b; return d; } int main() { struct DivT r = divmod(17, 5); return r.q * 10 + r.rem; }
+        """) == 32)
+}
+
+@Test
+function compilesStructs() {
+    expect!(run("""
+        struct Point { int x; int y; }; int main() { struct Point p; p.x = 3; p.y = 4; return p.x + p.y; }
+        """) == 7)
+    expect!(run("struct P { int x; int y; }; int main() { struct P p; p.x = 9; return p.x + p.y; }") == 9)
+    expect!(run("""
+        struct S { int a; char c; long b; }; int main() { struct S s; s.a = 5; s.c = 2; s.b = 100; return s.a + s.c + s.b; }
+        """) == 107)
+    expect!(run("""
+        struct V { int lo; int hi; }; int main() { struct V a; struct V b; a.lo = 1; a.hi = 2; b.lo = 10; b.hi = 20; return a.lo + a.hi + b.lo + b.hi; }
+        """) == 33)
+}

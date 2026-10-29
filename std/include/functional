@@ -1,0 +1,365 @@
+// <functional>: the comparison and arithmetic function objects, and
+// std::function.
+#ifndef KARC_STD_FUNCTIONAL
+#define KARC_STD_FUNCTIONAL
+
+#include <cstddef>
+#include <exception>
+#include <string>
+#include <string_view>
+
+namespace std {
+
+// The operator function objects. Each defaults to <void>, the transparent
+// form, whose operator() takes any two argument types.
+template <typename T = void> struct less { bool operator()(const T& a, const T& b) const { return a < b; } int unused; };
+template <> struct less<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a < b; }
+    int unused;
+};
+template <typename T = void> struct greater { bool operator()(const T& a, const T& b) const { return b < a; } int unused; };
+template <> struct greater<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return b < a; }
+    int unused;
+};
+template <typename T = void> struct less_equal { bool operator()(const T& a, const T& b) const { return !(b < a); } int unused; };
+template <> struct less_equal<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return !(b < a); }
+    int unused;
+};
+template <typename T = void> struct greater_equal { bool operator()(const T& a, const T& b) const { return !(a < b); } int unused; };
+template <> struct greater_equal<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return !(a < b); }
+    int unused;
+};
+template <typename T = void> struct equal_to { bool operator()(const T& a, const T& b) const { return a == b; } int unused; };
+template <> struct equal_to<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a == b; }
+    int unused;
+};
+template <typename T = void> struct not_equal_to { bool operator()(const T& a, const T& b) const { return !(a == b); } int unused; };
+template <> struct not_equal_to<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return !(a == b); }
+    int unused;
+};
+template <typename T = void> struct logical_and { bool operator()(const T& a, const T& b) const { return a && b; } int unused; };
+template <> struct logical_and<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a && b; }
+    int unused;
+};
+template <typename T = void> struct logical_or { bool operator()(const T& a, const T& b) const { return a || b; } int unused; };
+template <> struct logical_or<void> {
+    template <typename A, typename B>
+    bool operator()(const A& a, const B& b) const { return a || b; }
+    int unused;
+};
+template <typename T = void> struct plus { T operator()(const T& a, const T& b) const { return a + b; } int unused; };
+template <> struct plus<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a + b; }
+    int unused;
+};
+template <typename T = void> struct minus { T operator()(const T& a, const T& b) const { return a - b; } int unused; };
+template <> struct minus<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a - b; }
+    int unused;
+};
+template <typename T = void> struct multiplies { T operator()(const T& a, const T& b) const { return a * b; } int unused; };
+template <> struct multiplies<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a * b; }
+    int unused;
+};
+template <typename T = void> struct divides { T operator()(const T& a, const T& b) const { return a / b; } int unused; };
+template <> struct divides<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a / b; }
+    int unused;
+};
+template <typename T = void> struct modulus { T operator()(const T& a, const T& b) const { return a % b; } int unused; };
+template <> struct modulus<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a % b; }
+    int unused;
+};
+template <typename T = void> struct bit_and { T operator()(const T& a, const T& b) const { return a & b; } int unused; };
+template <> struct bit_and<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a & b; }
+    int unused;
+};
+template <typename T = void> struct bit_or { T operator()(const T& a, const T& b) const { return a | b; } int unused; };
+template <> struct bit_or<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a | b; }
+    int unused;
+};
+template <typename T = void> struct bit_xor { T operator()(const T& a, const T& b) const { return a ^ b; } int unused; };
+template <> struct bit_xor<void> {
+    template <typename A, typename B>
+    auto operator()(const A& a, const B& b) const { return a ^ b; }
+    int unused;
+};
+template <typename T = void> struct negate { T operator()(const T& a) const { return -a; } int unused; };
+template <typename T = void> struct logical_not { bool operator()(const T& a) const { return !a; } int unused; };
+template <typename T = void> struct bit_not { T operator()(const T& a) const { return ~a; } int unused; };
+struct identity {
+    template <typename T>
+    const T& operator()(const T& value) const { return value; }
+    int unused;
+};
+
+// std::hash: FNV-1a over the value's bytes, or over a string's characters.
+inline size_t karc_hash_bytes(const unsigned char* bytes, size_t count) {
+    size_t hash = 14695981039346656037ul;
+    for (size_t i = 0; i < count; i++) {
+        hash = hash ^ bytes[i];
+        hash = hash * 1099511628211ul;
+    }
+    return hash;
+}
+template <typename T> struct hash {
+    size_t operator()(const T& value) const { return karc_hash_bytes((const unsigned char*)&value, sizeof(T)); }
+    int unused;
+};
+template <> struct hash<string> {
+    size_t operator()(const string& value) const { return karc_hash_bytes((const unsigned char*)value.c_str(), value.size()); }
+    int unused;
+};
+template <> struct hash<string_view> {
+    size_t operator()(const string_view& value) const { return karc_hash_bytes((const unsigned char*)value.data(), value.size()); }
+    int unused;
+};
+
+class bad_function_call : public exception {
+public:
+    const char* what() const override { return "bad function call"; }
+};
+
+// std::function<R(Args...)>: any callable with that signature, behind a
+// virtual invoke. Calls take up to eight arguments.
+template <typename F>
+class karc_callable {
+public:
+    virtual ~karc_callable() {}
+    virtual __karc_fn_result(F) invoke(__karc_fn_param(F, 0) a0, __karc_fn_param(F, 1) a1, __karc_fn_param(F, 2) a2, __karc_fn_param(F, 3) a3, __karc_fn_param(F, 4) a4, __karc_fn_param(F, 5) a5, __karc_fn_param(F, 6) a6, __karc_fn_param(F, 7) a7) = 0;
+    virtual karc_callable<F>* clone() const = 0;
+};
+
+template <typename F, typename L>
+class karc_callable_impl : public karc_callable<F> {
+public:
+    karc_callable_impl(const L& target) : target_(target) {}
+    __karc_fn_result(F) invoke(__karc_fn_param(F, 0) a0, __karc_fn_param(F, 1) a1, __karc_fn_param(F, 2) a2, __karc_fn_param(F, 3) a3, __karc_fn_param(F, 4) a4, __karc_fn_param(F, 5) a5, __karc_fn_param(F, 6) a6, __karc_fn_param(F, 7) a7) override {
+        return target_(a0, a1, a2, a3, a4, a5, a6, a7);
+    }
+    karc_callable<F>* clone() const override { return new karc_callable_impl<F, L>(target_); }
+    L target_;
+};
+
+template <typename F>
+class function {
+public:
+    function() : callable_(0) {}
+    template <typename L>
+    function(L target) : callable_(new karc_callable_impl<F, L>(target)) {}
+    function(const function& other) : callable_(0) {
+        if (other.callable_ != 0) { callable_ = other.callable_->clone(); }
+    }
+    ~function() { delete callable_; }
+    function& operator=(const function& other) {
+        if (this == &other) { return *this; }
+        delete callable_;
+        callable_ = 0;
+        if (other.callable_ != 0) { callable_ = other.callable_->clone(); }
+        return *this;
+    }
+    __karc_fn_result(F) operator()(__karc_fn_param(F, 0) a0, __karc_fn_param(F, 1) a1, __karc_fn_param(F, 2) a2, __karc_fn_param(F, 3) a3, __karc_fn_param(F, 4) a4, __karc_fn_param(F, 5) a5, __karc_fn_param(F, 6) a6, __karc_fn_param(F, 7) a7) const {
+        if (callable_ == 0) { karc_throw_bad_function_call(); }
+        return callable_->invoke(a0, a1, a2, a3, a4, a5, a6, a7);
+    }
+    explicit operator bool() const { return callable_ != 0; }
+
+private:
+    karc_callable<F>* callable_;
+};
+// std::invoke of a callable; KArc has no pointers to members.
+template <typename F, typename... Args>
+auto invoke(F f, Args&&... args) { return f(std::forward<Args>(args)...); }
+
+// A reference as a copyable object: std::ref and std::cref make one.
+template <typename T>
+class reference_wrapper {
+public:
+    reference_wrapper(T& target) : target_(&target) {}
+    operator T&() const { return *target_; }
+    T& get() const { return *target_; }
+    template <typename... Args>
+    auto operator()(Args&&... args) const { return (*target_)(std::forward<Args>(args)...); }
+
+private:
+    T* target_;
+};
+template <typename T>
+reference_wrapper<T> ref(T& target) { return reference_wrapper<T>(target); }
+template <typename T>
+reference_wrapper<const T> cref(const T& target) { return reference_wrapper<const T>(target); }
+
+// not_fn(f): a callable giving !f(args...).
+template <typename F>
+struct karc_negated {
+    F function;
+    template <typename... Args>
+    bool operator()(Args&&... args) { return !function(std::forward<Args>(args)...); }
+};
+template <typename F>
+karc_negated<F> not_fn(F function) {
+    karc_negated<F> negated{function};
+    return negated;
+}
+
+// bind_front(f, a) and bind_front(f, a, b): the arguments given first.
+template <typename F, typename A>
+struct karc_bound1 {
+    F function;
+    A first;
+    template <typename... Rest>
+    auto operator()(Rest&&... rest) { return function(first, std::forward<Rest>(rest)...); }
+};
+template <typename F, typename A, typename B>
+struct karc_bound2 {
+    F function;
+    A first;
+    B second;
+    template <typename... Rest>
+    auto operator()(Rest&&... rest) { return function(first, second, std::forward<Rest>(rest)...); }
+};
+template <typename F, typename A>
+karc_bound1<F, A> bind_front(F function, A first) {
+    karc_bound1<F, A> bound{function, first};
+    return bound;
+}
+template <typename F, typename A, typename B>
+karc_bound2<F, A, B> bind_front(F function, A first, B second) {
+    karc_bound2<F, A, B> bound{function, first, second};
+    return bound;
+}
+
+// std::bind with the placeholders _1, _2 and _3, for up to three bound
+// arguments and three call arguments. karc_pick gives each bound argument,
+// or the call argument a placeholder stands for.
+template <int N>
+struct karc_placeholder {
+    int unused;
+};
+namespace placeholders {
+static karc_placeholder<1> _1;
+static karc_placeholder<2> _2;
+static karc_placeholder<3> _3;
+}
+struct karc_no_argument {
+    int unused;
+};
+template <typename X, typename Y, typename Z>
+X karc_pick(const karc_placeholder<1>& placeholder, X& x, Y& y, Z& z) { return x; }
+template <typename X, typename Y, typename Z>
+Y karc_pick(const karc_placeholder<2>& placeholder, X& x, Y& y, Z& z) { return y; }
+template <typename X, typename Y, typename Z>
+Z karc_pick(const karc_placeholder<3>& placeholder, X& x, Y& y, Z& z) { return z; }
+template <typename T, typename X, typename Y, typename Z>
+T karc_pick(const T& bound, X& x, Y& y, Z& z) { return bound; }
+template <typename F, typename A>
+struct karc_binder1 {
+    F function;
+    A first;
+    auto operator()() {
+        karc_no_argument none;
+        return function(karc_pick(first, none, none, none));
+    }
+    template <typename X>
+    auto operator()(X x) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, none, none));
+    }
+    template <typename X, typename Y>
+    auto operator()(X x, Y y) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, y, none));
+    }
+    template <typename X, typename Y, typename Z>
+    auto operator()(X x, Y y, Z z) { return function(karc_pick(first, x, y, z)); }
+};
+template <typename F, typename A>
+karc_binder1<F, A> bind(F function, A first) {
+    karc_binder1<F, A> bound{function, first};
+    return bound;
+}
+
+template <typename F, typename A, typename B>
+struct karc_binder2 {
+    F function;
+    A first;
+    B second;
+    auto operator()() {
+        karc_no_argument none;
+        return function(karc_pick(first, none, none, none), karc_pick(second, none, none, none));
+    }
+    template <typename X>
+    auto operator()(X x) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, none, none), karc_pick(second, x, none, none));
+    }
+    template <typename X, typename Y>
+    auto operator()(X x, Y y) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, y, none), karc_pick(second, x, y, none));
+    }
+    template <typename X, typename Y, typename Z>
+    auto operator()(X x, Y y, Z z) { return function(karc_pick(first, x, y, z), karc_pick(second, x, y, z)); }
+};
+template <typename F, typename A, typename B>
+karc_binder2<F, A, B> bind(F function, A first, B second) {
+    karc_binder2<F, A, B> bound{function, first, second};
+    return bound;
+}
+
+template <typename F, typename A, typename B, typename C>
+struct karc_binder3 {
+    F function;
+    A first;
+    B second;
+    C third;
+    auto operator()() {
+        karc_no_argument none;
+        return function(karc_pick(first, none, none, none), karc_pick(second, none, none, none), karc_pick(third, none, none, none));
+    }
+    template <typename X>
+    auto operator()(X x) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, none, none), karc_pick(second, x, none, none), karc_pick(third, x, none, none));
+    }
+    template <typename X, typename Y>
+    auto operator()(X x, Y y) {
+        karc_no_argument none;
+        return function(karc_pick(first, x, y, none), karc_pick(second, x, y, none), karc_pick(third, x, y, none));
+    }
+    template <typename X, typename Y, typename Z>
+    auto operator()(X x, Y y, Z z) { return function(karc_pick(first, x, y, z), karc_pick(second, x, y, z), karc_pick(third, x, y, z)); }
+};
+template <typename F, typename A, typename B, typename C>
+karc_binder3<F, A, B, C> bind(F function, A first, B second, C third) {
+    karc_binder3<F, A, B, C> bound{function, first, second, third};
+    return bound;
+}
+
+}
+
+#endif

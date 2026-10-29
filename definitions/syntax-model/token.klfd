@@ -1,0 +1,131 @@
+// Tokens and the source lexer, mirroring klf-kira-syntax's token.rs: a real
+// TokenKind enum classified by `reservedWord`, and tokens that carry a start and
+// end offset so the parser can build a `Span` per node.
+
+enum TokenKind {
+    Ident
+    Number
+    Float
+    Str
+    Other
+    Placemark
+
+    KwInt
+    KwChar
+    KwBool
+    KwLong
+    KwVoid
+    KwConst
+    KwReturn
+    KwWhile
+    KwIf
+    KwElse
+    KwFor
+    KwDo
+    KwSwitch
+    KwCase
+    KwDefault
+    KwBreak
+    KwContinue
+    KwSizeof
+    KwStruct
+    KwTypedef
+    KwEnum
+    KwStatic
+    KwExtern
+    KwInline
+    KwRegister
+    KwVolatile
+    KwUnsigned
+    KwSigned
+
+    LParen
+    RParen
+    LBrace
+    RBrace
+    LBracket
+    RBracket
+    Semicolon
+    Comma
+    Dot
+    Ellipsis
+    Colon
+    Question
+    Hash
+    HashHash
+
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    Lt
+    Gt
+    Assign
+    Bang
+    Amp
+    Pipe
+    Caret
+    Tilde
+
+    EqEq
+    NotEq
+    Le
+    Spaceship
+    Ge
+    PlusPlus
+    MinusMinus
+    PlusEq
+    MinusEq
+    StarEq
+    SlashEq
+    PercentEq
+    AmpEq
+    PipeEq
+    CaretEq
+    AndAnd
+    OrOr
+    Shl
+    Shr
+    Arrow
+    ShlEq
+    ShrEq
+
+    End
+}
+
+struct Token {
+    let space: Bool
+    let spelling: String
+    let kind: TokenKind
+    let text: String
+    let number: Int
+    let start: Int
+    let end: Int
+    let line: Bool
+}
+struct Lexed {
+    let tokens: [Token]
+    let error: String
+    let errorOffset: Int
+}
+
+function isMathBuiltin(name: String) -> Bool {
+    match name {
+        "__builtin_sqrt", "__builtin_fabs", "__builtin_floor", "__builtin_ceil", "__builtin_trunc",
+        "__builtin_round" -> return true
+        else -> return false
+    }
+}
+// The `__builtin_*` names in karc's builtin table (section 28.2).
+function isBuiltinName(name: String) -> Bool {
+    match name {
+        "__builtin_klf_alloc", "__builtin_klf_free", "__builtin_klf_va_start", "__builtin_klf_throw" -> return true
+        else -> return isMathBuiltin(name)
+    }
+}
+// Reserved identifiers (`__x`, `_X`) are accepted, as clang accepts them: the
+// std and the platform headers it wraps use them.
+function forbiddenIdentifier(name: String) -> Bool {
+    return false
+}

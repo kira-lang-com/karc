@@ -1,0 +1,429 @@
+// Classes: member calls resolved by the receiver's type, constructor and
+// destructor calls, and the destruction of class locals when their scope
+// ends. There are no copy or move constructors yet, so a returned local and
+// the compiler's own temporaries are not destroyed.
+
+// The first byte of a type spelling, or -1 for the empty (unknown) type.
+function firstByte(ty: String) -> Int {
+    if utf8Count(ty) == 0 { return -1 }
+    return utf8Byte(ty, 0)
+}
+// The karc type of an lvalue expression, or "" when it is not known without
+// lowering it.
+function staticNameType(state: borrow mut Lowerer, named: NameExpression) -> String {
+    if named.name == "nullptr" { return "*[0 x unit]" }
+    let slot = lookup(state, named.name)
+    if slot >= 0 {
+        if state.slotsData[slot].reference { return elementOfPointer(state.slotsData[slot].ty) }
+        return state.slotsData[slot].ty
+    }
+    let field = memberFieldType(state, named.name)
+    if field != "" { return field }
+    let globalSlot = ensureGlobalSlot(state, named.name)
+    if globalSlot >= 0 { return state.slotsData[globalSlot].ty }
+    let callee = functionSlotInScope(state, named.name)
+    if callee >= 0 { return functionPointerType(state, callee) }
+    for constant in state.tree.enumConstants {
+        if enumConstantNamed(constant, named.name) { return "i32" }
+    }
+    return ""
+}
+
+function staticCallType(state: borrow mut Lowerer, id: ExprId, call: CallExpression, span: Span) -> String {
+    match call.name {
+        "@co_await" -> return coAwaitType(state, awaitableOf(state, call, span))
+        "@alignof" -> return "u64"
+        else -> {}
+    }
+    if isMathBuiltin(call.name) { return "f64" }
+    if !hasExpr(call.receiver) && call.name == "@braced" { return "@braced" }
+    if call.name == "@dynamic_cast" || call.name == "@dynamic_cast&" {
+        let target = state.tree.explicitArguments[call.explicitArguments - 1][0]
+        if call.name == "@dynamic_cast&" { return elementOfPointer(target) }
+        return target
+    }
+    match call.name {
+        "@typeid" -> return "%std::type_info"
+        "@derives" -> return "i32"
+        else -> {}
+    }
+    if hasExpr(call.receiver) && utf8Count(call.name) > 9 && utf8Slice(call.name, 0, 9) == "@member::" {
+        let owner = staticType(state, call.receiver)
+        let name = utf8Slice(call.name, 9, utf8Count(call.name))
+        if isClassType(owner) && findMember(state.tree, owner, name, call.arguments.count) < 0 {
+            let fieldType = memberType(state, owner, name)
+            if isFnPtrType(fieldType) { return fnPtrReturn(fieldType) }
+        }
+    }
+    if call.name == "@invoke" {
+        let callee = invokedExpression(state, call.receiver)
+        let calleeType = staticType(state, callee)
+        if isFnPtrType(calleeType) { return fnPtrReturn(calleeType) }
+        if isClassType(calleeType) {
+            let index = chooseMember(state, calleeType, "operator()", call.arguments)
+            if index >= 0 {
+                let fn = state.tree.functions[index]
+                if fn.returnType == "auto" && isLambdaFunction(state.tree, fn) { return lambdaResult(state, fn, nominalName(calleeType)) }
+                if fn.refReturn { return elementOfPointer(fn.returnType) }
+                return fn.returnType
+            }
+        }
+        return ""
+    }
+    if !hasExpr(call.receiver) && utf8Count(call.name) > 7 && utf8Slice(call.name, 0, 7) == "@list::" {
+        return joinText(["%", utf8Slice(call.name, 7, utf8Count(call.name))])
+    }
+    if !hasExpr(call.receiver) && utf8Count(call.name) > 9 && utf8Slice(call.name, 0, 9) == "@lambda::" {
+        return joinText(["%", utf8Slice(call.name, 9, utf8Count(call.name))])
+    }
+    if !hasExpr(call.receiver) && structIndex(state, call.name) >= 0 { return joinText(["%", call.name]) }
+    if !hasExpr(call.receiver) {
+        let called = calledObjectType(state, call.name, call.arguments)
+        if called != "" { return called }
+    }
+    let index = operatorOrCallTarget(state, id)
+    if index < 0 { return "" }
+    let fn = state.tree.functions[index]
+    if fn.refReturn { return elementOfPointer(fn.returnType) }
+    return fn.returnType
+}
+
+function staticTernaryType(state: borrow mut Lowerer, ternary: TernaryExpression) -> String {
+    let common = ternaryType(state, ternary)
+    if common != "" { return common }
+    let mixed = mixedTernaryClass(state, ternary)
+    if mixed != "" { return mixed }
+    var first = staticType(state, ternary.thenValue)
+    if isArrayType(first) { first = joinText(["*[0 x ", arrayElementType(first), "]"]) }
+    return first
+}
+
+function staticDerefType(state: borrow mut Lowerer, operand: ExprId) -> String {
+    let overloaded = dereferenceOperator(state, operand)
+    if overloaded >= 0 {
+        let star = state.tree.functions[overloaded]
+        if star.refReturn { return elementOfPointer(star.returnType) }
+        return star.returnType
+    }
+    let inner = staticType(state, operand)
+    if isPointerType(inner) { return elementOfPointer(inner) }
+    return ""
+}
+
+function staticFieldType(state: borrow mut Lowerer, fieldExpr: FieldExpression) -> String {
+    let owner = staticType(state, fieldExpr.base)
+    if isArrayType(owner) && utf8Byte(fieldExpr.name, 0) == 35 { return arrayElementType(owner) }
+    if !isClassType(owner) { return "" }
+    let index = structIndex(state, nominalName(owner))
+    if index < 0 { return "" }
+    if soleArrayMember(state.tree.structs[index], fieldExpr.name) { return arrayElementType(state.tree.structs[index].fields[0].declType) }
+    var field = fieldIndexOf(state.tree.structs[index], fieldExpr.name)
+    if utf8Byte(fieldExpr.name, 0) == 35 { field = numberValue(utf8Slice(fieldExpr.name, 1, utf8Count(fieldExpr.name))) }
+    if field < 0 {
+        let inherited = memberType(state, owner, fieldExpr.name)
+        if inherited != "" { return inherited }
+        let shared = staticMemberName(state, owner, fieldExpr.name)
+        if shared != "" { return globalType(state, shared) }
+        return ""
+    }
+    if field >= state.tree.structs[index].fields.count { return "" }
+    return state.tree.structs[index].fields[field].declType
+}
+
+function staticIndexType(state: borrow mut Lowerer, indexExpr: IndexExpression) -> String {
+    let base = staticType(state, indexExpr.base)
+    if isClassType(base) {
+        let index = findMember(state.tree, base, "operator[]", 1)
+        if index >= 0 { return referentOf(state.tree.functions[index]) }
+    }
+    if isPointerType(base) { return elementOfPointer(base) }
+    if isArrayType(base) { return arrayElementType(base) }
+    return ""
+}
+
+function staticType(state: borrow mut Lowerer, id: ExprId) -> String {
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Name(named) -> return staticNameType(state, named)
+        Call(call) -> return staticCallType(state, id, call, e.span)
+        Ternary(ternary) -> return staticTernaryType(state, ternary)
+        Deref(operand) -> return staticDerefType(state, operand)
+        Field(fieldExpr) -> return staticFieldType(state, fieldExpr)
+        StringLit(string) -> return joinText(["*[0 x ", literalElement(string.prefix), "]"])
+        Cast(cast) -> return cast.ty
+        FloatLit -> return "f64"
+        NumberLit(number) -> {
+            match number.suffix {
+                "char" -> return "i8"
+                "bool" -> return "i1"
+                else -> return literalType(number)
+            }
+        }
+        Not -> return "i32"
+        Neg(operand) -> return staticType(state, operand)
+        Positive(operand) -> return promotedUnaryType(staticType(state, operand))
+        AddrOf(operand) -> {
+            let inner = staticType(state, operand)
+            if inner == "" { return "" }
+            return joinText(["*[0 x ", inner, "]"])
+        }
+        Binary(binary) -> {
+            if binary.op == "," { return staticType(state, binary.right) }
+            let index = operatorOrCallTarget(state, id)
+            if index < 0 { return builtinBinaryType(state, binary) }
+            let fn = state.tree.functions[index]
+            if fn.refReturn { return elementOfPointer(fn.returnType) }
+            return fn.returnType
+        }
+        New(newExpr) -> {
+            if newExpr.ty != "" { return joinText(["*[0 x ", newExpr.ty, "]"]) }
+            return ""
+        }
+        Index(indexExpr) -> return staticIndexType(state, indexExpr)
+        BitNot -> return ""
+        Sizeof -> return ""
+        PreStep(step) -> return staticType(state, step.operand)
+        PostStep(step) -> return staticType(state, step.operand)
+        Delete -> return ""
+    }
+}
+// The type of a built-in binary operation: a comparison is bool, pointer
+// arithmetic keeps the pointer (a pointer difference is a long), and
+// arithmetic takes the wider operand.
+function builtinBinaryType(state: borrow mut Lowerer, binary: BinaryExpression) -> String {
+    let op = binary.op
+    match op {
+        "==", "!=", "<", ">", "<=", ">=", "&&", "||" -> return "i1"
+        "<=>" -> return "i32"
+        else -> {}
+    }
+    if isCompoundText(op) { return staticType(state, binary.left) }
+    var left = staticType(state, binary.left)
+    let right = staticType(state, binary.right)
+    if isArrayType(left) { left = joinText(["*[0 x ", arrayElementType(left), "]"]) }
+    if isPointerType(left) {
+        if isPointerType(right) { return "i64" }
+        return left
+    }
+    if isPointerType(right) { return right }
+    if left == "f64" || right == "f64" { return "f64" }
+    if left == "i64" || left == "u64" || right == "i64" || right == "u64" {
+        if left == "u64" || right == "u64" { return "u64" }
+        return "i64"
+    }
+    if left == "" || right == "" { return "" }
+    return "i32"
+}
+// The result type of calling the variable `name`: a function pointer, a class
+// with operator(), or a class wrapping one function pointer; "" otherwise.
+function calledObjectType(state: borrow mut Lowerer, name: String, arguments: [ExprId]) -> String {
+    var slot = lookup(state, name)
+    var ty = ""
+    if slot >= 0 {
+        ty = state.slotsData[slot].ty
+        if state.slotsData[slot].reference { ty = elementOfPointer(ty) }
+    } else {
+        ty = memberFieldType(state, name)
+        if ty == "" { return "" }
+    }
+    if isFnPtrType(ty) { return fnPtrReturn(ty) }
+    if !isClassType(ty) { return "" }
+    let call = chooseMember(state, ty, "operator()", arguments)
+    if call >= 0 && state.tree.functions[call].returnType == "auto" && isLambdaFunction(state.tree, state.tree.functions[call]) {
+        // A lambda not yet created: its result is its first return's type.
+        return lambdaResult(state, state.tree.functions[call], nominalName(ty))
+    }
+    if call >= 0 { return referentOf(state.tree.functions[call]) }
+    let record = structIndex(state, nominalName(ty))
+    if record >= 0 && state.tree.structs[record].fields.count == 1 && isFnPtrType(state.tree.structs[record].fields[0].declType) {
+        return fnPtrReturn(state.tree.structs[record].fields[0].declType)
+    }
+    return ""
+}
+function memberFieldType(state: Lowerer, name: String) -> String {
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    if owner == "" { return "" }
+    let index = structIndex(state, nominalName(owner))
+    if index < 0 { return "" }
+    let direct = memberType(state, owner, name)
+    if direct != "" { return direct }
+    return elementOfPointer(memberType(state, owner, joinText(["&", name])))
+}
+// The member function `name` of class `owner`, preferring one that takes
+// `argumentCount` arguments; -1 when the class has none.
+function findMember(tree: CppTree, owner: String, name: String, argumentCount: Int) -> Int {
+    var found = -1
+    for i in functionsNamedIn(tree, name) {
+        let fn = tree.functions[i]
+        if ownerOf(tree, i) == owner {
+            if found < 0 || (fn.parameters.count == argumentCount && tree.functions[found].parameters.count != argumentCount) {
+                found = i
+            }
+        }
+    }
+    if found >= 0 || name == joinText(["~", constructorName(owner)]) || name == constructorName(owner) { return found }
+    for s in tree.structs {
+        if s.name == nominalName(owner) {
+            for field in s.fields {
+                if isBaseField(field) {
+                    let inherited = findMember(tree, field.declType, name, argumentCount)
+                    if inherited >= 0 { return inherited }
+                }
+            }
+        }
+    }
+    return -1
+}
+// How well an argument of type `argument` fits a parameter of `parameter`:
+// 3 for the same class or type, 2 for a pointer to a pointer or a number to a
+// number, 1 when the argument type is unknown, 0 when it cannot bind.
+function argumentFit(state: Lowerer, parameter: CppParam, argument: String) -> Int {
+    if argument == "" { return 1 }
+    var wanted = parameter.declType
+    if parameter.reference { wanted = elementOfPointer(parameter.declType) }
+    if argument == "@braced" {
+        if isInitializerList(wanted) { return 3 }
+        return 1
+    }
+    if wanted == argument { return 3 }
+    if isClassType(wanted) && !isClassType(argument) {
+        if convertsFrom(state, wanted, argument) { return 1 }
+        return 0
+    }
+    if isClassType(wanted) && isBaseOf(state, wanted, argument) { return 2 }
+    if isClassType(argument) && !isClassType(wanted) && !isPointerType(wanted) && !isFnPtrType(wanted) {
+        // Through a conversion operator: better to its own type.
+        let conversion = scalarConversion(state.tree, argument, wanted)
+        if conversion == joinText(["operator ", wanted]) { return 2 }
+        if conversion != "" { return 1 }
+    }
+    if isClassType(wanted) || isClassType(argument) { return 0 }
+    let wantedPointer = isPointerType(wanted) || isFnPtrType(wanted)
+    let argumentPointer = isPointerType(argument) || isArrayType(argument) || isFnPtrType(argument)
+    if wantedPointer != argumentPointer { return 0 }
+    if pointerMismatch(state, wanted, argument) { return 1 }
+    if wantedPointer && elementOfPointer(wanted) == "i8" && isPointerType(argument) && elementOfPointer(argument) != "i8" { return 1 }
+    // A reference binds its own type; another needs a converted temporary.
+    if parameter.reference && !wantedPointer { return 1 }
+    if (wanted == "f64") != (argument == "f64") && !wantedPointer { return 1 }
+    return 2
+}
+// How a braced list suits a parameter: an initializer_list best when its
+// elements are of the list's element type (braced lists for a class one),
+// a class next, as `T{...}`, anything else least.
+function bracedFit(state: borrow mut Lowerer, parameter: CppParam, argument: ExprId) -> Int {
+    let wanted = parameterClassOf(parameter)
+    if isInitializerList(wanted) {
+        let record = structIndex(state, nominalName(wanted))
+        if record < 0 { return 1 }
+        let element = elementOfPointer(state.tree.structs[record].fields[0].declType)
+        for item in bracedPayloadArguments(state.tree.expressions[argument.value]) {
+            let braced = isBracedCall(state, item)
+            if isClassType(element) != braced && staticType(state, item) != element { return 1 }
+        }
+        return 3
+    }
+    if isClassType(wanted) { return 2 }
+    return 1
+}
+// An integer literal's type: 64 bits with an l suffix or a value past
+// 32 bits, unsigned with a u suffix (which the lexer gives a literal past
+// 63 bits).
+function literalType(number: NumberExpression) -> String {
+    let wide = number.suffix == "l" || number.suffix == "ul" || number.value > 2147483647 || number.value < -2147483648
+    let isUnsigned = number.suffix == "u" || number.suffix == "ul"
+    if wide && isUnsigned { return "u64" }
+    if wide { return "i64" }
+    if isUnsigned { return "u32" }
+    return "i32"
+}
+// Whether two pointer types point at unrelated types: neither is void*
+// and the argument's pointee is not the parameter's or derived from it.
+function pointerMismatch(state: Lowerer, wanted: String, argument: String) -> Bool {
+    if !isPointerType(wanted) || !isPointerType(argument) { return false }
+    let target = elementOfPointer(wanted)
+    let source = elementOfPointer(argument)
+    if target == source || target == "unit" || source == "unit" { return false }
+    return !(isClassType(target) && isBaseOf(state, target, source))
+}
+function visibleByName(tree: CppTree, candidate: String, name: String, current: String) -> Bool {
+    if hasScope(name) { return true }
+    let owner = methodOwnerType(tree, candidate)
+    return owner == "" || owner == current || isBaseOfTree(tree, owner, current)
+}
+// Whether class `base` is a base of `derived`, through the `__base_` fields.
+function isBaseOfTree(tree: CppTree, base: String, derived: String) -> Bool {
+    if !isClassType(derived) { return false }
+    let record = structNamed(tree, nominalName(derived))
+    if record < 0 { return false }
+    for field in tree.structs[record].fields {
+        if isBaseField(field) && (field.declType == base || isBaseOfTree(tree, base, field.declType)) { return true }
+    }
+    return false
+}
+function inTemplateCode(state: Lowerer) -> Bool {
+    let current = state.tree.functions[state.functionIndex]
+    let owner = methodOwnerType(state.tree, current.name)
+    if owner != "" {
+        let record = structIndex(state, nominalName(owner))
+        if record >= 0 && state.tree.structs[record].instance { return true }
+    }
+    let bare = unqualifiedName(current.name)
+    for i in 1..utf8Count(bare) {
+        if utf8Byte(bare, i) == 95 && utf8Byte(bare, i - 1) == 95 { return true }
+    }
+    return false
+}
+// How an `&&` parameter suits an argument: better than `const&` for a
+// temporary or std::move, worse for an lvalue.
+function rvalueFit(state: borrow mut Lowerer, parameter: CppParam, argument: ExprId) -> Int {
+    if !parameter.reference { return 0 }
+    let temporary = isRvalueArgument(state, argument)
+    if parameter.rvalue {
+        if temporary { return 2 }
+        return -3
+    }
+    return 0
+}
+function isRvalueArgument(state: borrow mut Lowerer, id: ExprId) -> Bool {
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Call(call) -> {
+            if !hasExpr(call.receiver) {
+                let bare = unqualifiedName(call.name)
+                if bare == "move" || bare == "forward" { return true }
+            }
+        }
+        Cast(cast) -> {
+            if utf8Count(cast.ty) > 0 { return false }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let ty = staticType(state, id)
+    return isClassType(ty) && !isClassLvalue(state, id)
+}
+function isMemberInstance(state: Lowerer, index: Int) -> Bool {
+    for instance in state.memberInstances {
+        if instance.index == index { return true }
+    }
+    return false
+}
+// The member `name` of `owner` that best fits the argument expressions.

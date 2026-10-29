@@ -1,0 +1,67 @@
+// <stop_token>: stop_source and stop_token, a shared stop flag.
+#ifndef KARC_STD_STOP_TOKEN
+#define KARC_STD_STOP_TOKEN
+
+namespace std {
+
+struct karc_stop_state {
+    bool requested;
+    long references;
+};
+
+class stop_token {
+public:
+    stop_token() : state_(0) {}
+    stop_token(karc_stop_state* state) : state_(state) {
+        if (state_ != 0) { state_->references++; }
+    }
+    stop_token(const stop_token& other) : state_(other.state_) {
+        if (state_ != 0) { state_->references++; }
+    }
+    ~stop_token() { release(); }
+    stop_token& operator=(const stop_token& other) {
+        if (other.state_ != 0) { other.state_->references++; }
+        release();
+        state_ = other.state_;
+        return *this;
+    }
+    bool stop_requested() const { return state_ != 0 && state_->requested; }
+    bool stop_possible() const { return state_ != 0; }
+
+private:
+    void release() {
+        if (state_ != 0) {
+            state_->references--;
+            if (state_->references == 0) { delete state_; }
+            state_ = 0;
+        }
+    }
+    karc_stop_state* state_;
+};
+
+class stop_source {
+public:
+    stop_source() : state_(new karc_stop_state()) {
+        state_->requested = false;
+        state_->references = 1;
+    }
+    stop_source(const stop_source& other) : state_(other.state_) { state_->references++; }
+    ~stop_source() {
+        state_->references--;
+        if (state_->references == 0) { delete state_; }
+    }
+    stop_token get_token() const { return stop_token(state_); }
+    bool request_stop() {
+        bool first = !state_->requested;
+        state_->requested = true;
+        return first;
+    }
+    bool stop_requested() const { return state_->requested; }
+
+private:
+    karc_stop_state* state_;
+};
+
+}
+
+#endif

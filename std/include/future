@@ -1,0 +1,117 @@
+// <future>: promise, future, shared_future, packaged_task and async over
+// the cooperative scheduler: get() runs queued tasks until the value is
+// set. async runs its function when called, so its future is ready.
+#ifndef KARC_STD_FUTURE
+#define KARC_STD_FUTURE
+
+#include <exception>
+#include <utility>
+#include <__thread_tasks>
+
+namespace std {
+
+class future_error : public exception {
+public:
+    future_error(const char* message) : message_(message) {}
+    const char* what() const override { return message_; }
+private:
+    const char* message_;
+};
+
+enum class launch { async = 1, deferred = 2 };
+enum class future_status { ready, timeout, deferred };
+
+template <typename T>
+struct karc_shared_state {
+    bool ready;
+    long references;
+    T value;
+};
+
+template <typename T>
+class future {
+public:
+    future() : state_(0) {}
+    future(karc_shared_state<T>* state) : state_(state) {
+        if (state_ != 0) { state_->references++; }
+    }
+    future(const future& other) : state_(other.state_) {
+        if (state_ != 0) { state_->references++; }
+    }
+    future& operator=(const future& other) {
+        release();
+        state_ = other.state_;
+        if (state_ != 0) { state_->references++; }
+        return *this;
+    }
+    ~future() { release(); }
+    bool valid() const { return state_ != 0; }
+    void wait() {
+        while (state_ != 0 && !state_->ready) {
+            if (!karc_task_run_one()) { throw future_error("broken promise"); }
+        }
+    }
+    template <typename D>
+    future_status wait_for(const D& duration) {
+        wait();
+        return future_status::ready;
+    }
+    T get() {
+        if (state_ == 0) { throw future_error("no state"); }
+        wait();
+        return state_->value;
+    }
+    karc_shared_state<T>* karc_state() const { return state_; }
+
+private:
+    void release() {
+        if (state_ != 0) {
+            state_->references--;
+            if (state_->references == 0) { delete state_; }
+            state_ = 0;
+        }
+    }
+    karc_shared_state<T>* state_;
+};
+
+template <typename T>
+using shared_future = future<T>;
+
+template <typename T>
+class promise {
+public:
+    promise() : state_(new karc_shared_state<T>()) {
+        state_->ready = false;
+        state_->references = 1;
+    }
+    promise(const promise& other) : state_(other.state_) { state_->references++; }
+    ~promise() {
+        state_->references--;
+        if (state_->references == 0) { delete state_; }
+    }
+    future<T> get_future() { return future<T>(state_); }
+    void set_value(const T& value) {
+        if (state_->ready) { throw future_error("promise already satisfied"); }
+        state_->value = value;
+        state_->ready = true;
+    }
+
+private:
+    karc_shared_state<T>* state_;
+};
+
+template <typename T>
+future<T> karc_ready_future(const T& value) {
+    promise<T> made;
+    made.set_value(value);
+    return made.get_future();
+}
+
+template <typename F, typename... Args>
+auto async(F function, Args... args) { return karc_ready_future(function(args...)); }
+template <typename F, typename... Args>
+auto async(launch policy, F function, Args... args) { return karc_ready_future(function(args...)); }
+
+}
+
+#endif

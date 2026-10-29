@@ -1,0 +1,594 @@
+// Statement and declarator parsing. Assignment targets are ordinary lvalue
+// expressions, so a single `Assign(place, value)` covers scalar, field, index,
+// arrow and dereference writes; compound and step forms desugar to it.
+
+function compoundBinop(kind: TokenKind) -> String {
+    if kind == .PlusEq { return "+" }
+    if kind == .MinusEq { return "-" }
+    if kind == .StarEq { return "*" }
+    if kind == .SlashEq { return "/" }
+    if kind == .PercentEq { return "%" }
+    if kind == .AmpEq { return "&" }
+    if kind == .PipeEq { return "|" }
+    if kind == .CaretEq { return "^" }
+    if kind == .ShlEq { return "<<" }
+    if kind == .ShrEq { return ">>" }
+    return ""
+}
+function assignStmt(p: borrow mut Parser, place: ExprId, value: ExprId, start: Int) -> StmtId {
+    return addStatement(p, sAssignment(place, value, spanFrom(p, start)))
+}
+// If an assignment operator follows the parsed lvalue `place`, consume it and
+// its right-hand side and return an `Assign` statement; otherwise return -1.
+// Does not consume a terminating `;`.
+function parseAssignTail(p: borrow mut Parser, place: ExprId, start: Int) -> StmtId {
+    let k = peekKind(p)
+    if k == .Assign {
+        consume(p)
+        var rhs = noExpr()
+        if peekKind(p) == .LBrace {
+            skipAggregate(p)
+            rhs = eNumber(p, 0, spanFrom(p, start))
+        } else {
+            rhs = expression(p, 0)
+        }
+        return assignStmt(p, place, rhs, start)
+    }
+    let binop = compoundBinop(k)
+    if binop != "" {
+        consume(p)
+        let rhs = expression(p, 0)
+        let combined = eBinary(p, binop, place, rhs, spanFrom(p, start))
+        return assignStmt(p, place, combined, start)
+    }
+    if k == .PlusPlus || k == .MinusMinus {
+        consume(p)
+        var op: String = "+"
+        if k == .MinusMinus { op = "-" }
+        let one = eNumber(p, 1, spanFrom(p, start))
+        let combined = eBinary(p, op, place, one, spanFrom(p, start))
+        return assignStmt(p, place, combined, start)
+    }
+    return noStmt()
+}
+function skipAggregate(p: borrow mut Parser) {
+    consume(p)
+    var depth = 1
+    while depth > 0 && peekKind(p) != .End && p.error == "" {
+        if peekKind(p) == .LBrace { depth = depth + 1 }
+        else if peekKind(p) == .RBrace { depth = depth - 1 }
+        consume(p)
+    }
+}
+function skipParenInitializer(p: borrow mut Parser) {
+    consume(p)
+    var depth = 1
+    while depth > 0 && peekKind(p) != .End && p.error == "" {
+        if peekKind(p) == .LParen { depth = depth + 1 }
+        else if peekKind(p) == .RParen { depth = depth - 1 }
+        consume(p)
+    }
+}
+// `(args)` or `{args}` after a class-typed declarator: a `@construct` call the
+// lowering turns into a constructor call or, without one, member-wise
+// initialization.
+function constructorArguments(p: borrow mut Parser, start: Int) -> ExprId {
+    var close: TokenKind = .RParen
+    if peekKind(p) == .LBrace { close = .RBrace }
+    consume(p)
+    var arguments: [ExprId] = []
+    if peekKind(p) != close {
+        arguments.append(listElement(p))
+        while peekKind(p) == .Comma && p.error == "" {
+            consume(p)
+            if peekKind(p) != close { arguments.append(listElement(p)) }
+        }
+    }
+    expect(p, close)
+    var marker = "@construct"
+    if close == .RBrace { marker = "@construct{}" }
+    return eCall(p, marker, arguments, spanFrom(p, start), spanFrom(p, start), noExpr())
+}
+function parseArrayDeclarator(p: borrow mut Parser, name: String, pointerType: String, start: Int) -> StmtId {
+    // A fixed-size array `name[N]`, or nested `name[M][N]...`, uninitialized.
+    var bounds: [Int] = []
+    while peekKind(p) == .LBracket && p.error == "" {
+        consume(p)
+        if peekKind(p) == .RBracket {
+            bounds.append(0)
+        } else {
+            bounds.append(constantExpression(p, expression(p, 0)))
+        }
+        expect(p, .RBracket)
+    }
+    var innerType = pointerType
+    for offset in 0..bounds.count {
+        let k = bounds.count - offset - 1
+        if k < 1 { break }
+        innerType = joinText(["[", decimalText(bounds[k]), " x ", innerType, "]"])
+    }
+    var init = noExpr()
+    if peekKind(p) == .Assign {
+        consume(p)
+        init = expression(p, 0)
+    } else if peekKind(p) == .LBrace {
+        init = expression(p, 0)
+    }
+    var size = bounds[0]
+    if size == 0 && hasExpr(init) {
+        size = inferredArraySize(p.tree, init)
+    }
+    return addStatement(p, sArrayDecl(name, innerType, size, init, spanFrom(p, start)))
+}
+
+function parseClassDeclarator(p: borrow mut Parser, name: String, baseType: String, start: Int) -> StmtId {
+    // A struct value local: constructed (`T c;`, `T c = T(args)`,
+    // `T c = {args}`), or initialized from a struct-returning call.
+    var init = eCall(p, "@construct", [], spanFrom(p, start), spanFrom(p, start), noExpr())
+    if peekKind(p) == .Assign {
+        consume(p)
+        if peekKind(p) == .LBrace { init = constructorArguments(p, start) }
+        else {
+            init = expression(p, 0)
+            let value = p.tree.expressions[init.value]
+            match value.kind {
+                Call(call) -> {
+                    if !hasExpr(call.receiver) && joinText(["%", unqualifiedName(call.name)]) == baseType {
+                        init = eCall(p, "@construct", call.arguments, value.span, value.nameSpan, noExpr())
+                    }
+                }
+                NumberLit -> {}
+                FloatLit -> {}
+                StringLit -> {}
+                Name -> {}
+                Neg -> {}
+                Positive -> {}
+                Not -> {}
+                BitNot -> {}
+                AddrOf -> {}
+                Deref -> {}
+                Sizeof -> {}
+                Cast -> {}
+                Field -> {}
+                Index -> {}
+                PreStep -> {}
+                PostStep -> {}
+                Binary -> {}
+                Ternary -> {}
+                New -> {}
+                Delete -> {}
+            }
+        }
+    }
+    return addStatement(p, sStructDecl(name, baseType, init, spanFrom(p, start)))
+}
+
+function declaratorStatement(p: borrow mut Parser, baseType: String, start: Int) -> StmtId {
+    skipQualifiers(p)
+    if fnPointerAhead(p) {
+        let declarator = parseFnPointerDeclarator(p, baseType)
+        var init = noExpr()
+        if peekKind(p) == .Assign {
+            consume(p)
+            init = expression(p, 0)
+        }
+        if isArrayType(declarator.declType) {
+            var size = arrayLength(declarator.declType)
+            if size == 0 && hasExpr(init) { size = inferredArraySize(p.tree, init) }
+            return addStatement(p, sArrayDecl(declarator.name, arrayElementType(declarator.declType), size, init, spanFrom(p, start)))
+        }
+        return addStatement(p, sDeclare(declarator.name, declarator.declType, 0, init, spanFrom(p, start)))
+    }
+    var pointerType = baseType
+    if pointerType == "unit" && peekKind(p) == .Star { pointerType = "i8" }
+    var isPointer: Bool = false
+    var isReference = false
+    while peekKind(p) == .Star {
+        consume(p)
+        pointerType = joinText(["*[0 x ", pointerType, "]"])
+        isPointer = true
+        skipQualifiers(p)
+    }
+    if peekKind(p) == .Amp || peekKind(p) == .AndAnd {
+        consume(p)
+        pointerType = joinText(["*[0 x ", pointerType, "]"])
+        isPointer = true
+        isReference = true
+    }
+    skipQualifiers(p)
+    let name = expect(p, .Ident).text
+    if !isPointer && isClassType(baseType) && (peekKind(p) == .LParen || peekKind(p) == .LBrace) {
+        let init = constructorArguments(p, start)
+        return addStatement(p, sStructDecl(name, baseType, init, spanFrom(p, start)))
+    }
+    if peekKind(p) == .LParen {
+        // `T x(value)`: direct initialization.
+        consume(p)
+        var init = noExpr()
+        if peekKind(p) != .RParen { init = expression(p, 0) }
+        expect(p, .RParen)
+        var referenceFlag = 0
+        if isReference { referenceFlag = -1 }
+        return addStatement(p, sDeclare(name, pointerType, referenceFlag, init, spanFrom(p, start)))
+    }
+    if isPointer && peekKind(p) != .LBracket {
+        var init = noExpr()
+        if peekKind(p) == .LBrace { init = expression(p, 0) }
+        if peekKind(p) == .Assign {
+            consume(p)
+            init = expression(p, 0)
+        }
+        var referenceFlag = 0
+        if isReference { referenceFlag = -1 }
+        return addStatement(p, sDeclare(name, pointerType, referenceFlag, init, spanFrom(p, start)))
+    }
+    if peekKind(p) == .LBracket { return parseArrayDeclarator(p, name, pointerType, start) }
+    if isClassType(baseType) { return parseClassDeclarator(p, name, baseType, start) }
+    var value = noExpr()
+    if peekKind(p) == .LBrace { value = expression(p, 0) }
+    if peekKind(p) == .Assign {
+        consume(p)
+        value = expression(p, 0)
+    }
+    return addStatement(p, sDeclare(name, baseType, 0, value, spanFrom(p, start)))
+}
+function declaratorList(p: borrow mut Parser, baseType: String, start: Int) -> StmtId {
+    var declarators: [StmtId] = []
+    declarators.append(declaratorStatement(p, baseType, start))
+    while peekKind(p) == .Comma && p.error == "" {
+        consume(p)
+        declarators.append(declaratorStatement(p, baseType, start))
+    }
+    expect(p, .Semicolon)
+    if declarators.count == 1 {
+        return declarators[0]
+    }
+    return addStatement(p, sDeclGroup(declarators, spanFrom(p, start)))
+}
+function block(p: borrow mut Parser) -> [StmtId] {
+    expect(p, .LBrace)
+    let aliasMark = p.tree.typedefs.count
+    let usings = p.blockUsings
+    var body: [StmtId] = []
+    while peekKind(p) != .RBrace && peekKind(p) != .End && p.error == "" {
+        body.append(statement(p))
+    }
+    expect(p, .RBrace)
+    p.blockUsings = usings
+    if p.tree.typedefs.count > aliasMark { dropLocalAliases(p, aliasMark) }
+    return body
+}
+// The block's own `typedef`/`using` aliases end with it; class members and
+// template arguments added meanwhile stay.
+function dropLocalAliases(p: borrow mut Parser, mark: Int) {
+    var kept: [CppTypedef] = []
+    for i in 0..p.tree.typedefs.count {
+        let t = p.tree.typedefs[i]
+        let local = i >= mark && isLocalAlias(t.name)
+        if !local { kept.append(t) }
+    }
+    p.tree.typedefs = kept
+}
+function controlBody(p: borrow mut Parser) -> [StmtId] {
+    if peekKind(p) == .LBrace { return block(p) }
+    return [statement(p)]
+}
+function simpleStatement(p: borrow mut Parser, start: Int) -> StmtId {
+    let first = simpleStatementElement(p, start)
+    if peekKind(p) != .Comma { return first }
+    var parts: [StmtId] = [first]
+    while peekKind(p) == .Comma && p.error == "" {
+        consume(p)
+        parts.append(simpleStatementElement(p, peek(p).start))
+    }
+    return addStatement(p, sDeclGroup(parts, spanFrom(p, start)))
+}
+function simpleStatementElement(p: borrow mut Parser, start: Int) -> StmtId {
+    // A prefix step, or an lvalue expression followed by an assignment or (for a
+    // call) evaluated as an expression statement. Used at statement level and,
+    // without a terminating `;`, as a `for` step.
+    if peekKind(p) == .PlusPlus || peekKind(p) == .MinusMinus {
+        let op = consume(p)
+        let target = unary(p)
+        var binop: String = "+"
+        if op.kind == .MinusMinus { binop = "-" }
+        let one = eNumber(p, 1, spanFrom(p, start))
+        let combined = eBinary(p, binop, target, one, spanFrom(p, start))
+        return assignStmt(p, target, combined, start)
+    }
+    let e = expression(p, 0)
+    let assigned = parseAssignTail(p, e, start)
+    if assigned.value >= 0 {
+        return assigned
+    }
+    return addStatement(p, sExpr(e, spanFrom(p, start)))
+}
+function isRangeFor(p: borrow Parser) -> Bool {
+    if p.tree.cInput { return false }
+    for i in p.position..p.tokens.count {
+        let kind = p.tokens[i].kind
+        if kind == .Semicolon || kind == .RParen || kind == .Question { return false }
+        if kind == .Colon {
+            let scoped = (i + 1 < p.tokens.count && p.tokens[i + 1].kind == .Colon) ||
+                (i > p.position && p.tokens[i - 1].kind == .Colon)
+            if !scoped { return true }
+        }
+    }
+    return false
+}
+function rangeFor(p: borrow mut Parser, start: Int) -> StmtId {
+    skipQualifiers(p)
+    let baseType = parseTypeToken(p)
+    let reference = p.lastReference
+    if peekKind(p) == .Ident && peek2Kind(p) == .Colon {
+        let name = consume(p).text
+        consume(p)
+        let range = expression(p, 0)
+        expect(p, .RParen)
+        let loopBody = controlBody(p)
+        var elementType = baseType
+        if reference { elementType = elementOfPointer(baseType) }
+        var flag = 0
+        if reference { flag = 1 }
+        return addStatement(p, sRangeFor(name, elementType, flag, range, loopBody, spanFrom(p, start)))
+    }
+    var names: [String] = []
+    if peekKind(p) == .LBracket {
+        names = bindingNames(p)
+    } else {
+        names.append(expect(p, .Ident).text)
+    }
+    expect(p, .Colon)
+    let range = expression(p, 0)
+    expect(p, .RParen)
+    // `for (auto& [a, b] : range)`: each element in a hidden variable,
+    // bound at the top of the body.
+    let hidden = joinText(["__karc_bind_", decimalText(p.tree.statements.count)])
+    var body = bindingDeclarations(p, hidden, names, start)
+    for s in controlBody(p) { body.append(s) }
+    var flag = 0
+    if reference { flag = 1 }
+    return addStatement(p, sRangeFor(hidden, "auto", flag, range, body, spanFrom(p, start)))
+}
+// `auto [a, b] = value;`, also with `&`, `&&` or `const`: the value in a
+// hidden variable (a reference with `&`), and each name a reference to
+// its member `#i`, the i-th field of a pair, tuple or struct or element of
+// an array.
+function structuredBinding(p: borrow mut Parser, start: Int) -> StmtId {
+    skipQualifiers(p)
+    consume(p)
+    var reference = false
+    if peekKind(p) == .Amp || peekKind(p) == .AndAnd {
+        consume(p)
+        reference = true
+    }
+    let names = bindingNames(p)
+    expect(p, .Assign)
+    let value = expression(p, 0)
+    expect(p, .Semicolon)
+    let hidden = joinText(["__karc_bind_", decimalText(p.tree.statements.count)])
+    var declType = "auto"
+    var flag = 0
+    if reference {
+        declType = "*[0 x auto]"
+        flag = -1
+    }
+    var declarations: [StmtId] = [addStatement(p, sDeclare(hidden, declType, flag, value, spanFrom(p, start)))]
+    for d in bindingDeclarations(p, hidden, names, start) { declarations.append(d) }
+    return addStatement(p, sDeclGroup(declarations, spanFrom(p, start)))
+}
+function bindingNames(p: borrow mut Parser) -> [String] {
+    expect(p, .LBracket)
+    var names: [String] = [expect(p, .Ident).text]
+    while peekKind(p) == .Comma {
+        consume(p)
+        names.append(expect(p, .Ident).text)
+    }
+    expect(p, .RBracket)
+    return names
+}
+function bindingDeclarations(p: borrow mut Parser, hidden: String, names: [String], start: Int) -> [StmtId] {
+    var declarations: [StmtId] = []
+    for i in 0..names.count {
+        let whole = eName(p, hidden, spanFrom(p, start))
+        let member = eField(p, whole, joinText(["#", decimalText(i)]), spanFrom(p, start), spanFrom(p, start))
+        declarations.append(addStatement(p, sDeclare(names[i], "*[0 x auto]", -1, member, spanFrom(p, start))))
+    }
+    return declarations
+}
+// Whether a structured binding starts here: `const`, `auto`, `&` or `&&`,
+// then `[`.
+function bindingAhead(p: borrow Parser) -> Bool {
+    var i = p.position
+    while i < p.tokens.count && p.tokens[i].kind == .KwConst { i += 1 }
+    if i >= p.tokens.count || p.tokens[i].kind != .Ident || p.tokens[i].text != "auto" { return false }
+    i += 1
+    if i < p.tokens.count && (p.tokens[i].kind == .Amp || p.tokens[i].kind == .AndAnd) { i += 1 }
+    return i < p.tokens.count && p.tokens[i].kind == .LBracket
+}
+// `static T name = value;` in a function: a unit-private global the name
+// refers to, initialized the first time the declaration is reached.
+function localStatic(p: borrow mut Parser, start: Int) -> StmtId {
+    let declType = parseTypeToken(p)
+    let nameToken = expect(p, .Ident)
+    let span = tokenSpan(nameToken)
+    let hidden = joinText(["__karc_static_", decimalText(p.tree.globals.count), "_", nameToken.text])
+    let ready = joinText([hidden, "_ready"])
+    p.tree.globals.append(CppGlobal { name = ready, nameSpan = span, declType = "i32", arraySize = 0, initValue = 0, hasInit = false, initList = [], internal = true, span = span })
+    let initsBefore = p.tree.globalInits.count
+    parseGlobalVariable(p, hidden, span, declType, true, start)
+    var statements: [StmtId] = []
+    if p.tree.globalInits.count > initsBefore {
+        var kept: [StmtId] = []
+        for i in 0..initsBefore { kept.append(p.tree.globalInits[i]) }
+        let initializer = p.tree.globalInits[initsBefore]
+        p.tree.globalInits = kept
+        let unset = eBinary(p, "==", eName(p, ready, span), eNumber(p, 0, span), span)
+        let mark = eBinary(p, "=", eName(p, ready, span), eNumber(p, 1, span), span)
+        let marking = addStatement(p, sExpr(mark, span))
+        statements.append(addStatement(p, sIf(unset, .None, [marking, initializer], [], span)))
+    }
+    var binding = sDeclare(nameToken.text, joinText(["*[0 x ", declType, "]"]), -1, eName(p, hidden, span), span)
+    let global = p.tree.globals[p.tree.globals.count - 1]
+    if global.arraySize > 0 {
+        // An array decays to a pointer to its first element.
+        binding = sDeclare(nameToken.text, joinText(["*[0 x ", declType, "]"]), 0, eName(p, hidden, span), span)
+    }
+    statements.append(addStatement(p, binding))
+    return addStatement(p, sDeclGroup(statements, spanFrom(p, start)))
+}
+function startsQualifiedReference(p: borrow Parser) -> Bool {
+    if peekKind(p) != .Ident || (peek2Kind(p) != .Amp && peek2Kind(p) != .AndAnd) { return false }
+    if p.position + 3 >= p.tokens.count || p.tokens[p.position + 2].kind != .Ident { return false }
+    let following = p.tokens[p.position + 3].kind
+    return following == .Assign || following == .Semicolon || following == .Comma || following == .RParen || following == .LBracket
+}
+function startsDeclaration(p: borrow Parser) -> Bool {
+    if !startsType(p) { return false }
+    if peekKind(p) == .Ident && peek2Kind(p) == .LParen && peek(p).text != "STACK_OF" && peek(p).text != "decltype" && !isTypeBuiltin(peek(p).text) { return false }
+    return true
+}
+function statement(p: borrow mut Parser) -> StmtId {
+    let hadQualifier = isQualifier(peekKind(p)) || compatibilityQualifier(peek(p))
+    var isStatic = false
+    var q = p.position
+    while q < p.tokens.count && (isQualifier(p.tokens[q].kind) || compatibilityQualifier(p.tokens[q])) {
+        if p.tokens[q].kind == .KwStatic { isStatic = true }
+        q += 1
+    }
+    // A static constant stays a local constant.
+    for i in p.position..q {
+        if p.tokens[i].kind == .KwConst || p.tokens[i].text == "constexpr" { isStatic = false }
+    }
+    if q < p.tokens.count && p.tokens[q].kind == .KwConst { isStatic = false }
+    skipQualifiers(p)
+    let start = peek(p).start
+    if isStatic && startsDeclaration(p) { return localStatic(p, start) }
+    let k = peekKind(p)
+    if p.tree.cInput && k == .Ident && peek(p).text == "goto" {
+        consume(p)
+        let name = expect(p, .Ident).text
+        expect(p, .Semicolon)
+        return addStatement(p, Statement { kind = .Goto(name), span = spanFrom(p, start) })
+    }
+    if k == .KwCase || k == .KwDefault {
+        consume(p)
+        var marker = sDefault(spanFrom(p, start))
+        if k == .KwCase { marker = sCase(expression(p, 0), spanFrom(p, start)) }
+        expect(p, .Colon)
+        let id = addStatement(p, marker)
+        let child = statement(p)
+        return addStatement(p, sDeclGroup([id, child], spanFrom(p, start)))
+    }
+    if p.tree.cInput && k == .Ident && peek2Kind(p) == .Colon &&
+        (p.position + 2 >= p.tokens.count || p.tokens[p.position + 2].kind != .Colon) {
+        let name = consume(p).text
+        consume(p)
+        let label = addStatement(p, Statement { kind = .Label(name), span = spanFrom(p, start) })
+        let child = statement(p)
+        return addStatement(p, sDeclGroup([label, child], spanFrom(p, start)))
+    }
+    if isCoroutineKeyword(peek(p)) { return coroutineStatement(p, start) }
+    if !p.tree.cInput && k == .Ident && peek(p).text == "delete" {
+        let e = expression(p, 0)
+        expect(p, .Semicolon)
+        return addStatement(p, sExpr(e, spanFrom(p, start)))
+    }
+    if k == .Ident && peek(p).text == "throw" {
+        consume(p)
+        var thrown: [ExprId] = []
+        if peekKind(p) != .Semicolon { thrown.append(expression(p, 0)) }
+        expect(p, .Semicolon)
+        let call = eCall(p, "__builtin_klf_throw", thrown, spanFrom(p, start), spanFrom(p, start), noExpr())
+        return addStatement(p, sExpr(call, spanFrom(p, start)))
+    }
+    if k == .Semicolon {
+        consume(p)
+        return addStatement(p, sGroup([], spanFrom(p, start)))
+    }
+    if bindingAhead(p) { return structuredBinding(p, start) }
+    if k == .Ident && peek(p).text == "static_assert" {
+        skipStatement(p)
+        return addStatement(p, sGroup([], spanFrom(p, start)))
+    }
+    if k == .KwTypedef || (k == .Ident && peek(p).text == "using" && peek2Kind(p) == .Ident && p.position + 2 < p.tokens.count && p.tokens[p.position + 2].kind == .Assign) {
+        // A local alias: `typedef T Name;` or `using Name = T;`.
+        var name = ""
+        var ty = ""
+        consume(p)
+        if k == .KwTypedef {
+            ty = parseTypeToken(p)
+            if fnPointerAhead(p) {
+                let declarator = parseFnPointerDeclarator(p, ty)
+                ty = declarator.declType
+                name = declarator.name
+            } else {
+                name = expect(p, .Ident).text
+            }
+        } else {
+            name = expect(p, .Ident).text
+            expect(p, .Assign)
+            ty = parseTypeToken(p)
+        }
+        expect(p, .Semicolon)
+        p.tree.typedefs.append(CppTypedef { name = joinText(["@local::", name]), declType = ty })
+        return addStatement(p, sGroup([], spanFrom(p, start)))
+    }
+    if k == .Ident && peek(p).text == "using" {
+        // The lowering sees a block's using-directive where it stands.
+        let target = parseUsing(p, true)
+        var value = eNumber(p, 0, spanFrom(p, start))
+        if target != "" { value = eCall(p, joinText(["@using::", target]), [], spanFrom(p, start), spanFrom(p, start), noExpr()) }
+        return addStatement(p, sExpr(value, spanFrom(p, start)))
+    }
+    if k == .Ident && peek(p).text == "try" { return parseTryStatement(p, start) }
+    if k == .KwStruct && p.position + 2 < p.tokens.count &&
+        p.tokens[p.position + 1].kind == .Ident && p.tokens[p.position + 2].kind == .LBrace {
+        consume(p)
+        let name = expect(p, .Ident)
+        parseStructDefinition(p, name.text, tokenSpan(name), start)
+        if definitionOpen(p) && (peekKind(p) == .Ident || peekKind(p) == .Star) { return declaratorList(p, joinText(["%", name.text]), start) }
+        if peekKind(p) == .Semicolon { consume(p) }
+        let value = eNumber(p, 0, spanFrom(p, start))
+        return addStatement(p, sExpr(value, spanFrom(p, start)))
+    }
+    if k == .LBrace {
+        let body = controlBody(p)
+        return addStatement(p, sGroup(body, spanFrom(p, start)))
+    }
+    if startsDeclaration(p) || (hadQualifier && startsQualifiedReference(p)) {
+        let baseType = parseBaseType(p)
+        return declaratorList(p, baseType, start)
+    }
+    if k == .KwReturn {
+        consume(p)
+        var value = noExpr()
+        // `return {a, b};` is a braced list, built for the result type.
+        if peekKind(p) != .Semicolon { value = fullExpression(p) }
+        expect(p, .Semicolon)
+        return addStatement(p, sReturn("", value, spanFrom(p, start)))
+    }
+    if k == .KwWhile { return parseWhileStatement(p, start) }
+    if k == .KwDo { return parseDoWhileStatement(p, start) }
+    if k == .KwFor { return parseForStatement(p, start) }
+    if k == .KwIf { return parseIfStatement(p, start) }
+    if k == .KwSwitch { return parseSwitchStatement(p, start) }
+    if k == .KwBreak {
+        consume(p)
+        expect(p, .Semicolon)
+        return addStatement(p, sBreak(spanFrom(p, start)))
+    }
+    if k == .KwContinue {
+        consume(p)
+        expect(p, .Semicolon)
+        return addStatement(p, sContinue(spanFrom(p, start)))
+    }
+    let stmt = simpleStatement(p, start)
+    expect(p, .Semicolon)
+    return stmt
+}
+// A block's own alias is `@local::name`, found before any other by
+// typedefAlias and dropped at the end of the block.
+function isLocalAlias(name: String) -> Bool {
+    return utf8Count(name) > 8 && utf8Slice(name, 0, 8) == "@local::"
+}

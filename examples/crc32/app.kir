@@ -1,0 +1,113 @@
+module @definition lang "klfkira" target "aarch64-apple-darwin" stage raw
+
+global module @anon.0.0 : [10 x i8] = "123456789\00"
+
+func module @crc32(%arg0: *[0 x i8], %arg1: i32) -> i32 engine(runtime) nounwind {
+bb0(%arg0: *[0 x i8], %arg1: i32):
+  %t0 = stack.alloc i32
+  %t1 = stack.alloc [1 x i32]
+  %t2 = stack.alloc *[0 x i8]
+  %t3 = stack.alloc i32
+  %t4 = stack.alloc i32
+  %t7 = stack.alloc i32
+  %t12 = stack.alloc i32
+  %t23 = stack.alloc i32
+  %t28 = stack.alloc i32
+  br bb1()
+bb1():
+  store [init] %arg0 to %t2
+  store [init] %arg1 to %t3
+  %t5 = const.int i64, 4294967295
+  %t6 = trunc %t5 to i32
+  store [init] %t6 to %t4
+  %t8 = const.int i32, 0
+  store [init] %t8 to %t7
+  br bb2()
+bb2():
+  %t9 = load [trivial] %t7
+  %t10 = load [trivial] %t3
+  %t11 = icmp slt %t9, %t10
+  cond.br %t11, bb3(), bb4()
+bb3():
+  %t13 = load [trivial] %t2
+  %t14 = load [trivial] %t7
+  %t15 = elem.addr %t13, %t14
+  %t16 = load [trivial] %t15
+  %t17 = sext %t16 to i32
+  %t18 = trunc %t17 to i8
+  %t19 = zext %t18 to i32
+  store [init] %t19 to %t12
+  %t20 = load [trivial] %t4
+  %t21 = load [trivial] %t12
+  %t22 = xor [wrap] %t20, %t21
+  store [assign] %t22 to %t4
+  %t24 = const.int i32, 0
+  store [init] %t24 to %t23
+  br bb5()
+bb4():
+  %t50 = load [trivial] %t4
+  %t51 = const.int i64, 4294967295
+  %t52 = zext %t50 to i64
+  %t53 = xor [wrap] %t52, %t51
+  %t54 = trunc %t53 to i32
+  stack.dealloc %t28
+  stack.dealloc %t23
+  stack.dealloc %t12
+  stack.dealloc %t7
+  stack.dealloc %t4
+  stack.dealloc %t3
+  stack.dealloc %t2
+  stack.dealloc %t1
+  stack.dealloc %t0
+  return %t54
+bb5():
+  %t25 = load [trivial] %t23
+  %t26 = const.int i32, 8
+  %t27 = icmp slt %t25, %t26
+  cond.br %t27, bb6(), bb7()
+bb6():
+  %t29 = const.int i32, 0
+  %t30 = load [trivial] %t4
+  %t31 = const.int i32, 1
+  %t32 = and [wrap] %t30, %t31
+  %t33 = sub [wrap] %t29, %t32
+  store [init] %t33 to %t28
+  %t34 = load [trivial] %t4
+  %t35 = const.int i32, 1
+  %t36 = lshr [wrap] %t34, %t35
+  %t37 = const.int i64, 3988292384
+  %t38 = load [trivial] %t28
+  %t39 = zext %t38 to i64
+  %t40 = and [wrap] %t37, %t39
+  %t41 = zext %t36 to i64
+  %t42 = xor [wrap] %t41, %t40
+  %t43 = trunc %t42 to i32
+  store [assign] %t43 to %t4
+  %t44 = load [trivial] %t23
+  %t45 = const.int i32, 1
+  %t46 = add [trap] s %t44, %t45
+  store [assign] %t46 to %t23
+  br bb5()
+bb7():
+  %t47 = load [trivial] %t7
+  %t48 = const.int i32, 1
+  %t49 = add [trap] s %t47, %t48
+  store [assign] %t49 to %t7
+  br bb2()
+}
+
+func module @main() -> i32 engine(runtime) nounwind {
+bb0():
+  %t0 = stack.alloc i32
+  %t1 = stack.alloc [1 x i32]
+  %t2 = global.addr @anon.0.0
+  %t3 = bitcast %t2 to *[10 x i8]
+  br bb1()
+bb1():
+  %t4 = bitcast %t3 to *[0 x i8]
+  %t5 = const.int i32, 9
+  %t6 = call @crc32(%t4, %t5)
+  stack.dealloc %t1
+  stack.dealloc %t0
+  return %t6
+}

@@ -1,0 +1,33 @@
+// <cinttypes>: printf and scanf format macros for the <cstdint> types, and
+// the intmax_t conversions.
+#ifndef KARC_STD_CINTTYPES
+#define KARC_STD_CINTTYPES
+
+#include <cstdint>
+#include <cstdlib>
+
+#define PRId8 "d"
+#define PRId16 "d"
+#define PRId32 "d"
+#define PRId64 "ld"
+#define PRIi32 "i"
+#define PRIi64 "li"
+#define PRIu8 "u"
+#define PRIu16 "u"
+#define PRIu32 "u"
+#define PRIu64 "lu"
+#define PRIx32 "x"
+#define PRIx64 "lx"
+#define PRIX32 "X"
+#define PRIX64 "lX"
+#define PRIdPTR "ld"
+#define PRIuPTR "lu"
+#define PRIxPTR "lx"
+#define PRIdMAX "ld"
+#define PRIuMAX "lu"
+
+inline intmax_t strtoimax(const char* text, char** end, int base) { return strtol(text, end, base); }
+inline uintmax_t strtoumax(const char* text, char** end, int base) { return strtoul(text, end, base); }
+inline intmax_t imaxabs(intmax_t value) { if (value < 0) { return 0 - value; } return value; }
+
+#endif

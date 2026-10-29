@@ -1,0 +1,29 @@
+// <syncstream>: std::osyncstream. KArc programs run on one thread, so the
+// stream collects its output and emits it whole when destroyed or on emit().
+#ifndef KARC_STD_SYNCSTREAM
+#define KARC_STD_SYNCSTREAM
+
+#include <iostream>
+#include <string>
+
+namespace std {
+
+class osyncstream : public ostream {
+public:
+    osyncstream(ostream& target) : ostream(-1), target_(&target) {}
+    ~osyncstream() { emit(); }
+    void karc_put(const char* data, size_t count) override { text_.append(data, count); }
+    void emit() {
+        target_->write(text_.c_str(), (long)text_.size());
+        text_.clear();
+    }
+    ostream* get_wrapped() const { return target_; }
+
+private:
+    ostream* target_;
+    string text_;
+};
+
+}
+
+#endif

@@ -1,0 +1,107 @@
+// <any>: std::any, a value of any copyable type behind a virtual holder;
+// any_cast<T> reads it back, checking the type by its name.
+#ifndef KARC_STD_ANY
+#define KARC_STD_ANY
+
+#include <cstring>
+#include <exception>
+#include <typeinfo>
+#include <utility>
+
+namespace std {
+
+class bad_any_cast : public exception {
+public:
+    const char* what() const override { return "bad any_cast"; }
+};
+
+class karc_any_holder {
+public:
+    virtual ~karc_any_holder() {}
+    virtual karc_any_holder* clone() const = 0;
+    virtual const char* karc_type() const = 0;
+    virtual void* karc_value() = 0;
+    virtual const type_info& karc_info() const = 0;
+};
+
+template <typename T>
+class karc_any_value : public karc_any_holder {
+public:
+    karc_any_value(const T& value) : value_(value), info_(typeid(T)) {}
+    const type_info& karc_info() const override { return info_; }
+    karc_any_holder* clone() const override { return new karc_any_value<T>(value_); }
+    const char* karc_type() const override { return __karc_type_name(T); }
+    void* karc_value() override { return &value_; }
+    T value_;
+    type_info info_;
+};
+
+class any {
+public:
+    any() : held_(0) {}
+    any(const any& other) : held_(0) {
+        if (other.held_ != 0) { held_ = other.held_->clone(); }
+    }
+    any(const char* text) : held_(new karc_any_value<const char*>(text)) {}
+    template <typename T>
+    any(const T& value) : held_(new karc_any_value<T>(value)) {}
+    ~any() { delete held_; }
+    any& operator=(const any& other) {
+        if (this == &other) { return *this; }
+        delete held_;
+        held_ = 0;
+        if (other.held_ != 0) { held_ = other.held_->clone(); }
+        return *this;
+    }
+    template <typename T>
+    any& operator=(const T& value) {
+        delete held_;
+        held_ = new karc_any_value<T>(value);
+        return *this;
+    }
+    bool has_value() const { return held_ != 0; }
+    const type_info& type() const {
+        if (held_ == 0) { return typeid(void); }
+        return held_->karc_info();
+    }
+    template <typename T, typename... Args>
+    T& emplace(Args&&... args) {
+        delete held_;
+        held_ = new karc_any_value<T>(T(std::forward<Args>(args)...));
+        return *(T*)held_->karc_value();
+    }
+    void reset() {
+        delete held_;
+        held_ = 0;
+    }
+    void swap(any& other) {
+        karc_any_holder* held = held_;
+        held_ = other.held_;
+        other.held_ = held;
+    }
+    // The address of the value if it has type `name`, else null.
+    void* karc_value_as(const char* name) const {
+        if (held_ == 0 || strcmp(held_->karc_type(), name) != 0) { return 0; }
+        return held_->karc_value();
+    }
+
+private:
+    karc_any_holder* held_;
+};
+
+template <typename T>
+T any_cast(const any& value) {
+    T* held = (T*)value.karc_value_as(__karc_type_name(T));
+    if (held == 0) { karc_throw_bad_any_cast(); }
+    return *held;
+}
+
+template <typename T>
+T* any_cast(any* value) { return (T*)value->karc_value_as(__karc_type_name(T)); }
+
+template <typename T>
+any make_any(const T& value) { return any(value); }
+
+}
+
+#endif

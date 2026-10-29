@@ -1,0 +1,67 @@
+import Testing
+
+@Test
+function discardsOtherPreprocessingCharactersInExcludedSource() {
+    expect!(run("""
+        #if 0
+        scan $c %c x
+        set x @value
+        #endif
+        int main() { return 42; }
+        """) == 42)
+    expect!(!compiles("int main() { return $; }"))
+    expect!(reported("error[1001]"))
+    expect!(!compiles("""
+        #define BAD @
+        int main() { return BAD; }
+        """))
+    expect!(reported("error[1001]"))
+}
+
+@Test
+function loadsARegisteredHeaderRelativeToTheSource() {
+    expect!(runFiles([
+        TestSource { name = "src/main.cpp", text = """
+            #include "value.h"
+            int main() { return HEADER_VALUE; }
+            """ },
+        TestSource { name = "src/value.h", text = "#define HEADER_VALUE 42" }
+    ]) == 42)
+}
+
+@Test
+function selectsConditionalBranchesAndRejectsInclude() {
+    expect!(run("""
+        #define N 2
+        #if N == 1
+        int main() { return 1; }
+        #elif N == 2
+        int main() { return 42; }
+        #else
+        int main() { return 3; }
+        #endif
+        """) == 42)
+    expect!(!compiles("""
+        #include <unregistered_header.h>
+        int main() { return 0; }
+        """))
+    expect!(diagnosed(1106, 1, 1))
+    expect!(reported("phase `parse` failed"))
+}
+
+@Test
+function splicesPhysicalLinesBeforePreprocessing() {
+    expect!(run("""
+        #define ANSWER 42
+        int main() { return ANSWER; }
+        """) == 42)
+    expect!(run("""
+        #define TWICE(x) ((x) * 2)
+        int main() { return TWICE(21); }
+        """) == 42)
+    expect!(run("""
+        #define N 21
+        #define TWICE(x) ((x) * 2)
+        int main() { return TWICE(N); }
+        """) == 42)
+}

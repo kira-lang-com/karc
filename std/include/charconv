@@ -1,0 +1,126 @@
+// <charconv>: to_chars and from_chars for integers and doubles.
+#ifndef KARC_STD_CHARCONV
+#define KARC_STD_CHARCONV
+
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cctype>
+#include <__errc>
+
+namespace std {
+
+enum class chars_format { scientific = 1, fixed = 2, hex = 4, general = 3 };
+
+struct to_chars_result {
+    char* ptr;
+    errc ec;
+};
+struct from_chars_result {
+    const char* ptr;
+    errc ec;
+};
+
+inline to_chars_result karc_to_chars_text(char* first, char* last, const char* text) {
+    size_t length = strlen(text);
+    to_chars_result result;
+    if ((size_t)(last - first) < length) {
+        result.ptr = last;
+        result.ec = errc::value_too_large;
+        return result;
+    }
+    memcpy(first, text, length);
+    result.ptr = first + length;
+    result.ec = errc::ok;
+    return result;
+}
+inline to_chars_result to_chars(char* first, char* last, long value, int base = 10) {
+    char text[72];
+    char reversed[72];
+    int count = 0;
+    bool negative = value < 0;
+    unsigned long magnitude = negative ? (unsigned long)(0 - value) : (unsigned long)value;
+    do {
+        int digit = (int)(magnitude % (unsigned long)base);
+        reversed[count] = (char)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+        count++;
+        magnitude = magnitude / (unsigned long)base;
+    } while (magnitude != 0);
+    int at = 0;
+    if (negative) {
+        text[0] = '-';
+        at = 1;
+    }
+    for (int i = count - 1; i >= 0; i--) {
+        text[at] = reversed[i];
+        at++;
+    }
+    text[at] = 0;
+    return karc_to_chars_text(first, last, text);
+}
+inline to_chars_result to_chars(char* first, char* last, int value, int base = 10) { return to_chars(first, last, (long)value, base); }
+inline to_chars_result to_chars(char* first, char* last, double value) {
+    char text[64];
+    for (int precision = 1; precision <= 17; precision++) {
+        snprintf(text, 64, "%.*g", precision, value);
+        if (strtod(text, 0) == value) { break; }
+    }
+    return karc_to_chars_text(first, last, text);
+}
+inline to_chars_result to_chars(char* first, char* last, double value, chars_format format, int precision = 6) {
+    char text[512];
+    if (format == chars_format::fixed) { snprintf(text, 512, "%.*f", precision, value); }
+    else if (format == chars_format::scientific) { snprintf(text, 512, "%.*e", precision, value); }
+    else { snprintf(text, 512, "%.*g", precision, value); }
+    return karc_to_chars_text(first, last, text);
+}
+
+inline from_chars_result from_chars(const char* first, const char* last, long& value, int base = 10) {
+    char text[72];
+    size_t length = (size_t)(last - first);
+    if (length > 71) { length = 71; }
+    memcpy(text, first, length);
+    text[length] = 0;
+    char* stop = 0;
+    from_chars_result result;
+    long parsed = strtol(text, &stop, base);
+    if (stop == text || text[0] == '+' || isspace((unsigned char)text[0])) {
+        result.ptr = first;
+        result.ec = errc::invalid_argument;
+        return result;
+    }
+    value = parsed;
+    result.ptr = first + (stop - text);
+    result.ec = errc::ok;
+    return result;
+}
+inline from_chars_result from_chars(const char* first, const char* last, int& value, int base = 10) {
+    long wide = 0;
+    from_chars_result result = from_chars(first, last, wide, base);
+    if (result.ec == errc::ok) { value = (int)wide; }
+    return result;
+}
+inline from_chars_result from_chars(const char* first, const char* last, double& value) {
+    char text[512];
+    size_t length = (size_t)(last - first);
+    if (length > 511) { length = 511; }
+    memcpy(text, first, length);
+    text[length] = 0;
+    char* stop = 0;
+    from_chars_result result;
+    double parsed = strtod(text, &stop);
+    if (stop == text) {
+        result.ptr = first;
+        result.ec = errc::invalid_argument;
+        return result;
+    }
+    value = parsed;
+    result.ptr = first + (stop - text);
+    result.ec = errc::ok;
+    return result;
+}
+
+}
+
+#endif

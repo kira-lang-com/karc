@@ -1,0 +1,601 @@
+// Module assembly: the whole-program checks, the module-scope declarations
+// (records, string storage, globals and function signatures) and the per
+// function body emission.
+
+function newLowerer(tree: CppTree, builder: KirModuleBuilder) -> Lowerer {
+    return Lowerer {
+        tree = tree,
+        builder = builder,
+        typeCache = [],
+        structTypes = [],
+        functionSlots = [],
+        slotHeads = [],
+        loweredFunctions = [],
+        globalHandles = [],
+        stringHandles = [],
+        functionIndex = 0,
+        functionHandle = .None,
+        entryBlock = .None,
+        currentBlock = .None,
+        sret = .None,
+        bindings = [],
+        active = 0,
+        slots = 0,
+        slotsData = [],
+        breakTargets = [],
+        breakDepth = 0,
+        continueTargets = [],
+        continueDepth = 0,
+        labels = [],
+        switchMarkers = [],
+        localsFrom = 0,
+        temporaries = [],
+        lastCallReference = false,
+        dispatchNext = false,
+        memberInstances = [],
+        tryTargets = [],
+        tryDepth = 0,
+        unwinding = false,
+        handlers = [],
+        noThrowFunctions = [],
+        exceptionsEnabled = false,
+        addedStrings = [],
+        terminated = false,
+        failed = false,
+        coroutineFrame = .None,
+        frameOffset = 0,
+        resumeBlocks = [],
+        finalBlock = .None,
+        thunks = [],
+        guardedTemporaries = [],
+        adapters = []
+    }
+}
+// Records are declared empty first so a field may name any struct, then filled.
+function declareRecords(state: borrow mut Lowerer) {
+    declareRecordsFrom(state, 0)
+}
+// Records from index `first` on; a function template instance can bring new
+// class instances after the module's records were declared.
+function declareRecordsFrom(state: borrow mut Lowerer, first: Int) {
+    for index in first..state.tree.structs.count {
+        let s = state.tree.structs[index]
+        if s.instance || spelledClassName(s.name) != s.name {
+            state.structTypes.append(kRecordNamed(state, s.nameSpan, sourceSuffix(s.name)))
+        } else if s.internal {
+            let suffix = (sourceSuffix(state.tree.sourceName) * 31 + sourceSuffix(s.name)) % 100000000
+            state.structTypes.append(kRecordNamed(state, s.nameSpan, suffix))
+        } else {
+            state.structTypes.append(kRecord(state, s.nameSpan))
+        }
+    }
+    for i in first..state.tree.structs.count {
+        if isUnionType(state.tree, state.tree.structs[i].name) {
+            kRecordField(state, state.structTypes[i], state.tree.structs[i].nameSpan, unionStorageType(state.tree, joinText(["%", state.tree.structs[i].name])))
+        } else if !isLambdaType(state.tree.structs[i].name) || capturesTyped(state.tree.structs[i]) {
+            for field in state.tree.structs[i].fields {
+                kRecordField(state, state.structTypes[i], field.nameSpan, field.declType)
+            }
+            if state.tree.structs[i].fields.count == 0 { kRecordField(state, state.structTypes[i], state.tree.structs[i].nameSpan, "i8") }
+        }
+    }
+}
+// String literals become anonymous NUL-terminated byte arrays.
+function declareStrings(state: borrow mut Lowerer) {
+    declareStringsFrom(state, 0)
+}
+function declareStringsFrom(state: borrow mut Lowerer, first: Int) {
+    for index in first..state.tree.strings.count {
+        let raw = state.tree.strings[index]
+        let bytes = decodedBytes(raw)
+        let arrayType = joinText(["[", decimalText(bytes.count + 1), " x i8]"])
+        let global = kAnonymousGlobal(state, arrayType)
+        for b in bytes {
+            kGlobalByte(global, b)
+        }
+        kGlobalByte(global, 0)
+        state.stringHandles.append(global)
+    }
+}
+function declareGlobal(state: borrow mut Lowerer, g: CppGlobal, ty: String) -> KirGlobal {
+    if g.internal { return kGlobalNamed(state, g.nameSpan, ty, (sourceSuffix(state.tree.sourceName) * 31 + sourceSuffix(g.name)) % 100000000) }
+    return kGlobal(state, g.nameSpan, ty)
+}
+function declareGlobals(state: borrow mut Lowerer) {
+    declareGlobalsFrom(state, 0)
+}
+function declareGlobalsFrom(state: borrow mut Lowerer, first: Int) {
+    for index in first..state.tree.globals.count {
+        let g = state.tree.globals[index]
+        var ty = g.declType
+        if g.arraySize > 0 {
+            ty = joinText(["[", decimalText(g.arraySize), " x ", g.declType, "]"])
+        }
+        let global = declareGlobal(state, g, ty)
+        if g.arraySize == 0 && g.hasInit {
+            kGlobalInt(global, g.initValue)
+        } else if g.initList.count > 0 {
+            let width = sizeOfKirType(g.declType)
+            for b in initBytes(g.initList, width) {
+                kGlobalByte(global, b)
+            }
+        }
+        state.globalHandles.append(global)
+    }
+}
+// One handle per function name: a prototype and its definition share it. A
+// struct-returning function takes the out-pointer as hidden parameter zero and
+// has a unit KIR result.
+function declareFunctions(state: borrow mut Lowerer) {
+    declareFunctionsFrom(state, 0)
+}
+function declareFunctionsFrom(state: borrow mut Lowerer, first: Int) {
+    for index in first..state.tree.functions.count {
+        if !isLambdaFunction(state.tree, state.tree.functions[index]) { declareFunctionAt(state, index) }
+    }
+}
+function declareFunctionAt(state: borrow mut Lowerer, index: Int) {
+    if index >= 0 {
+        let fn = state.tree.functions[index]
+        let key = cachedFunctionKey(state, index)
+        if functionSlot(state, key) < 0 {
+            let structReturn = isClassType(fn.returnType)
+            var result = fn.returnType
+            if structReturn { result = "unit" }
+            var signature = kSignatureNamed(state, fn.nameSpan, fn.name, result, functionSuffix(state.tree, fn))
+            if isMainName(fn.name) { signature = kSignature(state, fn.nameSpan, result) }
+            if fn.cLinkage { signature = kSignatureC(state, fn.nameSpan, unqualifiedName(fn.name), result) }
+            var parameterTypes: [String] = []
+            if structReturn {
+                let sretType = joinText(["*[0 x ", fn.returnType, "]"])
+                kSignatureParameter(state, signature, sretType)
+                parameterTypes.append(sretType)
+            }
+            let owner = methodOwnerType(state.tree, fn.name)
+            if owner != "" {
+                let ownerType = joinText(["*[0 x ", owner, "]"])
+                kSignatureParameter(state, signature, ownerType)
+                parameterTypes.append(ownerType)
+            }
+            for parameter in fn.parameters {
+                let parameterType = parameterKirType(parameter.declType)
+                kSignatureParameter(state, signature, parameterType)
+                parameterTypes.append(parameterType)
+            }
+            let noThrow = fn.cLinkage || utf8Byte(unqualifiedName(fn.name), 0) == 126 || unqualifiedName(fn.name) == "__karc_destroy" ||
+                (index < state.noThrowFunctions.count && state.noThrowFunctions[index])
+            let handle = kDeclareFunction(signature)
+            if isGlobalInitializer(fn.name) { kir_function_initializer(handle) }
+            addFunctionSlot(state, key, parameterTypes, result, handle, noThrow)
+        }
+    }
+}
+function isGlobalInitializer(name: String) -> Bool {
+    return utf8Count(name) > 19 && utf8Slice(name, 0, 19) == "__karc_global_init_"
+}
+function statementIsReturn(statement: Statement) -> Bool {
+    match statement.kind {
+        Return -> return true
+        Declare -> return false
+        IfInit -> return false
+        Assignment -> return false
+        ArrayDecl -> return false
+        StructDecl -> return false
+        Group -> return false
+        DeclGroup -> return false
+        ExprStmt -> return false
+        While -> return false
+        DoWhile -> return false
+        For -> return false
+        If -> return false
+        Switch -> return false
+        Case -> return false
+        Default -> return false
+        Break -> return false
+        Continue -> return false
+        Label -> return false
+        Goto -> return false
+        RangeFor -> return false
+        GlobalInit -> return false
+        Try -> return false
+    }
+}
+function switchHasDefaultReturn(tree: CppTree, id: StmtId) -> Bool {
+    let statement = tree.statements[id.value]
+    match statement.kind {
+        Switch(switchStmt) -> {
+            var hasDefault = false
+            var lastBody = -1
+            for childId in switchStmt.body {
+                let child = tree.statements[childId.value]
+                match child.kind {
+                    Default -> { hasDefault = true }
+                    Case -> {}
+                    Declare -> { lastBody = childId.value }
+                    IfInit -> { lastBody = childId.value }
+                    Assignment -> { lastBody = childId.value }
+                    ArrayDecl -> { lastBody = childId.value }
+                    StructDecl -> { lastBody = childId.value }
+                    Group -> { lastBody = childId.value }
+                    DeclGroup -> { lastBody = childId.value }
+                    ExprStmt -> { lastBody = childId.value }
+                    Return -> { lastBody = childId.value }
+                    While -> { lastBody = childId.value }
+                    DoWhile -> { lastBody = childId.value }
+                    For -> { lastBody = childId.value }
+                    If -> { lastBody = childId.value }
+                    Switch -> { lastBody = childId.value }
+                    Break -> { lastBody = childId.value }
+                    Continue -> { lastBody = childId.value }
+                    Label -> { lastBody = childId.value }
+                    Goto -> { lastBody = childId.value }
+                    RangeFor -> { lastBody = childId.value }
+                    GlobalInit -> { lastBody = childId.value }
+                    Try -> { lastBody = childId.value }
+                }
+            }
+            return hasDefault && lastBody >= 0 && statementIsReturn(tree.statements[lastBody])
+        }
+        Declare -> return false
+        IfInit -> return false
+        Assignment -> return false
+        ArrayDecl -> return false
+        StructDecl -> return false
+        Group -> return false
+        DeclGroup -> return false
+        ExprStmt -> return false
+        Return -> return false
+        While -> return false
+        DoWhile -> return false
+        For -> return false
+        If -> return false
+        Case -> return false
+        Default -> return false
+        Break -> return false
+        Continue -> return false
+        Label -> return false
+        Goto -> return false
+        RangeFor -> return false
+        GlobalInit -> return false
+        Try -> return false
+    }
+}
+function hasDirectBreak(tree: CppTree, body: [StmtId]) -> Bool {
+    for id in body {
+        let statement = tree.statements[id.value]
+        match statement.kind {
+            Break -> return true
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Case -> {}
+            Default -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    return false
+}
+function trueLiteral(tree: CppTree, expression: ExprId) -> Bool {
+    let condition = tree.expressions[expression.value]
+    match condition.kind {
+        NumberLit(number) -> return number.value != 0
+        FloatLit -> return false
+        StringLit -> return false
+        Name -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Call -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+function isInfiniteLoop(tree: CppTree, id: StmtId) -> Bool {
+    let statement = tree.statements[id.value]
+    match statement.kind {
+        For(loop) -> return !hasDirectBreak(tree, loop.body) && trueLiteral(tree, loop.condition)
+        While(loop) -> return !hasDirectBreak(tree, loop.body) && trueLiteral(tree, loop.condition)
+        Declare -> return false
+        IfInit -> return false
+        Assignment -> return false
+        ArrayDecl -> return false
+        StructDecl -> return false
+        Group -> return false
+        DeclGroup -> return false
+        ExprStmt -> return false
+        Return -> return false
+        DoWhile -> return false
+        If -> return false
+        Switch -> return false
+        Case -> return false
+        Default -> return false
+        Break -> return false
+        Continue -> return false
+        Label -> return false
+        Goto -> return false
+        RangeFor -> return false
+        GlobalInit -> return false
+        Try -> return false
+    }
+}
+function setFunction(state: borrow mut Lowerer, handle: KirFunctionBuilder) {
+    state.functionHandle = .Some(handle)
+}
+function setEntry(state: borrow mut Lowerer, block: KirBlockBuilder) {
+    state.entryBlock = .Some(block)
+    state.currentBlock = .Some(block)
+}
+function setSret(state: borrow mut Lowerer, value: KirValue) {
+    state.sret = .Some(value)
+}
+function resetFunctionState(state: borrow mut Lowerer, index: Int, handle: KirFunctionBuilder) {
+    state.functionIndex = index
+    state.bindings = []
+    state.active = 0
+    state.slots = 0
+    state.slotsData = []
+    state.breakDepth = 0
+    state.tryDepth = 0
+    state.handlers = []
+    state.continueDepth = 0
+    state.labels = []
+    state.switchMarkers = []
+    state.terminated = false
+    state.sret = .None
+    state.coroutineFrame = .None
+    state.resumeBlocks = []
+    state.finalBlock = .None
+    state.guardedTemporaries = []
+    setFunction(state, handle)
+    setEntry(state, kEntryBlock(handle))
+}
+// Slots 0 and 1 are unnamed scratch storage: a scalar and an array, so an error
+// path always has a usable address to hand back.
+function declareScratch(state: borrow mut Lowerer, ty: String, element: String) {
+    let address = kStackAlloc(state, ty)
+    state.slots = state.slots + 1
+    state.slotsData.append(Slot { ty = ty, element = element, reference = false, global = "", address = address })
+}
+// A parameter becomes a local slot: a struct by value is copied out of the
+// caller's storage, anything else is stored straight into its slot.
+function bindParameters(state: borrow mut Lowerer, fn: CppFunction, handle: KirFunctionBuilder, offset: Int) {
+    var i: Int = 0
+    for parameterInfo in fn.parameters {
+        let paramType = parameterInfo.declType
+        let parameter = kParameter(handle, i + offset)
+        if isClassType(paramType) {
+            if !parameterInfo.reference && needsCopy(state, paramType) {
+                let pointerType = joinText(["*[0 x ", paramType, "]"])
+                let slot = declare(state, parameterInfo.name, pointerType, paramType, fn.span)
+                state.slotsData[slot].reference = true
+                kStore(state, kBitcast(state, parameter, pointerType), state.slotsData[slot].address)
+            } else {
+                let slot = declare(state, parameterInfo.name, paramType, "", fn.span)
+                if parameterInfo.reference { state.slotsData[slot].reference = true }
+                copyStructByValueParam(state, slot, parameter, paramType, fn.span)
+            }
+        } else {
+            var element: String = ""
+            if isPointerType(paramType) {
+                element = elementOfPointer(paramType)
+            }
+            let slot = declare(state, parameterInfo.name, paramType, element, fn.span)
+            if parameterInfo.reference { state.slotsData[slot].reference = true }
+            kStore(state, parameter, state.slotsData[slot].address)
+        }
+        i = i + 1
+    }
+}
+function lowerFunction(state: borrow mut Lowerer, index: Int) {
+    let fn = state.tree.functions[index]
+    let callee = functionSlotForFunction(state, index)
+    if callee < 0 { return }
+    let handle = state.functionSlots[callee].handle
+    if isCoroutine(state.tree, fn) {
+        lowerCoroutine(state, index, handle)
+        return
+    }
+    kOpenBody(handle)
+    resetFunctionState(state, index, handle)
+    // A non-void function must end in a return; a void function may fall off
+    // the end, where an implicit return is emitted.
+    var switchReturn = false
+    var infiniteLoop = false
+    if fn.body.count > 0 {
+        switchReturn = switchHasDefaultReturn(state.tree, fn.body[fn.body.count - 1])
+        infiniteLoop = isInfiniteLoop(state.tree, fn.body[fn.body.count - 1])
+    }
+    if !state.tree.cInput && fn.returnType != "unit" && !isMainName(fn.name) && !switchReturn && !infiniteLoop {
+        if fn.body.count == 0 {
+            lowerError(state, diagMissingFinalReturn(), fn.nameSpan)
+        } else if !endsInReturn(state.tree, fn.body[fn.body.count - 1]) {
+            lowerError(state, diagMissingFinalReturn(), fn.nameSpan)
+        }
+    }
+    declareScratch(state, "i32", "")
+    declareScratch(state, "[1 x i32]", "i32")
+    let structReturn = isClassType(fn.returnType)
+    var offset = 0
+    if structReturn {
+        setSret(state, kParameter(handle, 0))
+        offset = 1
+    }
+    let owner = methodOwnerType(state.tree, fn.name)
+    if owner != "" {
+        let parameter = kParameter(handle, offset)
+        let slot = declare(state, "this", joinText(["*[0 x ", owner, "]"]), owner, fn.span)
+        kStore(state, parameter, state.slotsData[slot].address)
+        offset = offset + 1
+    }
+    let body = kBlock(state)
+    kSwitchTo(state, body)
+    bindParameters(state, fn, handle, offset)
+    state.localsFrom = state.slots
+    emitBody(state, fn.body)
+    for label in state.labels {
+        if !label.defined { lowerError(state, diagUndefinedLabel(), label.span) }
+    }
+    if fn.returnType == "unit" && !state.terminated {
+        deallocLocals(state)
+        kReturnVoid(state)
+    } else if isMainName(fn.name) && !state.terminated {
+        flushOutput(state)
+        deallocLocals(state)
+        kReturn(state, kConstInt(state, "i32", 0))
+    } else if (switchReturn || !state.terminated) && !state.terminated {
+        deallocLocals(state)
+        if isClassType(fn.returnType) {
+            kReturnVoid(state)
+        } else {
+            kReturn(state, coerceRef(state, zeroValue(state), fn.returnType))
+        }
+    }
+    // Close the entry block last: every stack slot and global address was
+    // hoisted into it, so it dominates the whole body.
+    kSwitchTo(state, state.entryBlock.unwrap())
+    kBr(state, body)
+}
+function lowerModule(session: Session, unit: Unit, program: Program) -> KirModule {
+    let builder = kir_module_new(session, unit, program)
+    let tree: CppTree = artifactValue(definition_program_payload(session, program))
+    var state = newLowerer(tree, builder)
+    indexFunctions(state.tree)
+    indexStructs(state.tree)
+    declareRecords(state)
+    declareStrings(state)
+    declareVtables(state)
+    declareGlobals(state)
+    state.noThrowFunctions = noThrowFunctions(state.tree)
+    for fn in state.tree.functions {
+        if fn.name == "karc_exception_pending" { state.exceptionsEnabled = true }
+    }
+    settleUnitAutoResults(state)
+    declareFunctions(state)
+    emitThunks(state)
+    declareAdapters(state)
+    // Each definition is lowered once: the keys lowered so far, hashed.
+    var heads: [Int] = []
+    for _ in 0..symbolBucketCount() { heads.append(-1) }
+    var next: [Int] = []
+    var loweredKeys: [String] = []
+    var index = 0
+    while index < state.tree.functions.count {
+        if !state.tree.functions[index].isProto {
+            let key = cachedFunctionKey(state, index)
+            let bucket = sourceHash(key) % symbolBucketCount()
+            var earlier = heads[bucket]
+            var earlierDefinition = false
+            while earlier >= 0 {
+                if loweredKeys[earlier] == key { earlierDefinition = true }
+                earlier = next[earlier]
+            }
+            if !earlierDefinition {
+                next.append(heads[bucket])
+                heads[bucket] = loweredKeys.count
+                loweredKeys.append(key)
+                lowerFunction(state, index)
+            }
+        }
+        index = index + 1
+    }
+    emitAdapters(state)
+    return kir_module_finish(builder)
+}
+// Whether statement `id` cannot complete normally: a return, a throw, or a
+// try, if or block every path through which ends so.
+function endsInReturn(tree: CppTree, id: StmtId) -> Bool {
+    let statement = tree.statements[id.value]
+    match statement.kind {
+        Return -> return true
+        ExprStmt(expression) -> {
+            let e = tree.expressions[expression.value]
+            match e.kind {
+                Call(call) -> return call.name == "__builtin_klf_throw"
+                NumberLit -> return false
+                FloatLit -> return false
+                StringLit -> return false
+                Name -> return false
+                Neg -> return false
+                Positive -> return false
+                Not -> return false
+                BitNot -> return false
+                AddrOf -> return false
+                Deref -> return false
+                Sizeof -> return false
+                Cast -> return false
+                Field -> return false
+                Index -> return false
+                PreStep -> return false
+                PostStep -> return false
+                Binary -> return false
+                Ternary -> return false
+                New -> return false
+                Delete -> return false
+            }
+        }
+        Group(body) -> {
+            if body.count == 0 { return false }
+            return endsInReturn(tree, body[body.count - 1])
+        }
+        If(branch) -> {
+            if branch.body.count == 0 || branch.elseBody.count == 0 { return false }
+            return endsInReturn(tree, branch.body[branch.body.count - 1]) &&
+                endsInReturn(tree, branch.elseBody[branch.elseBody.count - 1])
+        }
+        Try(tryStmt) -> {
+            if tryStmt.body.count == 0 || !endsInReturn(tree, tryStmt.body[tryStmt.body.count - 1]) { return false }
+            for handler in tryStmt.handlers {
+                if handler.body.count == 0 || !endsInReturn(tree, handler.body[handler.body.count - 1]) { return false }
+            }
+            return true
+        }
+        Declare -> return false
+        IfInit -> return false
+        Assignment -> return false
+        ArrayDecl -> return false
+        StructDecl -> return false
+        DeclGroup(body) -> {
+            if body.count == 0 { return false }
+            return endsInReturn(tree, body[body.count - 1])
+        }
+        While -> return false
+        DoWhile -> return false
+        For -> return false
+        Switch -> return false
+        Case -> return false
+        Default -> return false
+        Break -> return false
+        Continue -> return false
+        Label -> return false
+        Goto -> return false
+        RangeFor -> return false
+        GlobalInit -> return false
+    }
+}

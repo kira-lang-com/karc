@@ -1,0 +1,344 @@
+// <random>: the engines (Mersenne Twister, linear congruential, subtract
+// with carry, and the adaptors over them), random_device, seed_seq and the
+// distributions. A distribution takes any engine: it reads the engine's
+// output as a fraction of its range.
+#ifndef KARC_STD_RANDOM
+#define KARC_STD_RANDOM
+
+#include <cmath>
+#include <ctime>
+#include <cstddef>
+#include <vector>
+#include <initializer_list>
+
+namespace std {
+
+// A draw of `engine` scaled to [0, 1).
+template <typename G>
+double karc_unit(G& engine) {
+    unsigned long low = (unsigned long)engine.min();
+    unsigned long span = (unsigned long)engine.max() - low;
+    unsigned long draw = (unsigned long)engine() - low;
+    // A full 64-bit range: the top 53 bits, which convert exactly.
+    if (span == 18446744073709551615ul) { return (double)(draw >> 11) / 9007199254740992.0; }
+    return (double)draw / ((double)span + 1.0);
+}
+// 32 random bits from `engine`, whatever its range.
+template <typename G>
+unsigned long karc_bits32(G& engine) {
+    return (unsigned long)(karc_unit(engine) * 4294967296.0) & 4294967295ul;
+}
+template <typename G>
+unsigned long karc_bits64(G& engine) {
+    unsigned long high = karc_bits32(engine);
+    return (high << 32) | karc_bits32(engine);
+}
+
+class seed_seq {
+public:
+    seed_seq() {}
+    seed_seq(initializer_list<unsigned int> values) {
+        for (const unsigned int* at = values.begin(); at != values.end(); at++) { values_.push_back(*at); }
+    }
+    template <typename I>
+    seed_seq(I first, I last) {
+        for (; first != last; ++first) { values_.push_back((unsigned int)*first); }
+    }
+    size_t size() const { return values_.size(); }
+    // The standard's generation algorithm, filling [first, last).
+    template <typename I>
+    void generate(I first, I last) {
+        size_t n = last - first;
+        if (n == 0) { return; }
+        for (I at = first; at != last; ++at) { *at = 2344191739u; }
+        size_t s = values_.size();
+        size_t t = n >= 623 ? 11 : (n >= 68 ? 7 : (n >= 39 ? 5 : (n >= 7 ? 3 : (n - 1) / 2)));
+        size_t p = (n - t) / 2;
+        size_t q = p + t;
+        size_t m = s + 1 > n ? s + 1 : n;
+        for (size_t k = 0; k < m; k++) {
+            unsigned int mixed = first[k % n] ^ first[(k + p) % n] ^ first[(k + n - 1) % n];
+            unsigned int r1 = 1664525u * (mixed ^ (mixed >> 27));
+            unsigned int r2 = r1 + (unsigned int)(k == 0 ? s : (k <= s ? k % n + values_[k - 1] : k % n));
+            first[(k + p) % n] = first[(k + p) % n] + r1;
+            first[(k + q) % n] = first[(k + q) % n] + r2;
+            first[k % n] = r2;
+        }
+        for (size_t k = m; k < m + n; k++) {
+            unsigned int mixed = first[k % n] + first[(k + p) % n] + first[(k + n - 1) % n];
+            unsigned int r3 = 1566083941u * (mixed ^ (mixed >> 27));
+            unsigned int r4 = r3 - (unsigned int)(k % n);
+            first[(k + p) % n] = first[(k + p) % n] ^ r3;
+            first[(k + q) % n] = first[(k + q) % n] ^ r4;
+            first[k % n] = r4;
+        }
+    }
+
+private:
+    vector<unsigned int> values_;
+};
+
+class mt19937 {
+public:
+    typedef unsigned int result_type;
+    static const unsigned int default_seed = 5489u;
+    mt19937() { seed(5489); }
+    mt19937(unsigned long value) { seed(value); }
+    mt19937(seed_seq& sequence) { seed(sequence); }
+    void seed(unsigned long value) {
+        state_[0] = value & 4294967295u;
+        for (int i = 1; i < 624; i++) {
+            state_[i] = (1812433253u * (state_[i - 1] ^ (state_[i - 1] >> 30)) + i) & 4294967295u;
+        }
+        index_ = 624;
+    }
+    void seed(seed_seq& sequence) {
+        unsigned int words[624];
+        sequence.generate(words, words + 624);
+        for (int i = 0; i < 624; i++) { state_[i] = words[i]; }
+        index_ = 624;
+    }
+    unsigned long operator()() {
+        if (index_ >= 624) { twist(); }
+        unsigned long y = state_[index_];
+        index_++;
+        y = y ^ (y >> 11);
+        y = y ^ ((y << 7) & 2636928640u);
+        y = y ^ ((y << 15) & 4022730752u);
+        y = y ^ (y >> 18);
+        return y & 4294967295u;
+    }
+    void discard(unsigned long count) {
+        for (unsigned long i = 0; i < count; i++) { (*this)(); }
+    }
+    static unsigned long min() { return 0; }
+    static unsigned long max() { return 4294967295u; }
+    bool operator==(const mt19937& other) const {
+        for (int i = 0; i < 624; i++) {
+            if (state_[i] != other.state_[i]) { return false; }
+        }
+        return index_ == other.index_;
+    }
+
+private:
+    void twist() {
+        for (int i = 0; i < 624; i++) {
+            unsigned long y = (state_[i] & 2147483648u) | (state_[(i + 1) % 624] & 2147483647u);
+            unsigned long next = state_[(i + 397) % 624] ^ (y >> 1);
+            if (y % 2 != 0) { next = next ^ 2567483615u; }
+            state_[i] = next;
+        }
+        index_ = 0;
+    }
+    unsigned long state_[624];
+    int index_;
+};
+
+class mt19937_64 {
+public:
+    typedef unsigned long result_type;
+    mt19937_64() { seed(5489); }
+    mt19937_64(unsigned long value) { seed(value); }
+    void seed(unsigned long value) {
+        state_[0] = value;
+        for (int i = 1; i < 312; i++) {
+            state_[i] = 6364136223846793005ul * (state_[i - 1] ^ (state_[i - 1] >> 62)) + (unsigned long)i;
+        }
+        index_ = 312;
+    }
+    unsigned long operator()() {
+        if (index_ >= 312) { twist(); }
+        unsigned long y = state_[index_];
+        index_++;
+        y = y ^ ((y >> 29) & 6148914691236517205ul);
+        y = y ^ ((y << 17) & 8202884508482404352ul);
+        y = y ^ ((y << 37) & 18444473444759240704ul);
+        y = y ^ (y >> 43);
+        return y;
+    }
+    void discard(unsigned long count) {
+        for (unsigned long i = 0; i < count; i++) { (*this)(); }
+    }
+    static unsigned long min() { return 0; }
+    static unsigned long max() { return 18446744073709551615ul; }
+
+private:
+    void twist() {
+        for (int i = 0; i < 312; i++) {
+            unsigned long y = (state_[i] & 18446744071562067968ul) | (state_[(i + 1) % 312] & 2147483647ul);
+            unsigned long next = state_[(i + 156) % 312] ^ (y >> 1);
+            if (y % 2 != 0) { next = next ^ 13043109905998158313ul; }
+            state_[i] = next;
+        }
+        index_ = 0;
+    }
+    unsigned long state_[312];
+    int index_;
+};
+
+// x = (a * x + c) mod m, for a and m small enough that a * x fits in 64
+// bits, as in the standard's engines.
+template <typename T, unsigned long A, unsigned long C, unsigned long M>
+class linear_congruential_engine {
+public:
+    typedef T result_type;
+    linear_congruential_engine() { seed(1); }
+    linear_congruential_engine(unsigned long value) { seed(value); }
+    void seed(unsigned long value) {
+        state_ = (C % M == 0 && value % M == 0) ? 1 : value % M;
+    }
+    T operator()() {
+        state_ = (A * state_ + C) % M;
+        return (T)state_;
+    }
+    void discard(unsigned long count) {
+        for (unsigned long i = 0; i < count; i++) { (*this)(); }
+    }
+    static T min() { return C == 0 ? 1 : 0; }
+    static T max() { return (T)(M - 1); }
+
+private:
+    unsigned long state_;
+};
+typedef linear_congruential_engine<unsigned int, 16807, 0, 2147483647> minstd_rand0;
+typedef linear_congruential_engine<unsigned int, 48271, 0, 2147483647> minstd_rand;
+
+// Subtract with carry over 24- or 48-bit words (ranlux).
+template <typename T, int W, int S, int R>
+class subtract_with_carry_engine {
+public:
+    typedef T result_type;
+    subtract_with_carry_engine() { seed(19780503); }
+    subtract_with_carry_engine(unsigned long value) { seed(value); }
+    void seed(unsigned long value) {
+        linear_congruential_engine<unsigned int, 40014, 0, 2147483563> source(value == 0 ? 19780503 : value);
+        for (int i = 0; i < R; i++) {
+            unsigned long word = source();
+            if (W > 32) { word = word | ((unsigned long)source() << 32); }
+            words_[i] = word & mask();
+        }
+        carry_ = words_[R - 1] == 0 ? 1 : 0;
+        index_ = 0;
+    }
+    T operator()() {
+        int short_index = (index_ + R - S) % R;
+        unsigned long subtrahend = words_[index_] + carry_;
+        unsigned long result;
+        if (words_[short_index] >= subtrahend) {
+            result = words_[short_index] - subtrahend;
+            carry_ = 0;
+        } else {
+            result = (mask() - subtrahend) + words_[short_index] + 1;
+            carry_ = 1;
+        }
+        words_[index_] = result;
+        index_ = (index_ + 1) % R;
+        return (T)result;
+    }
+    void discard(unsigned long count) {
+        for (unsigned long i = 0; i < count; i++) { (*this)(); }
+    }
+    static T min() { return 0; }
+    static T max() { return (T)mask(); }
+
+private:
+    static unsigned long mask() { return W == 64 ? 18446744073709551615ul : (1ul << W) - 1; }
+    unsigned long words_[R];
+    unsigned long carry_;
+    int index_;
+};
+typedef subtract_with_carry_engine<unsigned int, 24, 10, 24> ranlux24_base;
+typedef subtract_with_carry_engine<unsigned long, 48, 5, 12> ranlux48_base;
+
+// Keeps `used` of every `block` outputs of the engine E.
+template <typename E, int P, int U>
+class discard_block_engine {
+public:
+    typedef unsigned long result_type;
+    discard_block_engine() : taken_(0) {}
+    discard_block_engine(unsigned long value) : engine_(value), taken_(0) {}
+    void seed(unsigned long value) {
+        engine_.seed(value);
+        taken_ = 0;
+    }
+    unsigned long operator()() {
+        if (taken_ >= U) {
+            engine_.discard(P - U);
+            taken_ = 0;
+        }
+        taken_++;
+        return engine_();
+    }
+    unsigned long min() { return engine_.min(); }
+    unsigned long max() { return engine_.max(); }
+
+private:
+    E engine_;
+    int taken_;
+};
+typedef discard_block_engine<ranlux24_base, 223, 23> ranlux24;
+typedef discard_block_engine<ranlux48_base, 389, 11> ranlux48;
+
+// Returns the engine's outputs in a shuffled order through a table of K.
+template <typename E, int K>
+class shuffle_order_engine {
+public:
+    typedef unsigned long result_type;
+    shuffle_order_engine() { fill(); }
+    shuffle_order_engine(unsigned long value) : engine_(value) { fill(); }
+    void seed(unsigned long value) {
+        engine_.seed(value);
+        fill();
+    }
+    unsigned long operator()() {
+        double range = (double)engine_.max() - (double)engine_.min() + 1.0;
+        int slot = (int)((double)K * ((double)held_ - (double)engine_.min()) / range);
+        held_ = table_[slot];
+        table_[slot] = engine_();
+        return held_;
+    }
+    unsigned long min() { return engine_.min(); }
+    unsigned long max() { return engine_.max(); }
+
+private:
+    void fill() {
+        for (int i = 0; i < K; i++) { table_[i] = engine_(); }
+        held_ = engine_();
+    }
+    E engine_;
+    unsigned long table_[K];
+    unsigned long held_;
+};
+typedef shuffle_order_engine<minstd_rand0, 256> knuth_b;
+
+typedef mt19937 default_random_engine;
+
+class random_device {
+public:
+    typedef unsigned int result_type;
+    random_device() : counter_(0) {}
+    random_device(const char* token) : counter_(0) {}
+    unsigned long operator()() {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        counter_++;
+        unsigned long mixed = (unsigned long)now.tv_nsec * 2654435761u + counter_ * 40503 + (unsigned long)now.tv_sec;
+        mixed = (mixed ^ (mixed >> 16)) * 73244475u;
+        return (mixed ^ (mixed >> 16)) & 4294967295u;
+    }
+    double entropy() const { return 0.0; }
+    static unsigned long min() { return 0; }
+    static unsigned long max() { return 4294967295u; }
+
+private:
+    unsigned long counter_;
+};
+
+template <typename T, int B, typename G>
+T generate_canonical(G& engine) { return (T)karc_unit(engine); }
+
+}
+
+#include <__random_distributions>
+
+#endif

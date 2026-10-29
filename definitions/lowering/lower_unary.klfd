@@ -1,0 +1,54 @@
+// Unary arithmetic and logical expression lowering.
+
+function emitPositive(state: borrow mut Lowerer, operandId: ExprId) -> Value {
+    let ty = staticType(state, operandId)
+    let operand = emitExpression(state, operandId)
+    if operand.pointer != "" || isClassType(ty) {
+        lowerError(state, diagUnsupportedExpression(), state.tree.expressions[operandId.value].span)
+        return zeroValue(state)
+    }
+    if operand.floating { return operand }
+    var promoted = promotedUnaryType(ty)
+    if promoted == "" {
+        promoted = valueType(operand)
+        if operand.unsigned && promoted == "i32" { promoted = "u32" }
+        if operand.unsigned && promoted == "i64" { promoted = "u64" }
+    }
+    return convert(state, operand, promoted)
+}
+
+function emitNegation(state: borrow mut Lowerer, operandId: ExprId) -> Value {
+    let operand = emitExpression(state, operandId)
+    if operand.floating {
+        return Value { reference = kFneg(state, operand.reference), boolean = false, wide = true, pointer = "", unsigned = false, floating = true }
+    }
+    let integer = asInt(state, operand)
+    let zero = kConstInt(state, valueType(integer), 0)
+    let result = kBinary(state, "sub", true, true, zero, integer.reference)
+    return Value { reference = result, boolean = false, wide = integer.wide, pointer = "", unsigned = false, floating = false }
+}
+
+function emitLogicalNot(state: borrow mut Lowerer, operandId: ExprId) -> Value {
+    if isClassType(staticType(state, operandId)) {
+        let truth = emitCondition(state, operandId)
+        let result = kIcmp(state, "eq", truth.reference, kConstInt(state, "i1", 0))
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    let operand = emitExpression(state, operandId)
+    if operand.floating {
+        let zero = kConstFloat(state, "0.0")
+        let result = kFcmp(state, "eq", operand.reference, zero)
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    let integer = asInt(state, operand)
+    let zero = kConstInt(state, valueType(integer), 0)
+    let result = kIcmp(state, "eq", integer.reference, zero)
+    return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+}
+
+function emitBitwiseNot(state: borrow mut Lowerer, operandId: ExprId) -> Value {
+    let operand = asInt(state, emitExpression(state, operandId))
+    let ones = kConstInt(state, valueType(operand), 0 - 1)
+    let result = kBinary(state, "xor", false, true, operand.reference, ones)
+    return Value { reference = result, boolean = false, wide = operand.wide, pointer = "", unsigned = false, floating = false }
+}

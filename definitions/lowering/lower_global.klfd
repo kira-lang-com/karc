@@ -1,0 +1,102 @@
+// Globals: their dynamic initialization (parser/item/globals.klfd), where each
+// `GlobalInit` statement of `__karc_global_init_N` constructs or stores one
+// global as a local declaration would, and the slots naming them.
+
+function emitGlobalInit(state: borrow mut Lowerer, init: GlobalInitialization) {
+    var slot = -1
+    for index in 0..state.tree.globals.count {
+        if slot < 0 && state.tree.globals[index].name == init.name {
+            declareGlobalSlot(state, index)
+            slot = lookup(state, init.name)
+        }
+    }
+    if slot < 0 { return }
+    if init.arraySize > 0 {
+        let arrayType = joinText(["[", decimalText(init.arraySize), " x ", init.declType, "]"])
+        emitArrayInit(state, state.slotsData[slot].address, arrayType, init.initializer)
+        return
+    }
+    if isClassType(init.declType) {
+        let object = slotPointer(state, state.slotsData[slot].address, init.declType)
+        if isConstruct(state, init.initializer) {
+            let initializer = state.tree.expressions[init.initializer.value]
+            match initializer.kind {
+                Call(call) -> {
+                    if call.name == "@construct{}" && emitListConstruct(state, object, init.declType, call.arguments) { return }
+                    emitConstruct(state, object, init.declType, call.arguments)
+                }
+                NumberLit -> {}
+                FloatLit -> {}
+                StringLit -> {}
+                Name -> {}
+                Neg -> {}
+                Positive -> {}
+                Not -> {}
+                BitNot -> {}
+                AddrOf -> {}
+                Deref -> {}
+                Sizeof -> {}
+                Cast -> {}
+                Field -> {}
+                Index -> {}
+                PreStep -> {}
+                PostStep -> {}
+                Binary -> {}
+                Ternary -> {}
+                New -> {}
+                Delete -> {}
+            }
+        } else {
+            emitClassInit(state, slot, init.declType, init.initializer)
+        }
+        return
+    }
+    storeLocal(state, slot, emitExpression(state, init.initializer))
+}
+// Register a file-scope variable as a slot whose address comes from
+// `global.addr` instead of `stack.alloc`. It is not deallocated on return.
+// Locals may shadow it.
+function declareGlobalSlot(state: borrow mut Lowerer, index: Int) {
+    let g = state.tree.globals[index]
+    var slotType = g.declType
+    var element: String = ""
+    if g.arraySize > 0 {
+        slotType = joinText(["[", decimalText(g.arraySize), " x ", g.declType, "]"])
+        element = g.declType
+    }
+    let address = kGlobalAddr(state, state.globalHandles[index])
+    let slot = state.slots
+    state.slots = state.slots + 1
+    state.slotsData.append(Slot { ty = slotType, element = element, reference = false, global = g.name, address = address })
+    bind(state, g.name, slot)
+}
+// The global `name` names: spelled exactly, else the least qualified one it
+// ends, so `fixed` is std::fixed rather than the class member
+// std::ios_base::fixed.
+function ensureGlobalSlot(state: borrow mut Lowerer, name: String) -> Int {
+    var best = -1
+    var bestDepth = 0
+    for index in 0..state.tree.globals.count {
+        let candidate = state.tree.globals[index].name
+        if candidate == name {
+            best = index
+            bestDepth = -1
+        } else if bestDepth >= 0 && qualifiedNamesMatch(candidate, name) {
+            let depth = scopeDepth(candidate)
+            if best < 0 || depth < bestDepth {
+                best = index
+                bestDepth = depth
+            }
+        }
+    }
+    if best < 0 { return -1 }
+    declareGlobalSlot(state, best)
+    return lookup(state, state.tree.globals[best].name)
+}
+function scopeDepth(name: String) -> Int {
+    var depth = 0
+    for i in 1..utf8Count(name) {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i - 1) == 58 { depth = depth + 1 }
+    }
+    return depth
+}

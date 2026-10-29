@@ -1,0 +1,355 @@
+// <list>: std::list, a doubly linked list with class iterators. Nodes come
+// from the Allocator parameter, as runs of elements.
+#ifndef KARC_STD_LIST
+#define KARC_STD_LIST
+
+#include <cstddef>
+#include <new>
+#include <utility>
+#include <cstdlib>
+#include <initializer_list>
+#include <iterator>
+#include <cstring>
+#include <__allocator>
+
+namespace std {
+
+template <typename T>
+struct list_node {
+    list_node<T>* next;
+    list_node<T>* previous;
+    T value;
+};
+
+template <typename T>
+class list_iterator {
+public:
+    list_iterator() : node_(0) {}
+    list_iterator(list_node<T>* node) : node_(node) {}
+    T& operator*() const { return node_->value; }
+    T* operator->() const { return &node_->value; }
+    list_iterator& operator++() {
+        node_ = node_->next;
+        return *this;
+    }
+    list_iterator& operator--() {
+        node_ = node_->previous;
+        return *this;
+    }
+    list_iterator& operator+=(int count) {
+        while (count > 0) {
+            node_ = node_->next;
+            count--;
+        }
+        return *this;
+    }
+    list_iterator operator+(long count) const {
+        list_iterator result(node_);
+        for (long i = 0; i < count; i++) { result.node_ = result.node_->next; }
+        for (long i = 0; i > count; i--) { result.node_ = result.node_->previous; }
+        return result;
+    }
+    list_iterator operator-(long count) const { return *this + (0 - count); }
+    // The number of steps from `other` forward to this position.
+    long operator-(const list_iterator& other) const {
+        long steps = 0;
+        for (list_node<T>* node = other.node_; node != node_; node = node->next) { steps++; }
+        return steps;
+    }
+    list_iterator operator++(int) {
+        list_iterator old(node_);
+        node_ = node_->next;
+        return old;
+    }
+    list_iterator operator--(int) {
+        list_iterator old(node_);
+        node_ = node_->previous;
+        return old;
+    }
+    bool operator==(const list_iterator& other) const { return node_ == other.node_; }
+    bool operator!=(const list_iterator& other) const { return node_ != other.node_; }
+    list_node<T>* node_;
+};
+
+template <typename T>
+struct karc_list_less {
+    bool operator()(const T& a, const T& b) const { return a < b; }
+    int unused;
+};
+
+// A circular list around a sentinel node, so end() is the sentinel.
+template <typename T, typename Allocator = allocator<T>>
+class list {
+public:
+    typedef Allocator allocator_type;
+    typedef list_iterator<T> iterator;
+    typedef list_iterator<T> const_iterator;
+    typedef T value_type;
+    typedef size_t size_type;
+    typedef T& reference;
+
+    list() : sentinel_(0), size_(0) { init(); }
+    explicit list(const Allocator& alloc) : alloc_(alloc), sentinel_(0), size_(0) { init(); }
+    list(initializer_list<T> items) : sentinel_(0), size_(0) {
+        init();
+        for (const T* item = items.begin(); item != items.end(); item++) { push_back(*item); }
+    }
+    list(size_t count, const T& value) : sentinel_(0), size_(0) {
+        init();
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+    }
+    explicit list(size_t count) : sentinel_(0), size_(0) {
+        init();
+        resize(count);
+    }
+    template <typename I>
+    list(I first, I last) : sentinel_(0), size_(0) {
+        init();
+        for (; first != last; ++first) { push_back(*first); }
+    }
+    list(list&& other) : sentinel_(0), size_(0) {
+        init();
+        swap(other);
+    }
+    list(const list& other) : alloc_(other.alloc_), sentinel_(0), size_(0) {
+        init();
+        for (list_node<T>* node = other.sentinel_->next; node != other.sentinel_; node = node->next) { push_back(node->value); }
+    }
+    ~list() {
+        clear();
+        freeNode(sentinel_);
+    }
+    Allocator get_allocator() const { return alloc_; }
+    list& operator=(const list& other) {
+        if (this == &other) { return *this; }
+        clear();
+        for (list_node<T>* node = other.sentinel_->next; node != other.sentinel_; node = node->next) { push_back(node->value); }
+        return *this;
+    }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    T& front() { return sentinel_->next->value; }
+    T& back() { return sentinel_->previous->value; }
+    list_iterator<T> begin() { return list_iterator<T>(sentinel_->next); }
+    list_iterator<T> end() { return list_iterator<T>(sentinel_); }
+    list_iterator<T> cbegin() const { return list_iterator<T>(sentinel_->next); }
+    list_iterator<T> cend() const { return list_iterator<T>(sentinel_); }
+    reverse_iterator<list_iterator<T>> rbegin() { return reverse_iterator<list_iterator<T>>(end()); }
+    reverse_iterator<list_iterator<T>> rend() { return reverse_iterator<list_iterator<T>>(begin()); }
+    size_t max_size() const { return 1152921504606846975ul; }
+
+    void push_back(const T& value) { insertBefore(sentinel_, value); }
+    void push_front(const T& value) { insertBefore(sentinel_->next, value); }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        push_back(T(std::forward<Args>(args)...));
+        return back();
+    }
+    template <typename... Args>
+    T& emplace_front(Args&&... args) {
+        push_front(T(std::forward<Args>(args)...));
+        return front();
+    }
+    void pop_back() { unlink(sentinel_->previous); }
+    void pop_front() { unlink(sentinel_->next); }
+    list_iterator<T> insert(list_iterator<T> position, const T& value) {
+        return list_iterator<T>(insertBefore(position.node_, value));
+    }
+    list_iterator<T> erase(list_iterator<T> position) {
+        list_node<T>* next = position.node_->next;
+        unlink(position.node_);
+        return list_iterator<T>(next);
+    }
+    list_iterator<T> insert(list_iterator<T> position, size_t count, const T& value) {
+        list_iterator<T> first = position;
+        for (size_t i = 0; i < count; i++) {
+            list_node<T>* added = insertBefore(position.node_, value);
+            if (i == 0) { first = list_iterator<T>(added); }
+        }
+        return first;
+    }
+    template <typename... Args>
+    list_iterator<T> emplace(list_iterator<T> position, Args&&... args) {
+        return list_iterator<T>(insertBefore(position.node_, T(std::forward<Args>(args)...)));
+    }
+    list_iterator<T> erase(list_iterator<T> first, list_iterator<T> last) {
+        while (first != last) { first = erase(first); }
+        return last;
+    }
+    void resize(size_t count) {
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) { push_back(T()); }
+    }
+    void resize(size_t count, const T& value) {
+        while (size_ > count) { pop_back(); }
+        while (size_ < count) { push_back(value); }
+    }
+    void assign(size_t count, const T& value) {
+        clear();
+        for (size_t i = 0; i < count; i++) { push_back(value); }
+    }
+    template <typename P>
+    size_t remove_if(P predicate) {
+        size_t removed = 0;
+        list_node<T>* node = sentinel_->next;
+        while (node != sentinel_) {
+            list_node<T>* next = node->next;
+            if (predicate(node->value)) {
+                unlink(node);
+                removed++;
+            }
+            node = next;
+        }
+        return removed;
+    }
+    // Keeps the first of each run of equal elements.
+    size_t unique() {
+        size_t removed = 0;
+        list_node<T>* node = sentinel_->next;
+        while (node != sentinel_ && node->next != sentinel_) {
+            if (node->next->value == node->value) {
+                unlink(node->next);
+                removed++;
+            } else {
+                node = node->next;
+            }
+        }
+        return removed;
+    }
+    // Moves all of `other`'s nodes before `position`.
+    void splice(list_iterator<T> position, list& other) {
+        while (other.size_ > 0) { moveBefore(position.node_, other, other.sentinel_->next); }
+    }
+    void splice(list_iterator<T> position, list& other, list_iterator<T> element) {
+        moveBefore(position.node_, other, element.node_);
+    }
+    void splice(list_iterator<T> position, list& other, list_iterator<T> first, list_iterator<T> last) {
+        while (first != last) {
+            list_node<T>* node = first.node_;
+            ++first;
+            moveBefore(position.node_, other, node);
+        }
+    }
+    // Merges the sorted `other` into this sorted list; equal elements of
+    // this list stay first.
+    template <typename C>
+    void merge(list& other, C less) {
+        list_node<T>* at = sentinel_->next;
+        while (other.size_ > 0) {
+            list_node<T>* next = other.sentinel_->next;
+            while (at != sentinel_ && !less(next->value, at->value)) { at = at->next; }
+            moveBefore(at, other, next);
+        }
+    }
+    void merge(list& other) { merge(other, karc_list_less<T>()); }
+    // A stable merge sort that relinks the nodes.
+    template <typename C>
+    void sort(C less) {
+        if (size_ < 2) { return; }
+        list half;
+        size_t keep = size_ / 2;
+        list_node<T>* at = sentinel_->next;
+        for (size_t i = 0; i < keep; i++) { at = at->next; }
+        while (at != sentinel_) {
+            list_node<T>* next = at->next;
+            half.moveBefore(half.sentinel_, *this, at);
+            at = next;
+        }
+        sort(less);
+        half.sort(less);
+        merge(half, less);
+    }
+    void sort() { sort(karc_list_less<T>()); }
+    void swap(list& other) {
+        Allocator alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+        list_node<T>* sentinel = sentinel_;
+        sentinel_ = other.sentinel_;
+        other.sentinel_ = sentinel;
+        size_t size = size_;
+        size_ = other.size_;
+        other.size_ = size;
+    }
+    bool operator==(const list& other) const {
+        if (size_ != other.size_) { return false; }
+        list_node<T>* theirs = other.sentinel_->next;
+        for (list_node<T>* mine = sentinel_->next; mine != sentinel_; mine = mine->next) {
+            if (!(mine->value == theirs->value)) { return false; }
+            theirs = theirs->next;
+        }
+        return true;
+    }
+    bool operator!=(const list& other) const { return !(*this == other); }
+    void remove(const T& value) {
+        list_node<T>* node = sentinel_->next;
+        while (node != sentinel_) {
+            list_node<T>* next = node->next;
+            if (node->value == value) { unlink(node); }
+            node = next;
+        }
+    }
+    void clear() {
+        while (size_ > 0) { unlink(sentinel_->next); }
+    }
+    void reverse() {
+        list_node<T>* node = sentinel_;
+        for (size_t i = 0; i <= size_; i++) {
+            list_node<T>* next = node->next;
+            node->next = node->previous;
+            node->previous = next;
+            node = next;
+        }
+    }
+
+private:
+    void init() {
+        sentinel_ = newNode();
+        sentinel_->next = sentinel_;
+        sentinel_->previous = sentinel_;
+    }
+    list_node<T>* insertBefore(list_node<T>* position, const T& value) {
+        list_node<T>* node = newNode();
+        new (&node->value) T(value);
+        node->next = position;
+        node->previous = position->previous;
+        position->previous->next = node;
+        position->previous = node;
+        size_++;
+        return node;
+    }
+    // Takes `node` out of `from` and links it before `position`.
+    void moveBefore(list_node<T>* position, list& from, list_node<T>* node) {
+        node->previous->next = node->next;
+        node->next->previous = node->previous;
+        from.size_--;
+        node->next = position;
+        node->previous = position->previous;
+        position->previous->next = node;
+        position->previous = node;
+        size_++;
+    }
+    void unlink(list_node<T>* node) {
+        node->previous->next = node->next;
+        node->next->previous = node->previous;
+        node->value.~T();
+        freeNode(node);
+        size_--;
+    }
+    // A node is allocated as enough elements to hold it.
+    static size_t nodeUnits() { return (sizeof(list_node<T>) + sizeof(T) - 1) / sizeof(T); }
+    list_node<T>* newNode() {
+        T* raw = alloc_.allocate(nodeUnits());
+        memset(raw, 0, nodeUnits() * sizeof(T));
+        return (list_node<T>*)raw;
+    }
+    void freeNode(list_node<T>* node) { alloc_.deallocate((T*)node, nodeUnits()); }
+    Allocator alloc_;
+    list_node<T>* sentinel_;
+    size_t size_;
+};
+
+}
+
+#endif

@@ -1,0 +1,170 @@
+// <memory_resource>: memory resources and polymorphic_allocator. The pmr
+// containers that take an allocator use it; the others are the plain
+// containers; the resources themselves allocate as the standard says.
+#ifndef KARC_STD_MEMORY_RESOURCE
+#define KARC_STD_MEMORY_RESOURCE
+
+#include <cstddef>
+#include <cstdlib>
+#include <new>
+#include <exception>
+#include <vector>
+#include <string>
+#include <deque>
+#include <list>
+#include <forward_list>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace std {
+namespace pmr {
+
+class memory_resource {
+public:
+    virtual ~memory_resource() {}
+    void* allocate(size_t bytes, size_t alignment = 16) { return do_allocate(bytes, alignment); }
+    void deallocate(void* pointer, size_t bytes, size_t alignment = 16) { do_deallocate(pointer, bytes, alignment); }
+    bool is_equal(const memory_resource& other) const { return do_is_equal(other); }
+    bool operator==(const memory_resource& other) const { return this == &other || do_is_equal(other); }
+    bool operator!=(const memory_resource& other) const { return !(*this == other); }
+
+protected:
+    virtual void* do_allocate(size_t bytes, size_t alignment) { return 0; }
+    virtual void do_deallocate(void* pointer, size_t bytes, size_t alignment) {}
+    virtual bool do_is_equal(const memory_resource& other) const { return this == &other; }
+};
+
+class karc_new_delete_resource : public memory_resource {
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override { return malloc(bytes == 0 ? 1 : bytes); }
+    void do_deallocate(void* pointer, size_t bytes, size_t alignment) override { free(pointer); }
+};
+
+class karc_null_resource : public memory_resource {
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        throw bad_alloc();
+        return 0;
+    }
+};
+
+static karc_new_delete_resource karc_new_delete;
+static karc_null_resource karc_null;
+static memory_resource* karc_default_memory_resource = 0;
+
+inline memory_resource* new_delete_resource() { return &karc_new_delete; }
+inline memory_resource* null_memory_resource() { return &karc_null; }
+inline memory_resource* get_default_resource() {
+    return karc_default_memory_resource == 0 ? &karc_new_delete : karc_default_memory_resource;
+}
+inline memory_resource* set_default_resource(memory_resource* resource) {
+    memory_resource* old = get_default_resource();
+    karc_default_memory_resource = resource;
+    return old;
+}
+
+// Hands out memory from a buffer, then from chunks of the upstream
+// resource; deallocate does nothing and release frees the chunks.
+class monotonic_buffer_resource : public memory_resource {
+public:
+    monotonic_buffer_resource() : upstream_(get_default_resource()), next_(0), left_(0), chunkSize_(1024), chunks_(0) {}
+    explicit monotonic_buffer_resource(memory_resource* upstream) : upstream_(upstream), next_(0), left_(0), chunkSize_(1024), chunks_(0) {}
+    explicit monotonic_buffer_resource(size_t initial) : upstream_(get_default_resource()), next_(0), left_(0), chunkSize_(initial), chunks_(0) {}
+    monotonic_buffer_resource(void* buffer, size_t size) : upstream_(get_default_resource()), next_((char*)buffer), left_(size), chunkSize_(size), chunks_(0) {}
+    monotonic_buffer_resource(void* buffer, size_t size, memory_resource* upstream) : upstream_(upstream), next_((char*)buffer), left_(size), chunkSize_(size), chunks_(0) {}
+    ~monotonic_buffer_resource() { release(); }
+    void release() {
+        while (chunks_ != 0) {
+            void** chunk = chunks_;
+            chunks_ = (void**)chunk[0];
+            upstream_->deallocate(chunk, 0);
+        }
+        left_ = 0;
+    }
+    memory_resource* upstream_resource() const { return upstream_; }
+
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        size_t skip = (alignment - (size_t)next_ % alignment) % alignment;
+        if (next_ == 0 || skip + bytes > left_) {
+            if (chunkSize_ < bytes + alignment) { chunkSize_ = bytes + alignment; }
+            chunkSize_ = chunkSize_ * 2;
+            void** chunk = (void**)upstream_->allocate(chunkSize_ + 16);
+            chunk[0] = chunks_;
+            chunks_ = chunk;
+            next_ = (char*)chunk + 16;
+            left_ = chunkSize_;
+            skip = (alignment - (size_t)next_ % alignment) % alignment;
+        }
+        char* result = next_ + skip;
+        next_ = result + bytes;
+        left_ = left_ - skip - bytes;
+        return result;
+    }
+
+private:
+    memory_resource* upstream_;
+    char* next_;
+    size_t left_;
+    size_t chunkSize_;
+    void** chunks_;
+};
+
+struct pool_options {
+    size_t max_blocks_per_chunk;
+    size_t largest_required_pool_block;
+};
+
+// Pools that hand every request to the upstream resource: correct, if
+// without the pooling.
+class unsynchronized_pool_resource : public memory_resource {
+public:
+    unsynchronized_pool_resource() : upstream_(get_default_resource()) {}
+    explicit unsynchronized_pool_resource(memory_resource* upstream) : upstream_(upstream) {}
+    unsynchronized_pool_resource(const pool_options& options, memory_resource* upstream) : upstream_(upstream) {}
+    void release() {}
+    memory_resource* upstream_resource() const { return upstream_; }
+
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override { return upstream_->allocate(bytes, alignment); }
+    void do_deallocate(void* pointer, size_t bytes, size_t alignment) override { upstream_->deallocate(pointer, bytes, alignment); }
+
+private:
+    memory_resource* upstream_;
+};
+typedef unsynchronized_pool_resource synchronized_pool_resource;
+
+template <typename T>
+class polymorphic_allocator {
+public:
+    typedef T value_type;
+    polymorphic_allocator() : resource_(get_default_resource()) {}
+    polymorphic_allocator(memory_resource* resource) : resource_(resource) {}
+    T* allocate(size_t count) { return (T*)resource_->allocate(count * sizeof(T), 16); }
+    void deallocate(T* pointer, size_t count) { resource_->deallocate(pointer, count * sizeof(T), 16); }
+    memory_resource* resource() const { return resource_; }
+    bool operator==(const polymorphic_allocator& other) const { return *resource_ == *other.resource_; }
+    bool operator!=(const polymorphic_allocator& other) const { return !(*this == other); }
+
+private:
+    memory_resource* resource_;
+};
+
+template <typename T> using vector = std::vector<T, std::pmr::polymorphic_allocator<T>>;
+template <typename T> using deque = std::deque<T, std::pmr::polymorphic_allocator<T>>;
+template <typename T> using list = std::list<T, std::pmr::polymorphic_allocator<T>>;
+template <typename T> using forward_list = std::forward_list<T, std::pmr::polymorphic_allocator<T>>;
+template <typename K, typename V> using map = std::map<K, V, std::less<K>, std::pmr::polymorphic_allocator<std::pair<K, V>>>;
+template <typename K, typename V> using multimap = std::multimap<K, V, std::less<K>, std::pmr::polymorphic_allocator<std::pair<K, V>>>;
+template <typename T> using set = std::set<T, std::less<T>, std::pmr::polymorphic_allocator<T>>;
+template <typename T> using multiset = std::multiset<T, std::less<T>, std::pmr::polymorphic_allocator<T>>;
+template <typename K, typename V> using unordered_map = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>, std::pmr::polymorphic_allocator<std::pair<K, V>>>;
+template <typename T> using unordered_set = std::unordered_set<T, std::hash<T>, std::equal_to<T>, std::pmr::polymorphic_allocator<T>>;
+typedef std::string string;
+
+}
+}
+
+#endif

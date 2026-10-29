@@ -1,0 +1,42 @@
+// <barrier>: a phase completes when every participant has arrived; waiting
+// runs other threads' queued tasks until it has.
+#ifndef KARC_STD_BARRIER
+#define KARC_STD_BARRIER
+
+#include <exception>
+#include <__thread_tasks>
+
+namespace std {
+
+class barrier {
+public:
+    barrier(long expected) : expected_(expected), arrived_(0), phase_(0) {}
+    long arrive(long update = 1) {
+        long phase = phase_;
+        arrived_ += update;
+        if (arrived_ >= expected_) {
+            arrived_ = 0;
+            phase_++;
+        }
+        return phase;
+    }
+    void wait(long phase) {
+        while (phase_ == phase) {
+            if (!karc_task_run_one()) { terminate(); }
+        }
+    }
+    void arrive_and_wait() { wait(arrive()); }
+    void arrive_and_drop() {
+        expected_--;
+        arrive(0);
+    }
+
+private:
+    long expected_;
+    long arrived_;
+    long phase_;
+};
+
+}
+
+#endif

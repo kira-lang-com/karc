@@ -1,0 +1,218 @@
+// <iterator>: the iterator tags and iterator_traits, distance, advance, next
+// and prev over any iterator, begin/end/size/empty/data of containers, and
+// the reverse, insert and move iterators.
+#ifndef KARC_STD_ITERATOR
+#define KARC_STD_ITERATOR
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+struct input_iterator_tag {};
+struct output_iterator_tag {};
+struct forward_iterator_tag : input_iterator_tag {};
+struct bidirectional_iterator_tag : forward_iterator_tag {};
+struct random_access_iterator_tag : bidirectional_iterator_tag {};
+struct contiguous_iterator_tag : random_access_iterator_tag {};
+
+// What an iterator refers to, for element pointers and class iterators
+// alike (through operator*). Class iterators count as random access.
+template <typename I>
+struct iterator_traits {
+    typedef __karc_element(I) value_type;
+    typedef long difference_type;
+    typedef __karc_element(I)* pointer;
+    typedef __karc_element(I)& reference;
+    typedef random_access_iterator_tag iterator_category;
+};
+template <typename I>
+using iter_value_t = __karc_element(I);
+template <typename I>
+using iter_difference_t = long;
+
+// distance, advance, next and prev step a class iterator one element at a
+// time, so they work for the node containers' iterators too.
+template <typename I>
+long distance(I first, I last) {
+    if constexpr (is_pointer_v<I>) {
+        return last - first;
+    } else {
+        long count = 0;
+        for (; first != last; ++first) { count++; }
+        return count;
+    }
+}
+template <typename I, typename N>
+void advance(I& position, N count) {
+    if constexpr (is_pointer_v<I>) {
+        position = position + count;
+    } else {
+        for (; count > 0; count--) { ++position; }
+        for (; count < 0; count++) { --position; }
+    }
+}
+template <typename I>
+I next(I position) { return ++position; }
+template <typename I, typename N>
+I next(I position, N count) {
+    advance(position, count);
+    return position;
+}
+template <typename I>
+I prev(I position) { return --position; }
+template <typename I, typename N>
+I prev(I position, N count) {
+    advance(position, 0 - count);
+    return position;
+}
+
+template <typename C>
+auto begin(C& container) { return container.begin(); }
+template <typename C>
+auto end(C& container) { return container.end(); }
+template <typename C>
+auto cbegin(const C& container) { return container.begin(); }
+template <typename C>
+auto cend(const C& container) { return container.end(); }
+template <typename C>
+size_t size(const C& container) { return container.size(); }
+template <typename C>
+bool empty(const C& container) { return container.empty(); }
+template <typename C>
+auto data(C& container) { return container.data(); }
+template <typename C>
+long ssize(const C& container) { return (long)container.size(); }
+template <typename C>
+auto rbegin(C& container) { return container.rbegin(); }
+template <typename C>
+auto rend(C& container) { return container.rend(); }
+
+// Walks an iterator backwards: `*r` is the element before its position.
+template <typename I>
+class reverse_iterator {
+public:
+    reverse_iterator() : current_(), peek_() {}
+    reverse_iterator(I position) : current_(position), peek_(position) {}
+    I base() const { return current_; }
+    // Over a class iterator the element is returned by value, since it may
+    // be a temporary; over a pointer (below) it is a reference.
+    auto operator*() {
+        peek_ = current_;
+        --peek_;
+        return *peek_;
+    }
+    reverse_iterator& operator++() {
+        --current_;
+        return *this;
+    }
+    reverse_iterator& operator--() {
+        ++current_;
+        return *this;
+    }
+    reverse_iterator operator+(long count) const { return reverse_iterator(current_ - count); }
+    reverse_iterator operator-(long count) const { return reverse_iterator(current_ + count); }
+    long operator-(const reverse_iterator& other) const { return other.current_ - current_; }
+    bool operator==(const reverse_iterator& other) const { return current_ == other.current_; }
+    bool operator!=(const reverse_iterator& other) const { return current_ != other.current_; }
+    bool operator<(const reverse_iterator& other) const { return other.current_ < current_; }
+    I current_;
+    I peek_;
+};
+template <typename T>
+class reverse_iterator<T*> {
+public:
+    reverse_iterator() : current_(), peek_() {}
+    reverse_iterator(T* position) : current_(position), peek_(position) {}
+    T* base() const { return current_; }
+    T& operator*() { return *(current_ - 1); }
+    reverse_iterator& operator++() {
+        --current_;
+        return *this;
+    }
+    reverse_iterator& operator--() {
+        ++current_;
+        return *this;
+    }
+    reverse_iterator operator+(long count) const { return reverse_iterator(current_ - count); }
+    reverse_iterator operator-(long count) const { return reverse_iterator(current_ + count); }
+    long operator-(const reverse_iterator& other) const { return other.current_ - current_; }
+    bool operator==(const reverse_iterator& other) const { return current_ == other.current_; }
+    bool operator!=(const reverse_iterator& other) const { return current_ != other.current_; }
+    bool operator<(const reverse_iterator& other) const { return other.current_ < current_; }
+    T* current_;
+    T* peek_;
+};
+template <typename I>
+reverse_iterator<I> make_reverse_iterator(I position) { return reverse_iterator<I>(position); }
+
+// `*out = value` appends to the container; ++ does nothing.
+template <typename C>
+class back_insert_iterator {
+public:
+    back_insert_iterator(C& container) : container_(&container) {}
+    template <typename V>
+    back_insert_iterator& operator=(const V& value) {
+        container_->push_back(value);
+        return *this;
+    }
+    back_insert_iterator& operator*() { return *this; }
+    back_insert_iterator& operator++() { return *this; }
+    back_insert_iterator& operator++(int) { return *this; }
+    C* container_;
+};
+template <typename C>
+back_insert_iterator<C> back_inserter(C& container) { return back_insert_iterator<C>(container); }
+
+template <typename C>
+class front_insert_iterator {
+public:
+    front_insert_iterator(C& container) : container_(&container) {}
+    template <typename V>
+    front_insert_iterator& operator=(const V& value) {
+        container_->push_front(value);
+        return *this;
+    }
+    front_insert_iterator& operator*() { return *this; }
+    front_insert_iterator& operator++() { return *this; }
+    front_insert_iterator& operator++(int) { return *this; }
+    C* container_;
+};
+template <typename C>
+front_insert_iterator<C> front_inserter(C& container) { return front_insert_iterator<C>(container); }
+
+// Reads through an iterator as an rvalue, so algorithms move the elements.
+template <typename I>
+class move_iterator {
+public:
+    move_iterator() : at_() {}
+    explicit move_iterator(I at) : at_(at) {}
+    __karc_element(I) operator*() const { return std::move(*at_); }
+    move_iterator& operator++() {
+        ++at_;
+        return *this;
+    }
+    move_iterator operator++(int) {
+        move_iterator old = *this;
+        ++at_;
+        return old;
+    }
+    move_iterator& operator--() {
+        --at_;
+        return *this;
+    }
+    bool operator==(const move_iterator& other) const { return at_ == other.at_; }
+    bool operator!=(const move_iterator& other) const { return at_ != other.at_; }
+    long operator-(const move_iterator& other) const { return distance(other.at_, at_); }
+    I base() const { return at_; }
+
+private:
+    I at_;
+};
+template <typename I>
+move_iterator<I> make_move_iterator(I at) { return move_iterator<I>(at); }
+
+}
+
+#endif

@@ -1,0 +1,426 @@
+// Part of <random>: the distributions. Each operator() is a template over
+// the engine and draws through karc_unit or karc_bits64.
+#ifndef KARC_STD_RANDOM_DISTRIBUTIONS
+#define KARC_STD_RANDOM_DISTRIBUTIONS
+
+#include <cmath>
+#include <vector>
+#include <initializer_list>
+
+namespace std {
+
+template <typename T = int>
+class uniform_int_distribution {
+public:
+    typedef T result_type;
+    uniform_int_distribution() : low_(0), high_((T)2147483647) {}
+    uniform_int_distribution(T low, T high) : low_(low), high_(high) {}
+    template <typename G>
+    T operator()(G& engine) {
+        unsigned long span = (unsigned long)(high_ - low_) + 1;
+        unsigned long value = karc_bits64(engine);
+        if (span == 0) { return (T)value; }
+        return low_ + (T)(value % span);
+    }
+    T a() const { return low_; }
+    T b() const { return high_; }
+    T min() const { return low_; }
+    T max() const { return high_; }
+    void reset() {}
+
+private:
+    T low_;
+    T high_;
+};
+
+template <typename T = double>
+class uniform_real_distribution {
+public:
+    typedef T result_type;
+    uniform_real_distribution() : low_(0), high_(1) {}
+    uniform_real_distribution(T low, T high) : low_(low), high_(high) {}
+    template <typename G>
+    T operator()(G& engine) { return low_ + (T)(karc_unit(engine) * (high_ - low_)); }
+    T a() const { return low_; }
+    T b() const { return high_; }
+    T min() const { return low_; }
+    T max() const { return high_; }
+    void reset() {}
+
+private:
+    T low_;
+    T high_;
+};
+
+class bernoulli_distribution {
+public:
+    typedef bool result_type;
+    bernoulli_distribution() : probability_(0.5) {}
+    bernoulli_distribution(double probability) : probability_(probability) {}
+    template <typename G>
+    bool operator()(G& engine) { return karc_unit(engine) < probability_; }
+    double p() const { return probability_; }
+    void reset() {}
+
+private:
+    double probability_;
+};
+
+// Box-Muller: each pair of draws gives two normal values; the second is
+// kept for the next call.
+template <typename T = double>
+class normal_distribution {
+public:
+    typedef T result_type;
+    normal_distribution() : mean_(0), deviation_(1), saved_(0), hasSaved_(false) {}
+    normal_distribution(T mean, T deviation) : mean_(mean), deviation_(deviation), saved_(0), hasSaved_(false) {}
+    template <typename G>
+    T operator()(G& engine) {
+        if (hasSaved_) {
+            hasSaved_ = false;
+            return mean_ + (T)(saved_ * deviation_);
+        }
+        double u = 1.0 - karc_unit(engine);
+        double v = karc_unit(engine);
+        double radius = sqrt(-2.0 * log(u));
+        saved_ = radius * sin(2.0 * M_PI * v);
+        hasSaved_ = true;
+        return mean_ + (T)(radius * cos(2.0 * M_PI * v) * deviation_);
+    }
+    T mean() const { return mean_; }
+    T stddev() const { return deviation_; }
+    void reset() { hasSaved_ = false; }
+
+private:
+    T mean_;
+    T deviation_;
+    double saved_;
+    bool hasSaved_;
+};
+
+template <typename T = double>
+class lognormal_distribution {
+public:
+    typedef T result_type;
+    lognormal_distribution() : normal_(0, 1) {}
+    lognormal_distribution(T m, T s) : normal_(m, s) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)exp(normal_(engine)); }
+    void reset() { normal_.reset(); }
+
+private:
+    normal_distribution<double> normal_;
+};
+
+template <typename T = double>
+class exponential_distribution {
+public:
+    typedef T result_type;
+    exponential_distribution() : rate_(1) {}
+    exponential_distribution(T rate) : rate_(rate) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)(-log(1.0 - karc_unit(engine)) / rate_); }
+    T lambda() const { return rate_; }
+    void reset() {}
+
+private:
+    T rate_;
+};
+
+// Marsaglia and Tsang's method; a shape below 1 is boosted by u^(1/shape).
+template <typename T = double>
+class gamma_distribution {
+public:
+    typedef T result_type;
+    gamma_distribution() : shape_(1), scale_(1) {}
+    gamma_distribution(T shape, T scale = 1) : shape_(shape), scale_(scale) {}
+    template <typename G>
+    T operator()(G& engine) {
+        double shape = shape_;
+        double boost = 1.0;
+        if (shape < 1.0) {
+            boost = pow(1.0 - karc_unit(engine), 1.0 / shape);
+            shape = shape + 1.0;
+        }
+        double d = shape - 1.0 / 3.0;
+        double c = 1.0 / sqrt(9.0 * d);
+        while (true) {
+            double x = normal_(engine);
+            double v = 1.0 + c * x;
+            if (v <= 0.0) { continue; }
+            v = v * v * v;
+            double u = 1.0 - karc_unit(engine);
+            if (log(u) < 0.5 * x * x + d - d * v + d * log(v)) { return (T)(d * v * boost * scale_); }
+        }
+    }
+    T alpha() const { return shape_; }
+    T beta() const { return scale_; }
+    void reset() { normal_.reset(); }
+
+private:
+    T shape_;
+    T scale_;
+    normal_distribution<double> normal_;
+};
+
+template <typename T = double>
+class chi_squared_distribution {
+public:
+    typedef T result_type;
+    chi_squared_distribution() : gamma_(0.5, 2.0) {}
+    chi_squared_distribution(T n) : gamma_(n / 2.0, 2.0) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)gamma_(engine); }
+
+private:
+    gamma_distribution<double> gamma_;
+};
+
+template <typename T = double>
+class cauchy_distribution {
+public:
+    typedef T result_type;
+    cauchy_distribution() : location_(0), scale_(1) {}
+    cauchy_distribution(T location, T scale) : location_(location), scale_(scale) {}
+    template <typename G>
+    T operator()(G& engine) { return location_ + (T)(scale_ * tan(M_PI * (karc_unit(engine) - 0.5))); }
+
+private:
+    T location_;
+    T scale_;
+};
+
+template <typename T = double>
+class weibull_distribution {
+public:
+    typedef T result_type;
+    weibull_distribution() : shape_(1), scale_(1) {}
+    weibull_distribution(T shape, T scale) : shape_(shape), scale_(scale) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)(scale_ * pow(-log(1.0 - karc_unit(engine)), 1.0 / shape_)); }
+
+private:
+    T shape_;
+    T scale_;
+};
+
+template <typename T = double>
+class extreme_value_distribution {
+public:
+    typedef T result_type;
+    extreme_value_distribution() : location_(0), scale_(1) {}
+    extreme_value_distribution(T location, T scale) : location_(location), scale_(scale) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)(location_ - scale_ * log(-log(1.0 - karc_unit(engine)))); }
+
+private:
+    T location_;
+    T scale_;
+};
+
+template <typename T = double>
+class student_t_distribution {
+public:
+    typedef T result_type;
+    student_t_distribution() : n_(1), chi_(1) {}
+    student_t_distribution(T n) : n_(n), chi_(n) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)(normal_(engine) / sqrt(chi_(engine) / n_)); }
+
+private:
+    T n_;
+    normal_distribution<double> normal_;
+    chi_squared_distribution<double> chi_;
+};
+
+template <typename T = double>
+class fisher_f_distribution {
+public:
+    typedef T result_type;
+    fisher_f_distribution() : m_(1), n_(1), top_(1), bottom_(1) {}
+    fisher_f_distribution(T m, T n) : m_(m), n_(n), top_(m), bottom_(n) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)((top_(engine) / m_) / (bottom_(engine) / n_)); }
+
+private:
+    T m_;
+    T n_;
+    chi_squared_distribution<double> top_;
+    chi_squared_distribution<double> bottom_;
+};
+
+// Poisson: Knuth's product method for small means, a rounded normal
+// approximation above 60.
+template <typename T = int>
+class poisson_distribution {
+public:
+    typedef T result_type;
+    poisson_distribution() : mean_(1.0) {}
+    poisson_distribution(double mean) : mean_(mean) {}
+    template <typename G>
+    T operator()(G& engine) {
+        if (mean_ > 60.0) {
+            double value = floor(mean_ + sqrt(mean_) * normal_(engine) + 0.5);
+            return value < 0.0 ? 0 : (T)value;
+        }
+        double limit = exp(-mean_);
+        double product = 1.0 - karc_unit(engine);
+        T count = 0;
+        while (product > limit) {
+            count++;
+            product = product * (1.0 - karc_unit(engine));
+        }
+        return count;
+    }
+    double mean() const { return mean_; }
+    void reset() { normal_.reset(); }
+
+private:
+    double mean_;
+    normal_distribution<double> normal_;
+};
+
+template <typename T = int>
+class binomial_distribution {
+public:
+    typedef T result_type;
+    binomial_distribution() : trials_(1), probability_(0.5) {}
+    binomial_distribution(T trials, double probability) : trials_(trials), probability_(probability) {}
+    template <typename G>
+    T operator()(G& engine) {
+        T successes = 0;
+        for (T i = 0; i < trials_; i++) {
+            if (karc_unit(engine) < probability_) { successes++; }
+        }
+        return successes;
+    }
+    T t() const { return trials_; }
+    double p() const { return probability_; }
+    void reset() {}
+
+private:
+    T trials_;
+    double probability_;
+};
+
+template <typename T = int>
+class geometric_distribution {
+public:
+    typedef T result_type;
+    geometric_distribution() : probability_(0.5) {}
+    geometric_distribution(double probability) : probability_(probability) {}
+    template <typename G>
+    T operator()(G& engine) { return (T)floor(log(1.0 - karc_unit(engine)) / log(1.0 - probability_)); }
+    double p() const { return probability_; }
+    void reset() {}
+
+private:
+    double probability_;
+};
+
+template <typename T = int>
+class negative_binomial_distribution {
+public:
+    typedef T result_type;
+    negative_binomial_distribution() : successes_(1), geometric_(0.5) {}
+    negative_binomial_distribution(T successes, double probability) : successes_(successes), geometric_(probability) {}
+    template <typename G>
+    T operator()(G& engine) {
+        T failures = 0;
+        for (T i = 0; i < successes_; i++) { failures += geometric_(engine); }
+        return failures;
+    }
+
+private:
+    T successes_;
+    geometric_distribution<T> geometric_;
+};
+
+// Index i with probability weight[i] / total, by a search of the running
+// sums.
+template <typename T = int>
+class discrete_distribution {
+public:
+    typedef T result_type;
+    discrete_distribution() { sums_.push_back(1.0); }
+    discrete_distribution(initializer_list<double> weights) {
+        for (const double* at = weights.begin(); at != weights.end(); at++) { add(*at); }
+        if (sums_.size() == 0) { sums_.push_back(1.0); }
+    }
+    template <typename I>
+    discrete_distribution(I first, I last) {
+        for (; first != last; ++first) { add((double)*first); }
+        if (sums_.size() == 0) { sums_.push_back(1.0); }
+    }
+    template <typename G>
+    T operator()(G& engine) {
+        double target = karc_unit(engine) * sums_[sums_.size() - 1];
+        size_t low = 0;
+        size_t high = sums_.size() - 1;
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            if (sums_[middle] <= target) { low = middle + 1; } else { high = middle; }
+        }
+        return (T)low;
+    }
+    vector<double> probabilities() const {
+        vector<double> result;
+        double total = sums_[sums_.size() - 1];
+        double previous = 0.0;
+        for (size_t i = 0; i < sums_.size(); i++) {
+            result.push_back((sums_[i] - previous) / total);
+            previous = sums_[i];
+        }
+        return result;
+    }
+    void reset() {}
+
+private:
+    void add(double weight) {
+        double previous = sums_.size() == 0 ? 0.0 : sums_[sums_.size() - 1];
+        sums_.push_back(previous + weight);
+    }
+    vector<double> sums_;
+};
+
+// Uniform within each interval [b[i], b[i+1]), chosen by weight.
+template <typename T = double>
+class piecewise_constant_distribution {
+public:
+    typedef T result_type;
+    piecewise_constant_distribution() {
+        bounds_.push_back(0.0);
+        bounds_.push_back(1.0);
+        weights_.push_back(1.0);
+    }
+    template <typename I, typename W>
+    piecewise_constant_distribution(I firstBound, I lastBound, W firstWeight) {
+        for (; firstBound != lastBound; ++firstBound) { bounds_.push_back((double)*firstBound); }
+        for (size_t i = 0; i + 1 < bounds_.size(); i++) {
+            weights_.push_back((double)*firstWeight);
+            ++firstWeight;
+        }
+    }
+    template <typename G>
+    T operator()(G& engine) {
+        double total = 0.0;
+        for (size_t i = 0; i < weights_.size(); i++) { total += weights_[i]; }
+        double target = karc_unit(engine) * total;
+        size_t interval = 0;
+        while (interval + 1 < weights_.size() && target >= weights_[interval]) {
+            target -= weights_[interval];
+            interval++;
+        }
+        double low = bounds_[interval];
+        double high = bounds_[interval + 1];
+        return (T)(low + karc_unit(engine) * (high - low));
+    }
+
+private:
+    vector<double> bounds_;
+    vector<double> weights_;
+};
+
+}
+
+#endif

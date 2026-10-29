@@ -1,0 +1,408 @@
+// Composite and pointer lowering: struct copies, pointer arithmetic, indirect
+// calls, and the byte lists that back string and array initializers.
+
+function assignTargetIsStruct(state: Lowerer, name: String) -> Bool {
+    let slot = lookup(state, name)
+    if slot < 0 { return false }
+    return isClassType(state.slotsData[slot].ty)
+}
+// A scalar field is stored and loaded directly; an aggregate one is not
+// supported by the field-by-field copies below.
+function zeroAggregate(state: borrow mut Lowerer, address: KirAddress, structType: String) {
+    if isArrayType(structType) {
+        let elementType = arrayElementType(structType)
+        for index in 0..arrayLength(structType) {
+            let indexValue = kConstInt(state, "i32", index)
+            let elementAddress = kElemAddr(state, address, indexValue, elementType)
+            if isClassType(elementType) || isArrayType(elementType) {
+                zeroAggregate(state, elementAddress, elementType)
+            } else if isPointerType(elementType) || isFnPtrType(elementType) {
+                kStore(state, kNull(state, elementType), elementAddress)
+            } else if isFloatSpelling(elementType) {
+                kStore(state, kConstFloat(state, "0.0"), elementAddress)
+            } else {
+                kStore(state, kConstInt(state, elementType, 0), elementAddress)
+            }
+        }
+        return
+    }
+    let sIdx = structIndex(state, nominalName(structType))
+    if sIdx < 0 { return }
+    if isUnionType(state.tree, structType) {
+        let storageType = unionStorageType(state.tree, structType)
+        zeroAggregate(state, unionStorage(state, address, structType), storageType)
+        return
+    }
+    let s = state.tree.structs[sIdx]
+    var fi = 0
+    for field in s.fields {
+        let fieldAddress = kFieldAddr(state, address, fi, field.declType)
+        if isClassType(field.declType) {
+            zeroAggregate(state, fieldAddress, field.declType)
+        } else if isArrayType(field.declType) {
+            zeroAggregate(state, fieldAddress, field.declType)
+        } else if isPointerType(field.declType) || isFnPtrType(field.declType) {
+            kStore(state, kNull(state, field.declType), fieldAddress)
+        } else if isFloatSpelling(field.declType) {
+            kStore(state, kConstFloat(state, "0.0"), fieldAddress)
+        } else {
+            kStore(state, kConstInt(state, field.declType, 0), fieldAddress)
+        }
+        fi = fi + 1
+    }
+}
+function copyAggregate(state: borrow mut Lowerer, source: KirAddress, destination: KirAddress, ty: String) {
+    if isClassType(ty) {
+        let sIdx = structIndex(state, nominalName(ty))
+        if sIdx < 0 { return }
+        if isUnionType(state.tree, ty) {
+            copyAggregate(state, unionStorage(state, source, ty), unionStorage(state, destination, ty), unionStorageType(state.tree, ty))
+            return
+        }
+        var fi = 0
+        for field in state.tree.structs[sIdx].fields {
+            let src = kFieldAddr(state, source, fi, field.declType)
+            let dst = kFieldAddr(state, destination, fi, field.declType)
+            copyAggregate(state, src, dst, field.declType)
+            fi = fi + 1
+        }
+        return
+    }
+    if isArrayType(ty) {
+        let elementType = arrayElementType(ty)
+        for index in 0..arrayLength(ty) {
+            let indexValue = kConstInt(state, "i32", index)
+            let src = kElemAddr(state, source, indexValue, elementType)
+            let dst = kElemAddr(state, destination, indexValue, elementType)
+            copyAggregate(state, src, dst, elementType)
+        }
+        return
+    }
+    kStore(state, kLoad(state, source), destination)
+}
+
+// Copy a whole struct value from the variable named by `rhsExprId` into the
+// struct slot `tslot`.
+function structCopy(state: borrow mut Lowerer, tslot: Int, rhsExprId: ExprId, span: Span) {
+    let rhsExpr = state.tree.expressions[rhsExprId.value]
+    var sourceName = ""
+    match rhsExpr.kind {
+        Name(named) -> { sourceName = named.name }
+        NumberLit -> { return }
+        FloatLit -> { return }
+        StringLit -> { return }
+        Neg -> { return }
+        Positive -> { return }
+        Not -> { return }
+        BitNot -> { return }
+        AddrOf -> { return }
+        Deref -> { return }
+        Sizeof -> { return }
+        Cast -> { return }
+        Call -> { return }
+        Field -> { return }
+        Index -> { return }
+        PreStep -> { return }
+        PostStep -> { return }
+        Binary -> { return }
+        Ternary -> { return }
+        New -> { return }
+        Delete -> { return }
+    }
+    let sslot = lookup(state, sourceName)
+    if sslot < 0 {
+        return
+    }
+    let sIdx = structIndex(state, nominalName(state.slotsData[tslot].ty))
+    if sIdx < 0 {
+        return
+    }
+    var source = state.slotsData[sslot].address
+    if state.slotsData[sslot].reference || (isPointerType(state.slotsData[sslot].ty) && elementOfPointer(state.slotsData[sslot].ty) == state.slotsData[tslot].ty) {
+        source = structBehindPointer(state, kLoad(state, state.slotsData[sslot].address), state.slotsData[tslot].ty)
+    }
+    copyAggregate(state, source, state.slotsData[tslot].address, state.slotsData[tslot].ty)
+}
+// The struct a `*[0 x %S]` pointer value addresses.
+function structBehindPointer(state: borrow mut Lowerer, pointer: KirValue, structType: String) -> KirAddress {
+    let arrayType = joinText(["[0 x ", structType, "]"])
+    let base = kAddressOf(state, pointer, arrayType)
+    let zero = kConstInt(state, "i32", 0)
+    return kElemAddr(state, base, zero, structType)
+}
+// Copy a struct passed by value (given as a pointer to the caller's copy) into
+// an independent local, so the callee's mutations stay local as C requires.
+function copyStructByValueParam(state: borrow mut Lowerer, slot: Int, pointer: KirValue, structType: String, span: Span) {
+    let sIdx = structIndex(state, nominalName(structType))
+    if sIdx < 0 {
+        return
+    }
+    let base = structBehindPointer(state, pointer, structType)
+    var source = state.slotsData[slot].address
+    if state.slotsData[slot].reference {
+        source = structBehindPointer(state, kLoad(state, state.slotsData[slot].address), structType)
+    }
+    copyAggregate(state, base, source, structType)
+}
+// The address of a slot as a pointer value of type `*[0 x <element>]`.
+function slotPointer(state: borrow mut Lowerer, address: KirAddress, element: String) -> KirValue {
+    let raw = kValueOf(state, address)
+    return kBitcast(state, raw, joinText(["*[0 x ", element, "]"]))
+}
+// Step a pointer value by `index` elements and rebuild the pointer.
+function pointerOffset(state: borrow mut Lowerer, pointer: Value, index: KirValue) -> Value {
+    let element = elementOfPointer(pointer.pointer)
+    let base = kAddressOf(state, pointer.reference, arrayOfPointer(pointer.pointer))
+    let stepped = kElemAddr(state, base, index, element)
+    let result = slotPointer(state, stepped, element)
+    return Value { reference = result, boolean = false, wide = true, pointer = pointer.pointer, unsigned = false, floating = false }
+}
+function emitPointerBinary(state: borrow mut Lowerer, op: String, left: Value, right: Value, span: Span) -> Value {
+    if op == "<<" && right.pointer != "" {
+        return left
+    }
+    if op == "/" && (left.pointer != "" || right.pointer != "") {
+        if left.pointer != "" { return left }
+        return right
+    }
+    let pred = comparePredicate(op, true)
+    if pred != "" {
+        // A derived-class pointer compares as its base subobject.
+        var leftSide = left
+        var rightSide = right
+        if left.pointer != "" && right.pointer != "" && isBaseOf(state, elementOfPointer(left.pointer), elementOfPointer(right.pointer)) {
+            rightSide = Value { reference = adjustClassPointer(state, right, left.pointer), boolean = false, wide = true, pointer = left.pointer, unsigned = false, floating = false }
+        } else if left.pointer != "" && right.pointer != "" && isBaseOf(state, elementOfPointer(right.pointer), elementOfPointer(left.pointer)) {
+            leftSide = Value { reference = adjustClassPointer(state, left, right.pointer), boolean = false, wide = true, pointer = right.pointer, unsigned = false, floating = false }
+        }
+        let l = toAddr64(state, leftSide)
+        let r = toAddr64(state, rightSide)
+        let result = kIcmp(state, pred, l, r)
+        return Value { reference = result, boolean = true, wide = false, pointer = "", unsigned = false, floating = false }
+    }
+    if op == "+" {
+        var ptr = left
+        var other = right
+        if left.pointer == "" {
+            ptr = right
+            other = left
+        }
+        let index = convert(state, asInt(state, other), "i64")
+        return pointerOffset(state, ptr, index.reference)
+    }
+    if op == "-" {
+        if left.pointer != "" && right.pointer != "" {
+            let la = toAddr64(state, left)
+            let ra = toAddr64(state, right)
+            let diff = kBinary(state, "sub", false, true, la, ra)
+            let strideV = kConstInt(state, "i64", typeSize(state.tree, elementOfPointer(left.pointer)))
+            let result = kBinary(state, "sdiv", false, true, diff, strideV)
+            return Value { reference = result, boolean = false, wide = true, pointer = "", unsigned = false, floating = false }
+        }
+        let index = convert(state, asInt(state, right), "i64")
+        let zero = kConstInt(state, valueType(index), 0)
+        let negated = kBinary(state, "sub", false, true, zero, index.reference)
+        return pointerOffset(state, left, negated)
+    }
+    lowerError(state, diagUnsupportedPointerOperation(), span)
+    return zeroValue(state)
+}
+// Call through a function-pointer local `op(args)`: convert the arguments to
+// the pointer's parameter types, load the pointer and issue a call.indirect.
+// Every argument is evaluated before any is pushed, because a nested call would
+// otherwise drain the pending list.
+function emitIndirectCall(state: borrow mut Lowerer, cslot: Int, exprId: ExprId) -> Value {
+    let expr = state.tree.expressions[exprId.value]
+    var arguments: [ExprId] = []
+    match expr.kind {
+        Call(call) -> { arguments = call.arguments }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let fpType = state.slotsData[cslot].ty
+    let ret = fnPtrReturn(fpType)
+    let paramList = fnPtrParameterTypes(fpType)
+    var argValues: [KirValue] = []
+    for i in 0..arguments.count {
+        let argId = arguments[i]
+        let argumentType = staticType(state, argId)
+        if i < paramList.count && isPointerType(paramList[i]) && argumentType != "" &&
+            !isPointerType(argumentType) && !isArrayType(argumentType) {
+            argValues.append(emitReferenceArgument(state, argId, paramList[i]))
+            continue
+        }
+        if i >= paramList.count { continue }
+        let v = emitExpression(state, argId)
+        argValues.append(coerceRef(state, v, paramList[i]))
+    }
+    let fp = kLoad(state, state.slotsData[cslot].address)
+    for p in paramList {
+        kIndirectParameter(state, p)
+    }
+    for a in argValues {
+        kArgument(state, a)
+    }
+    if ret == "unit" {
+        kCallIndirectVoid(state, fp)
+        afterCall(state, -1)
+        return zeroValue(state)
+    }
+    let result = kCallIndirect(state, fp, ret)
+    afterCall(state, -1)
+    return promoteFromType(state, result, ret)
+}
+// The decoded bytes of a raw C string literal, without the terminating NUL.
+function decodedBytes(raw: String) -> [Int] {
+    var out: [Int] = []
+    let n = utf8Count(raw)
+    var i = 0
+    while i < n {
+        if utf8Byte(raw, i) == 92 && i + 1 < n {
+            out.append(escapeCode(raw, i + 1))
+            i = i + 1 + escapeLength(raw, i + 1)
+        } else {
+            out.append(utf8Byte(raw, i))
+            i = i + 1
+        }
+    }
+    return out
+}
+// The value of the escape whose letter is at `at` (after the backslash):
+// the C simple escapes, `\xHH` and up to three octal digits.
+function escapeCode(text: String, at: Int) -> Int {
+    let esc = utf8Byte(text, at)
+    if esc == 110 { return 10 }
+    if esc == 116 { return 9 }
+    if esc == 114 { return 13 }
+    if esc == 97 { return 7 }
+    if esc == 98 { return 8 }
+    if esc == 102 { return 12 }
+    if esc == 118 { return 11 }
+    if esc == 101 { return 27 }
+    if esc == 120 {
+        var value = 0
+        var i = at + 1
+        while i < utf8Count(text) && hexDigit(utf8Byte(text, i)) >= 0 {
+            value = value * 16 + hexDigit(utf8Byte(text, i))
+            i = i + 1
+        }
+        return value % 256
+    }
+    if esc >= 48 && esc <= 55 {
+        var value = 0
+        var i = at
+        while i < utf8Count(text) && i < at + 3 && utf8Byte(text, i) >= 48 && utf8Byte(text, i) <= 55 {
+            value = value * 8 + utf8Byte(text, i) - 48
+            i = i + 1
+        }
+        return value % 256
+    }
+    return esc
+}
+// How many characters the escape at `at` spans after its backslash.
+function escapeLength(text: String, at: Int) -> Int {
+    let esc = utf8Byte(text, at)
+    if esc == 120 {
+        var i = at + 1
+        while i < utf8Count(text) && hexDigit(utf8Byte(text, i)) >= 0 { i = i + 1 }
+        return i - at
+    }
+    if esc >= 48 && esc <= 55 {
+        var i = at
+        while i < utf8Count(text) && i < at + 3 && utf8Byte(text, i) >= 48 && utf8Byte(text, i) <= 55 { i = i + 1 }
+        return i - at
+    }
+    return 1
+}
+function hexDigit(c: Int) -> Int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+// Each (non-negative) value little-endian in `width` bytes.
+function initBytes(values: [Int], width: Int) -> [Int] {
+    var out: [Int] = []
+    for v in values {
+        for b in 0..width {
+            var x = v
+            for _ in 0..b {
+                x = x / 256
+            }
+            out.append(x % 256)
+        }
+    }
+    return out
+}
+// The element type of a string literal: `char`, or the wide widths.
+function literalElement(marker: String) -> String {
+    match marker {
+        "wide4" -> return "i32"
+        "wide2" -> return "u16"
+        else -> return "i8"
+    }
+}
+// A literal's elements: its bytes, or for a wide literal the code points
+// the UTF-8 bytes spell.
+function literalUnits(raw: String, marker: String) -> [Int] {
+    let bytes = decodedBytes(raw)
+    if marker == "" { return bytes }
+    var units: [Int] = []
+    var i = 0
+    while i < bytes.count {
+        let b = bytes[i]
+        var code = b
+        var extra = 0
+        if b >= 240 { code = b - 240; extra = 3 }
+        else if b >= 224 { code = b - 224; extra = 2 }
+        else if b >= 192 { code = b - 192; extra = 1 }
+        i = i + 1
+        for _ in 0..extra {
+            if i < bytes.count {
+                code = code * 64 + bytes[i] - 128
+                i = i + 1
+            }
+        }
+        if marker == "wide2" { code = code % 65536 }
+        units.append(code)
+    }
+    return units
+}
+// A wide string literal: a global array of its elements and a terminating
+// zero, as a pointer to the first.
+function emitWideString(state: borrow mut Lowerer, string: StringExpression) -> Value {
+    let units = literalUnits(state.tree.strings[string.index], string.prefix)
+    let element = literalElement(string.prefix)
+    var width = 4
+    if element == "u16" { width = 2 }
+    let arrayType = joinText(["[", decimalText(units.count + 1), " x ", element, "]"])
+    let global = kAnonymousGlobal(state, arrayType)
+    for unit in units {
+        var rest = unit
+        for _ in 0..width {
+            kGlobalByte(global, rest % 256)
+            rest = rest / 256
+        }
+    }
+    for _ in 0..width { kGlobalByte(global, 0) }
+    let pointer = slotPointer(state, kGlobalAddr(state, global), element)
+    return Value { reference = pointer, boolean = false, wide = true, pointer = joinText(["*[0 x ", element, "]"]), unsigned = false, floating = false }
+}

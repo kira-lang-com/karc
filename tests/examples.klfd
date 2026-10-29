@@ -1,0 +1,12 @@
+import Testing
+
+@Test
+function examplesReturnTheirResults() {
+    expect!(runPath("examples/strings/app.cpp") == 5021)
+    expect!(runPath("examples/bytebuf/app.cpp") == 60)
+    expect!(runPath("examples/libc/app.cpp") == 9)
+    expect!(runPath("examples/calc/app.cpp") == 16)
+    expect!(runPath("examples/crc32/app.cpp") == 3421780262)
+    expect!(runPath("examples/bytecode-vm/app.cpp") == 15)
+    expect!(runPath("examples/fibonacci/app.cpp") == 55)
+}

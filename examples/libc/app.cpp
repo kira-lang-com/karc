@@ -1,0 +1,36 @@
+// A broad libc-style translation unit: string, memory and ctype routines over
+// byte pointers and void*, plus a struct, exercised by a battery of checks.
+typedef char byte;
+
+int slen(byte* s) { byte* p = s; while (*p) { p = p + 1; } return p - s; }
+void scopy(byte* d, byte* s) { while (*s) { *d = *s; d = d + 1; s = s + 1; } *d = 0; }
+int scmp(byte* a, byte* b) { while (*a && *a == *b) { a = a + 1; b = b + 1; } return *a - *b; }
+byte* schr(byte* s, byte c) { while (*s) { if (*s == c) { return s; } s = s + 1; } return 0; }
+void mset(void* p, int v, int n) { byte* b = (byte*)p; int i = 0; while (i < n) { b[i] = v; i = i + 1; } }
+int isdig(byte c) { return c >= '0' && c <= '9'; }
+byte toup(byte c) { if (c >= 'a' && c <= 'z') { return c - 32; } return c; }
+int atoiv(byte* s) { int v = 0; while (isdig(*s)) { v = v * 10 + (*s - '0'); s = s + 1; } return v; }
+
+struct Pair { int x; int y; };
+
+int main() {
+    int passed = 0;
+    byte a[16];
+    scopy(a, "hello");
+    if (slen(a) == 5) { passed = passed + 1; }
+    if (scmp(a, "hello") == 0) { passed = passed + 1; }
+    byte* e = schr(a, 'l');
+    if (e - a == 2) { passed = passed + 1; }
+    if (schr(a, 'z') == 0) { passed = passed + 1; }
+    byte b[16];
+    mset(b, 0, 16);
+    if (b[3] == 0) { passed = passed + 1; }
+    if (isdig('7') && !isdig('x')) { passed = passed + 1; }
+    if (toup('k') == 'K') { passed = passed + 1; }
+    if (atoiv("1234") == 1234) { passed = passed + 1; }
+    struct Pair pr;
+    pr.x = 3;
+    pr.y = 4;
+    if (pr.x + pr.y == 7) { passed = passed + 1; }
+    return passed;
+}

@@ -1,0 +1,177 @@
+// <iomanip>: the manipulators that set a stream's width, precision, fill,
+// base and format flags, std::quoted, std::put_time and std::get_time.
+#ifndef KARC_STD_IOMANIP
+#define KARC_STD_IOMANIP
+
+#include <iostream>
+#include <string>
+#include <ctime>
+
+namespace std {
+
+inline setw_t setw(int width) { setw_t result{width}; return result; }
+inline setprecision_t setprecision(int precision) { setprecision_t result{precision}; return result; }
+inline setfill_t setfill(char fill) { setfill_t result{fill}; return result; }
+inline format_flag_t setiosflags(int flags) { format_flag_t result{flags, 0}; return result; }
+inline format_flag_t resetiosflags(int flags) { format_flag_t result{0, flags}; return result; }
+
+static format_flag_t hex = {1, 512};
+static format_flag_t oct = {512, 1};
+static format_flag_t dec = {0, 513};
+static format_flag_t fixed = {2, 8};
+static format_flag_t scientific = {8, 2};
+static format_flag_t defaultfloat = {0, 10};
+static format_flag_t boolalpha = {4, 0};
+static format_flag_t noboolalpha = {0, 4};
+static format_flag_t left = {16, 4128};
+static format_flag_t right = {32, 4112};
+static format_flag_t showpos = {64, 0};
+static format_flag_t noshowpos = {0, 64};
+static format_flag_t uppercase = {128, 0};
+static format_flag_t nouppercase = {0, 128};
+static format_flag_t showpoint = {256, 0};
+static format_flag_t noshowpoint = {0, 256};
+static format_flag_t showbase = {1024, 0};
+static format_flag_t noshowbase = {0, 1024};
+static format_flag_t skipws = {2048, 0};
+static format_flag_t noskipws = {0, 2048};
+static format_flag_t internal = {4096, 48};
+static format_flag_t unitbuf = {8192, 0};
+static format_flag_t nounitbuf = {0, 8192};
+
+inline format_flag_t setbase(int base) {
+    format_flag_t result{0, 513};
+    if (base == 16) { result.set = 1; }
+    if (base == 8) { result.set = 512; }
+    return result;
+}
+
+// std::quoted: written between delimiters with the delimiter and the
+// escape escaped; read back undoing that. KArc does not tell `string&` from
+// `const string&`, so one overload serves both.
+struct karc_quoted_out {
+    string text;
+    char delimiter;
+    char escape;
+};
+struct karc_quoted_in {
+    string* target;
+    char delimiter;
+    char escape;
+};
+inline karc_quoted_out quoted(const char* text, char delimiter = '"', char escape = '\\') {
+    karc_quoted_out result{string(text), delimiter, escape};
+    return result;
+}
+inline karc_quoted_in quoted(string& target, char delimiter = '"', char escape = '\\') {
+    karc_quoted_in result{&target, delimiter, escape};
+    return result;
+}
+inline ostream& operator<<(ostream& out, const karc_quoted_out& quoted) {
+    string text(1, quoted.delimiter);
+    for (size_t i = 0; i < quoted.text.size(); i++) {
+        char c = quoted.text[i];
+        if (c == quoted.delimiter || c == quoted.escape) { text += quoted.escape; }
+        text += c;
+    }
+    text += quoted.delimiter;
+    return out << text;
+}
+inline ostream& operator<<(ostream& out, const karc_quoted_in& quoted) {
+    karc_quoted_out written{*quoted.target, quoted.delimiter, quoted.escape};
+    return out << written;
+}
+inline istream& operator>>(istream& in, karc_quoted_in quoted) {
+    char first = 0;
+    in >> first;
+    if (!in) { return in; }
+    string text;
+    if (first != quoted.delimiter) {
+        // Not quoted: one whitespace-separated word.
+        string rest;
+        in >> rest;
+        text += first;
+        text += rest;
+        *quoted.target = text;
+        return in;
+    }
+    int saved = in.flags();
+    in.unsetf(ios_base::skipws);
+    char c = 0;
+    while (in >> c) {
+        if (c == quoted.escape) {
+            in >> c;
+        } else if (c == quoted.delimiter) {
+            break;
+        }
+        text += c;
+    }
+    in.flags(saved);
+    *quoted.target = text;
+    return in;
+}
+
+// std::put_time and std::get_time over strftime and a reader of the
+// %Y %m %d %H %M %S %y %e %j fields.
+struct karc_put_time {
+    const tm* when;
+    const char* format;
+};
+inline karc_put_time put_time(const tm* when, const char* format) {
+    karc_put_time result{when, format};
+    return result;
+}
+inline ostream& operator<<(ostream& out, const karc_put_time& put) {
+    char text[256];
+    size_t length = strftime(text, sizeof(text), put.format, put.when);
+    out.write(text, (long)length);
+    return out;
+}
+struct karc_get_time {
+    tm* when;
+    const char* format;
+};
+inline karc_get_time get_time(tm* when, const char* format) {
+    karc_get_time result{when, format};
+    return result;
+}
+inline istream& operator>>(istream& in, karc_get_time get) {
+    int saved = in.flags();
+    in.unsetf(ios_base::skipws);
+    for (const char* f = get.format; *f != 0 && in; f++) {
+        char c = 0;
+        if (*f != '%') {
+            in >> c;
+            if (c != *f) { in.setstate(ios_base::failbit); }
+            continue;
+        }
+        f++;
+        if (*f == 0) { break; }
+        int width = (*f == 'Y') ? 4 : ((*f == 'j') ? 3 : 2);
+        int value = 0;
+        int digits = 0;
+        while (digits < width && in >> c) {
+            if (c == ' ' && digits == 0 && *f == 'e') { continue; }
+            if (c < '0' || c > '9') {
+                in.setstate(ios_base::failbit);
+                break;
+            }
+            value = value * 10 + (c - '0');
+            digits++;
+        }
+        if (*f == 'Y') { get.when->tm_year = value - 1900; }
+        if (*f == 'y') { get.when->tm_year = value < 69 ? value + 100 : value; }
+        if (*f == 'm') { get.when->tm_mon = value - 1; }
+        if (*f == 'd' || *f == 'e') { get.when->tm_mday = value; }
+        if (*f == 'H') { get.when->tm_hour = value; }
+        if (*f == 'M') { get.when->tm_min = value; }
+        if (*f == 'S') { get.when->tm_sec = value; }
+        if (*f == 'j') { get.when->tm_yday = value - 1; }
+    }
+    in.flags(saved);
+    return in;
+}
+
+}
+
+#endif

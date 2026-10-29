@@ -1,0 +1,70 @@
+// <complex>: std::complex over double (float and long double are double).
+#ifndef KARC_STD_COMPLEX
+#define KARC_STD_COMPLEX
+
+#include <cmath>
+
+namespace std {
+
+template <typename T>
+class complex {
+public:
+    complex(T real = 0, T imag = 0) : re_(real), im_(imag) {}
+    T real() const { return re_; }
+    T imag() const { return im_; }
+    void real(T value) { re_ = value; }
+    void imag(T value) { im_ = value; }
+    complex& operator+=(const complex& other) {
+        re_ += other.re_;
+        im_ += other.im_;
+        return *this;
+    }
+    complex& operator-=(const complex& other) {
+        re_ -= other.re_;
+        im_ -= other.im_;
+        return *this;
+    }
+    complex& operator*=(const complex& other) {
+        T re = re_ * other.re_ - im_ * other.im_;
+        im_ = re_ * other.im_ + im_ * other.re_;
+        re_ = re;
+        return *this;
+    }
+    complex& operator/=(const complex& other) {
+        T scale = other.re_ * other.re_ + other.im_ * other.im_;
+        T re = (re_ * other.re_ + im_ * other.im_) / scale;
+        im_ = (im_ * other.re_ - re_ * other.im_) / scale;
+        re_ = re;
+        return *this;
+    }
+    complex operator+(const complex& other) const { complex r(*this); r += other; return r; }
+    complex operator-(const complex& other) const { complex r(*this); r -= other; return r; }
+    complex operator*(const complex& other) const { complex r(*this); r *= other; return r; }
+    complex operator/(const complex& other) const { complex r(*this); r /= other; return r; }
+    complex operator-() const { return complex(0 - re_, 0 - im_); }
+    bool operator==(const complex& other) const { return re_ == other.re_ && im_ == other.im_; }
+    bool operator!=(const complex& other) const { return !(*this == other); }
+
+private:
+    T re_;
+    T im_;
+};
+
+template <typename T> T real(const complex<T>& z) { return z.real(); }
+template <typename T> T imag(const complex<T>& z) { return z.imag(); }
+template <typename T> T abs(const complex<T>& z) { return sqrt(z.real() * z.real() + z.imag() * z.imag()); }
+template <typename T> T arg(const complex<T>& z) { return atan2(z.imag(), z.real()); }
+template <typename T> T norm(const complex<T>& z) { return z.real() * z.real() + z.imag() * z.imag(); }
+template <typename T> complex<T> conj(const complex<T>& z) { return complex<T>(z.real(), 0 - z.imag()); }
+template <typename T> complex<T> polar(const T& magnitude, const T& angle = 0) { return complex<T>(magnitude * cos(angle), magnitude * sin(angle)); }
+template <typename T> complex<T> exp(const complex<T>& z) { return polar(exp(z.real()), z.imag()); }
+template <typename T> complex<T> log(const complex<T>& z) { return complex<T>(log(abs(z)), arg(z)); }
+template <typename T> complex<T> sqrt(const complex<T>& z) { return polar(sqrt(abs(z)), arg(z) / 2); }
+template <typename T> complex<T> pow(const complex<T>& z, const complex<T>& w) { return exp(w * log(z)); }
+
+}
+
+inline std::complex<double> operator""i(long double value) { return std::complex<double>(0.0, (double)value); }
+inline std::complex<double> operator""i(unsigned long long value) { return std::complex<double>(0.0, (double)value); }
+
+#endif

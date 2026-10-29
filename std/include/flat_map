@@ -1,0 +1,147 @@
+// <flat_map>: std::flat_map and std::flat_multimap, sorted vectors of
+// pairs: lookups are binary searches, iterators are pair pointers, and
+// inserting or erasing moves the elements after the position.
+#ifndef KARC_STD_FLAT_MAP
+#define KARC_STD_FLAT_MAP
+
+#include <cstddef>
+#include <exception>
+#include <utility>
+#include <vector>
+#include <functional>
+#include <initializer_list>
+
+namespace std {
+
+template <typename K, typename V, typename C = less<K>>
+class flat_map {
+public:
+    typedef K key_type;
+    typedef V mapped_type;
+    typedef pair<K, V> value_type;
+    typedef pair<K, V>* iterator;
+    typedef pair<K, V>* const_iterator;
+
+    flat_map() {}
+    flat_map(initializer_list<pair<K, V>> items) {
+        for (const pair<K, V>* item = items.begin(); item != items.end(); item++) { insert(*item); }
+    }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    void clear() { items_.clear(); }
+    pair<K, V>* begin() { return items_.begin(); }
+    pair<K, V>* end() { return items_.end(); }
+    V& operator[](const K& key) {
+        size_t index = position(key);
+        if (index == items_.size() || less_(key, items_[index].first)) { items_.insert(items_.begin() + index, pair<K, V>(key, V())); }
+        return items_[index].second;
+    }
+    V& at(const K& key) {
+        pair<K, V>* found = find(key);
+        if (found == items_.end()) { karc_throw_out_of_range("flat_map::at"); }
+        return found->second;
+    }
+    pair<K, V>* find(const K& key) {
+        size_t index = position(key);
+        if (index < items_.size() && !less_(key, items_[index].first)) { return items_.begin() + index; }
+        return items_.end();
+    }
+    size_t count(const K& key) { return find(key) == items_.end() ? 0 : 1; }
+    bool contains(const K& key) { return find(key) != items_.end(); }
+    pair<K, V>* lower_bound(const K& key) { return items_.begin() + position(key); }
+    pair<K, V>* upper_bound(const K& key) {
+        size_t index = position(key);
+        if (index < items_.size() && !less_(key, items_[index].first)) { index++; }
+        return items_.begin() + index;
+    }
+    pair<pair<K, V>*, bool> insert(const pair<K, V>& entry) {
+        size_t index = position(entry.first);
+        if (index < items_.size() && !less_(entry.first, items_[index].first)) { return pair<pair<K, V>*, bool>(items_.begin() + index, false); }
+        items_.insert(items_.begin() + index, entry);
+        return pair<pair<K, V>*, bool>(items_.begin() + index, true);
+    }
+    template <typename... Args>
+    pair<pair<K, V>*, bool> emplace(Args&&... args) { return insert(pair<K, V>(std::forward<Args>(args)...)); }
+    pair<K, V>* erase(pair<K, V>* position) { return items_.erase(position); }
+    size_t erase(const K& key) {
+        pair<K, V>* found = find(key);
+        if (found == items_.end()) { return 0; }
+        items_.erase(found);
+        return 1;
+    }
+
+private:
+    size_t position(const K& key) {
+        size_t low = 0;
+        size_t high = items_.size();
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            if (less_(items_[middle].first, key)) { low = middle + 1; } else { high = middle; }
+        }
+        return low;
+    }
+    vector<pair<K, V>> items_;
+    C less_;
+};
+
+template <typename K, typename V, typename C = less<K>>
+class flat_multimap {
+public:
+    typedef K key_type;
+    typedef V mapped_type;
+    typedef pair<K, V> value_type;
+    typedef pair<K, V>* iterator;
+
+    flat_multimap() {}
+    flat_multimap(initializer_list<pair<K, V>> items) {
+        for (const pair<K, V>* item = items.begin(); item != items.end(); item++) { insert(*item); }
+    }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    void clear() { items_.clear(); }
+    pair<K, V>* begin() { return items_.begin(); }
+    pair<K, V>* end() { return items_.end(); }
+    pair<K, V>* lower_bound(const K& key) { return items_.begin() + bound(key, false); }
+    pair<K, V>* upper_bound(const K& key) { return items_.begin() + bound(key, true); }
+    pair<pair<K, V>*, pair<K, V>*> equal_range(const K& key) { return pair<pair<K, V>*, pair<K, V>*>(lower_bound(key), upper_bound(key)); }
+    pair<K, V>* find(const K& key) {
+        pair<K, V>* found = lower_bound(key);
+        if (found != items_.end() && !less_(key, found->first)) { return found; }
+        return items_.end();
+    }
+    size_t count(const K& key) { return upper_bound(key) - lower_bound(key); }
+    bool contains(const K& key) { return find(key) != items_.end(); }
+    pair<K, V>* insert(const pair<K, V>& entry) {
+        size_t index = bound(entry.first, true);
+        items_.insert(items_.begin() + index, entry);
+        return items_.begin() + index;
+    }
+    template <typename... Args>
+    pair<K, V>* emplace(Args&&... args) { return insert(pair<K, V>(std::forward<Args>(args)...)); }
+    pair<K, V>* erase(pair<K, V>* position) { return items_.erase(position); }
+    size_t erase(const K& key) {
+        size_t removed = count(key);
+        items_.erase(lower_bound(key), upper_bound(key));
+        return removed;
+    }
+
+private:
+    // The first index whose key is not less than `key`, or, for `after`,
+    // greater than it.
+    size_t bound(const K& key, bool after) {
+        size_t low = 0;
+        size_t high = items_.size();
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            bool before = after ? !less_(key, items_[middle].first) : less_(items_[middle].first, key);
+            if (before) { low = middle + 1; } else { high = middle; }
+        }
+        return low;
+    }
+    vector<pair<K, V>> items_;
+    C less_;
+};
+
+}
+
+#endif

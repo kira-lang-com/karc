@@ -1,0 +1,17 @@
+// <cfloat>: limits of double. `float` is `double` in KArc, so the FLT_ names
+// describe double too.
+#ifndef KARC_STD_CFLOAT
+#define KARC_STD_CFLOAT
+
+#define DBL_MAX 1.7976931348623157e308
+#define DBL_MIN 2.2250738585072014e-308
+#define DBL_EPSILON 2.220446049250313e-16
+#define DBL_DIG 15
+#define DBL_MANT_DIG 53
+#define FLT_MAX DBL_MAX
+#define FLT_MIN DBL_MIN
+#define FLT_EPSILON DBL_EPSILON
+#define FLT_DIG DBL_DIG
+#define FLT_MANT_DIG DBL_MANT_DIG
+
+#endif

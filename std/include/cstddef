@@ -1,0 +1,15 @@
+// <cstddef>: the basic size and pointer-difference types.
+#ifndef KARC_STD_CSTDDEF
+#define KARC_STD_CSTDDEF
+
+#include <__builtins>
+
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
+typedef long max_align_t;
+// The type of nullptr, as the pointer it converts to.
+typedef void* nullptr_t;
+
+#define NULL 0
+
+#endif

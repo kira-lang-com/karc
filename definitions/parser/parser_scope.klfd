@@ -1,0 +1,379 @@
+// C++ name lookup. Every declaration is entered under its fully qualified
+// name, `a::b::X`, with the kinds of entity it names. A written name is
+// looked up from a scope (a class or namespace, "" for the global one): an
+// unqualified name in that scope and each enclosing one in turn, the first
+// that declares it winning; a qualified one by looking its first part up so
+// and the rest in what that names. A class scope includes its bases; a
+// namespace the namespaces its using-directives nominate.
+
+function entityBit(kind: EntityKind) -> Int {
+    match kind {
+        Class -> return 1
+        Typedef -> return 2
+        ClassTemplate -> return 4
+        Namespace -> return 8
+        Function -> return 16
+        Variable -> return 32
+        Enumerator -> return 64
+        FunctionTemplate -> return 128
+        Using -> return 256
+    }
+}
+function singleEntityKind(kind: EntityKind) -> EntityKinds {
+    return EntityKinds { bits = entityBit(kind) }
+}
+function entityTypeKinds() -> EntityKinds {
+    return EntityKinds { bits = entityBit(.Class) | entityBit(.Typedef) | entityBit(.ClassTemplate) | entityBit(.Namespace) }
+}
+function entityLookupKinds() -> EntityKinds {
+    return EntityKinds { bits = entityTypeKinds().bits | entityBit(.Function) | entityBit(.Variable) | entityBit(.Enumerator) | entityBit(.FunctionTemplate) }
+}
+function entityExpressionKinds() -> EntityKinds {
+    return EntityKinds { bits = entityTypeKinds().bits | entityBit(.Function) | entityBit(.Variable) }
+}
+function hasKind(kinds: EntityKinds, kind: EntityKind) -> Bool {
+    return (kinds.bits & entityBit(kind)) != 0
+}
+function withKind(kinds: EntityKinds, kind: EntityKind) -> EntityKinds {
+    return EntityKinds { bits = kinds.bits | entityBit(kind) }
+}
+function entityIndex(tree: CppTree, name: String) -> Int {
+    if tree.entityHeads.count == 0 { return -1 }
+    var i = tree.entityHeads[sourceHash(name) % symbolBucketCount()]
+    while i >= 0 {
+        if tree.entities[i].name == name { return i }
+        i = tree.entities[i].next
+    }
+    return -1
+}
+// Enters `name` as a `kind`; a name declared again gains the kind.
+function declareEntity(tree: borrow mut CppTree, name: String, kind: EntityKind) {
+    declareEntityFor(tree, name, kind, "")
+}
+function declareEntityFor(tree: borrow mut CppTree, name: String, kind: EntityKind, target: String) {
+    if tree.entityHeads.count == 0 {
+        for _ in 0..symbolBucketCount() { tree.entityHeads.append(-1) }
+    }
+    let existing = entityIndex(tree, name)
+    if existing >= 0 {
+        let current = tree.entities[existing]
+        var resolvedTarget = current.target
+        if target != "" { resolvedTarget = target }
+        tree.entities[existing] = EntityEntry {
+            name = current.name,
+            kinds = withKind(current.kinds, kind),
+            target = resolvedTarget,
+            next = current.next
+        }
+        return
+    }
+    let bucket = sourceHash(name) % symbolBucketCount()
+    let next = tree.entityHeads[bucket]
+    tree.entityHeads[bucket] = tree.entities.count
+    tree.entities.append(EntityEntry { name = name, kinds = singleEntityKind(kind), target = target, next = next })
+}
+function entityKinds(tree: CppTree, name: String) -> EntityKinds {
+    let i = entityIndex(tree, name)
+    if i < 0 { return EntityKinds { bits = 0 } }
+    return tree.entities[i].kinds
+}
+function rollbackEntities(tree: borrow mut CppTree, count: Int) {
+    var entities: [EntityEntry] = []
+    var heads: [Int] = []
+    for _ in 0..symbolBucketCount() { heads.append(-1) }
+    for i in 0..count {
+        let entry = tree.entities[i]
+        let bucket = sourceHash(entry.name) % symbolBucketCount()
+        entities.append(EntityEntry {
+            name = entry.name,
+            kinds = entry.kinds,
+            target = entry.target,
+            next = heads[bucket]
+        })
+        heads[bucket] = i
+    }
+    tree.entities = entities
+    tree.entityHeads = heads
+}
+function qualify(scope: String, name: String) -> String {
+    if scope == "" { return name }
+    return joinText([scope, "::", name])
+}
+// The innermost namespace enclosing both scopes.
+function commonScope(left: String, right: String) -> String {
+    var a = left
+    while a != "" {
+        if right == a || (utf8Count(right) > utf8Count(a) + 2 && utf8Slice(right, 0, utf8Count(a) + 2) == joinText([a, "::"])) { return a }
+        a = scopeOf(a)
+    }
+    return ""
+}
+// The scope and each one enclosing it, innermost first, "" last.
+function scopeChain(scope: String) -> [String] {
+    var chain: [String] = [scope]
+    var s = scope
+    while s != "" {
+        s = scopeOf(s)
+        chain.append(s)
+    }
+    return chain
+}
+// `name` declared in `scope` itself as one of `kinds`: its qualified name,
+// or the target of a using-declaration; "" when not.
+function declaredIn(tree: CppTree, scope: String, name: String, kinds: EntityKinds) -> String {
+    let full = qualify(scope, name)
+    let i = entityIndex(tree, full)
+    if i < 0 { return "" }
+    let entity = tree.entities[i]
+    if hasKind(entity.kinds, .Using) {
+        if kindsMatch(entityKinds(tree, entity.target), kinds) { return entity.target }
+    }
+    if kindsMatch(entity.kinds, kinds) { return full }
+    return ""
+}
+function kindsMatch(found: EntityKinds, wanted: EntityKinds) -> Bool {
+    return (found.bits & wanted.bits & entityLookupKinds().bits) != 0
+}
+// The direct bases of class `name`, as qualified class names.
+function classBases(tree: CppTree, name: String) -> [String] {
+    var bases: [String] = []
+    for relation in tree.baseRelations {
+        if relation.owner == name { bases.append(relation.base) }
+    }
+    return bases
+}
+// Qualified lookup of `name` in `scope`: the scope itself, then a class's
+// bases or the namespaces a namespace's using-directives nominate.
+function memberOf(tree: CppTree, scope: String, name: String, kinds: EntityKinds, order: Int) -> String {
+    let own = declaredIn(tree, scope, name, kinds)
+    if own != "" { return own }
+    if hasKind(entityKinds(tree, scope), .Class) {
+        for base in classBases(tree, scope) {
+            let inherited = memberOf(tree, base, name, kinds, order)
+            if inherited != "" { return inherited }
+        }
+        return ""
+    }
+    for directive in tree.usingDirectives {
+        if directive.scope == scope && directive.order <= order && directive.target != scope {
+            let nominated = memberOf(tree, directive.target, name, kinds, order)
+            if nominated != "" { return nominated }
+        }
+    }
+    return ""
+}
+// The namespaces whose members unqualified lookup from `scope` sees through
+// using-directives, each with the namespace it appears declared in: the
+// innermost enclosing both the directive and the namespace nominated.
+struct Nomination {
+    let target: String
+    let visibleIn: String
+}
+function nominations(tree: CppTree, scope: String, blockUsings: [String], order: Int) -> [Nomination] {
+    let chain = scopeChain(scope)
+    var found: [Nomination] = []
+    for target in blockUsings {
+        found.append(Nomination { target = target, visibleIn = commonScope(scope, target) })
+    }
+    for directive in tree.usingDirectives {
+        if directive.order <= order && containsText(chain, directive.scope) {
+            found.append(Nomination { target = directive.target, visibleIn = commonScope(directive.scope, directive.target) })
+        }
+    }
+    // A nominated namespace's own directives act as if they were in the
+    // nominating scope.
+    var k = 0
+    while k < found.count {
+        let target = found[k].target
+        for directive in tree.usingDirectives {
+            if directive.scope == target && directive.order <= order && !nominated(found, directive.target) {
+                found.append(Nomination { target = directive.target, visibleIn = commonScope(found[k].visibleIn, directive.target) })
+            }
+        }
+        k = k + 1
+    }
+    return found
+}
+function nominated(found: [Nomination], target: String) -> Bool {
+    for n in found {
+        if n.target == target { return true }
+    }
+    return false
+}
+function hasUsingTarget(tree: CppTree, target: String) -> Bool {
+    for directive in tree.usingDirectives {
+        if directive.target == target { return true }
+    }
+    return false
+}
+// Unqualified lookup of `name` from `scope`.
+function lookupUnqualified(tree: CppTree, scope: String, blockUsings: [String], order: Int, name: String, kinds: EntityKinds) -> String {
+    var through: [Nomination] = []
+    if tree.usingDirectives.count > 0 || blockUsings.count > 0 { through = nominations(tree, scope, blockUsings, order) }
+    for level in scopeChain(scope) {
+        var found = ""
+        if hasKind(entityKinds(tree, level), .Class) {
+            found = memberOf(tree, level, name, kinds, order)
+        } else {
+            found = declaredIn(tree, level, name, kinds)
+        }
+        if found != "" { return found }
+        for n in through {
+            if n.visibleIn == level {
+                let member = declaredIn(tree, n.target, name, kinds)
+                if member != "" { return member }
+            }
+        }
+    }
+    return ""
+}
+// The entity a written name, `X`, `a::X` or `::a::X`, names from `scope`.
+function lookupName(tree: CppTree, scope: String, blockUsings: [String], order: Int, written: String, kinds: EntityKinds) -> String {
+    var rest = written
+    var current = ""
+    var rooted = false
+    if utf8Count(rest) > 2 && utf8Byte(rest, 0) == 58 && utf8Byte(rest, 1) == 58 {
+        rest = utf8Slice(rest, 2, utf8Count(rest))
+        rooted = true
+    }
+    var first = true
+    var result = ""
+    var searching = true
+    while searching {
+        let cut = firstScopeCut(rest)
+        let part = utf8Slice(rest, 0, cut)
+        let last = cut == utf8Count(rest)
+        var wanted = kinds
+        if !last { wanted = entityTypeKinds() }
+        var found = ""
+        if first && !rooted {
+            found = lookupUnqualified(tree, scope, blockUsings, order, part, wanted)
+        } else {
+            found = memberOf(tree, current, part, wanted, order)
+        }
+        current = scopeNamed(tree, found)
+        if found == "" || last || current == "" {
+            if last { result = found }
+            searching = false
+        } else {
+            rest = utf8Slice(rest, cut + 2, utf8Count(rest))
+            first = false
+        }
+    }
+    return result
+}
+// Where the first `::` of `name` is, or its length.
+function firstScopeCut(name: String) -> Int {
+    let count = utf8Count(name)
+    var depth = 0
+    for i in 0..count {
+        let c = utf8Byte(name, i)
+        if c == 60 { depth = depth + 1 }
+        if c == 62 { depth = depth - 1 }
+        if depth == 0 && c == 58 && i + 1 < count && utf8Byte(name, i + 1) == 58 { return i }
+    }
+    return count
+}
+// The class or namespace an entity found as a qualifier stands for: an
+// alias of a class is the class.
+function scopeNamed(tree: CppTree, name: String) -> String {
+    let kinds = entityKinds(tree, name)
+    if hasKind(kinds, .Class) || hasKind(kinds, .Namespace) { return name }
+    if hasKind(kinds, .Typedef) {
+        for t in tree.typedefs {
+            if t.name == name && isClassType(t.declType) { return nominalName(t.declType) }
+        }
+    }
+    return ""
+}
+// Lookup from where the parser is.
+function resolveIn(p: borrow Parser, written: String, kinds: EntityKinds) -> String {
+    return lookupName(p.tree, p.scope, p.blockUsings, p.tree.functions.count, written, kinds)
+}
+// The qualified name of a declaration of `name` in the scope being parsed:
+// a namespace member is qualified by its namespace, a class member by its
+// class.
+function declaredName(p: borrow Parser, name: String) -> String {
+    if hasScope(name) { return name }
+    return qualify(p.scope, name)
+}
+// `using namespace T;` at namespace scope.
+function addUsingDirective(p: borrow mut Parser, written: String) {
+    let target = resolveIn(p, written, singleEntityKind(.Namespace))
+    if target == "" { return }
+    p.tree.usingDirectives.append(UsingDirective { scope = p.scope, target = target, order = p.tree.functions.count })
+}
+// `using a::name;`: `name` here stands for what `a::name` names.
+function addUsingDeclaration(p: borrow mut Parser, written: String) {
+    let target = resolveIn(p, written, entityLookupKinds())
+    if target == "" { return }
+    declareEntityFor(p.tree, qualify(p.scope, unqualifiedName(written)), .Using, target)
+}
+function addTypedef(tree: borrow mut CppTree, name: String, declType: String) {
+    tree.typedefs.append(CppTypedef { name = name, declType = declType })
+    declareEntityFor(tree, name, .Typedef, declType)
+}
+// The class a written name names here, qualified, or "".
+function classNamed(p: borrow Parser, name: String) -> String {
+    let found = resolveIn(p, name, entityTypeKinds())
+    if found == "" { return "" }
+    if hasKind(entityKinds(p.tree, found), .Class) { return found }
+    return ""
+}
+// The qualified name of a class being declared or defined as `name`: a
+// qualified one names a class declared before, a plain one is a member of
+// the scope being parsed.
+function classDeclarationName(p: borrow Parser, name: String) -> String {
+    if hasScope(name) {
+        let found = resolveIn(p, name, singleEntityKind(.Class))
+        if found != "" { return found }
+        return name
+    }
+    return declaredName(p, name)
+}
+// Declares class `name` (qualified), as a definition's head or a forward
+// declaration does.
+function declareClass(p: borrow mut Parser, name: String) {
+    if !hasKind(entityKinds(p.tree, name), .Class) {
+        declareEntity(p.tree, name, .Class)
+    }
+}
+// A parser over `tokens` sharing the tree, in the scope `p` is in, for the
+// substituted tokens of a template, which do not see the block-scope
+// using-directives where it was named.
+function subParser(p: borrow Parser, tokens: [Token]) -> Parser {
+    var child = newParser(tokens, p.tree.sourceName)
+    child.namespacePrefix = namespacePrefixOf(p.tree, p.scope)
+    child.scope = p.scope
+    child.instantiating = p.instantiating
+    child.tree = p.tree
+    return child
+}
+// `a::b::` for a scope in namespace a::b, class or not.
+function namespacePrefixOf(tree: CppTree, scope: String) -> String {
+    var s = scope
+    while s != "" && hasKind(entityKinds(tree, s), .Class) { s = scopeOf(s) }
+    if s == "" { return "" }
+    return joinText([s, "::"])
+}
+// Runs in the scope of a template named `name`: its enclosing scope.
+function templateScope(name: String) -> String {
+    return scopeOf(name)
+}
+// The namespace a scope is in, or is.
+function enclosingNamespace(tree: CppTree, scope: String) -> String {
+    var s = scope
+    while s != "" && hasKind(entityKinds(tree, s), .Class) { s = scopeOf(s) }
+    return s
+}
+// Whether `name` is a local or parameter of the function being parsed.
+function localNamed(p: borrow Parser, name: String) -> Bool {
+    if hasScope(name) { return false }
+    for parameter in p.bodyParameters {
+        if parameter.name == name { return true }
+    }
+    for i in p.bodyStart..p.tree.statements.count {
+        if statementDeclaresName(p.tree.statements[i], name) { return true }
+    }
+    return false
+}

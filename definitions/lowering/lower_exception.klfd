@@ -1,0 +1,568 @@
+// Exceptions. The std's runtime (std/src/exception.cpp) holds the exception
+// in flight: `throw` copies the value to the heap and hands it over with the
+// chain of type names a handler may catch it as, then leaves for the nearest
+// handler. After every call that may throw, a pending exception does the
+// same. Leaving destroys the class locals in between, as a return does, and
+// either jumps to the dispatch of the enclosing `try`, which tests its
+// handlers in order and continues outward when none matches, or returns a
+// zero value from the function; `main` terminates instead.
+
+// A C-linkage runtime helper of the std, declared on first use.
+function runtimeFunction(state: borrow mut Lowerer, name: String, parameters: [String], result: String) -> Int {
+    let existing = functionSlot(state, name)
+    if existing >= 0 { return existing }
+    for i in 0..state.tree.functions.count {
+        if state.tree.functions[i].cLinkage && state.tree.functions[i].name == name {
+            let declared = functionSlotForFunction(state, i)
+            if declared >= 0 { return declared }
+        }
+    }
+    let span = state.tree.functions[state.functionIndex].nameSpan
+    let signature = kSignatureC(state, span, name, result)
+    for parameter in parameters { kSignatureParameter(state, signature, parameter) }
+    let handle = kDeclareFunction(signature)
+    return addFunctionSlot(state, name, parameters, result, handle, true)
+}
+function callRuntime(state: borrow mut Lowerer, name: String, parameters: [String], result: String, arguments: [KirValue]) -> KirValue {
+    let slot = runtimeFunction(state, name, parameters, result)
+    // The unit may define the helper itself (the std does), with its own
+    // spelling of the pointer types.
+    for i in 0..arguments.count {
+        var argument = arguments[i]
+        if i < state.functionSlots[slot].parameters.count { argument = kBitcast(state, argument, state.functionSlots[slot].parameters[i]) }
+        kArgument(state, argument)
+    }
+    if result == "unit" {
+        kCallVoid(state, state.functionSlots[slot].handle)
+        return kConstInt(state, "i32", 0)
+    }
+    return kCall(state, state.functionSlots[slot].handle, result)
+}
+// After a call to the function declared at `slot` (-1 for an indirect call):
+// leave when it left an exception pending.
+function afterCall(state: borrow mut Lowerer, slot: Int) {
+    if slot >= 0 && slot < state.functionSlots.count && state.functionSlots[slot].noThrow { return }
+    if state.unwinding || !state.exceptionsEnabled { return }
+    let pending = callRuntime(state, "karc_exception_pending", [], "i32", [])
+    let leave = kBlock(state)
+    let stay = kBlock(state)
+    kCondBr(state, kIcmp(state, "ne", pending, kConstInt(state, "i32", 0)), leave, stay)
+    kSwitchTo(state, leave)
+    emitUnwind(state)
+    kSwitchTo(state, stay)
+}
+// Leaves for the innermost handler: the dispatch of the enclosing `try`, or
+// out of the function.
+// The destructors run with the exception set aside, so what they call runs
+// normally.
+function emitUnwind(state: borrow mut Lowerer) {
+    let saved = state.unwinding
+    state.unwinding = true
+    let fn = state.tree.functions[state.functionIndex]
+    if state.tryDepth == 0 && isMainName(fn.name) { callRuntime(state, "karc_exception_uncaught", [], "unit", []) }
+    callRuntime(state, "karc_exception_suspend", [], "unit", [])
+    if state.tryDepth > 0 {
+        let target = state.tryTargets[state.tryDepth - 1]
+        destroyScope(state, target.scope, -1)
+        callRuntime(state, "karc_exception_resume", [], "unit", [])
+        kBr(state, target.block)
+    } else {
+        destroyScope(state, 0, -1)
+        callRuntime(state, "karc_exception_resume", [], "unit", [])
+        deallocLocals(state)
+        let result = fn.returnType
+        if isClassType(result) || result == "unit" {
+            kReturnVoid(state)
+        } else if fn.refReturn || isPointerType(result) || isFnPtrType(result) {
+            kReturn(state, kNull(state, result))
+        } else if result == "f64" {
+            kReturn(state, kConstFloat(state, "0.0"))
+        } else {
+            kReturn(state, kConstInt(state, result, 0))
+        }
+    }
+    state.unwinding = saved
+}
+// `throw value` (or `throw;`, which rethrows the exception being handled).
+function emitThrow(state: borrow mut Lowerer, arguments: [ExprId]) {
+    if arguments.count == 0 {
+        callRuntime(state, "karc_exception_rethrow", [], "unit", [])
+    } else {
+        var thrown = staticType(state, arguments[0])
+        if isArrayType(thrown) { thrown = joinText(["*[0 x ", arrayElementType(thrown), "]"]) }
+        if thrown == "" || thrown == "@braced" { thrown = "i32" }
+        let size = kConstInt(state, "i64", typeSize(state.tree, thrown))
+        let storage = callRuntime(state, "karc_operator_new", ["i64"], "*[0 x i8]", [size])
+        let pointerType = joinText(["*[0 x ", thrown, "]"])
+        let object = kBitcast(state, storage, pointerType)
+        if isClassType(thrown) {
+            emitConstruct(state, object, thrown, [arguments[0]])
+        } else {
+            let target = placeFromPointer(state, Value { reference = object, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false })
+            kStore(state, coerceRef(state, emitExpression(state, arguments[0]), thrown), target.address)
+        }
+        let chain = addedString(state, typeChain(state, thrown))
+        callRuntime(state, "karc_exception_throw", ["*[0 x i8]", "*[0 x i8]"], "unit", [storage, chain])
+    }
+    leaveAlongside(state, kBlock(state))
+}
+// Leaves for the handler, with an edge that is never taken to `rest`, where
+// lowering continues: every block stays reachable, so the stack slots of the
+// entry dominate all of them.
+function leaveAlongside(state: borrow mut Lowerer, rest: KirBlockBuilder) {
+    let leave = kBlock(state)
+    kCondBr(state, kConstInt(state, "i1", 1), leave, rest)
+    kSwitchTo(state, leave)
+    emitUnwind(state)
+    kSwitchTo(state, rest)
+}
+// `;T;Base;...;`: the names a thrown `ty` can be caught as.
+function typeChain(state: Lowerer, ty: String) -> String {
+    var pieces: [String] = [";"]
+    appendTypeNames(state, ty, pieces)
+    return joinText(pieces)
+}
+function appendTypeNames(state: Lowerer, ty: String, pieces: borrow mut [String]) {
+    pieces.append(catchName(ty))
+    pieces.append(";")
+    if !isClassType(ty) { return }
+    let record = structIndex(state, nominalName(ty))
+    if record < 0 { return }
+    for field in state.tree.structs[record].fields {
+        if isBaseField(field) { appendTypeNames(state, field.declType, pieces) }
+    }
+}
+function catchName(ty: String) -> String {
+    if isClassType(ty) { return nominalName(ty) }
+    return ty
+}
+// A NUL-terminated string constant the lowering adds, as a byte pointer.
+function addedString(state: borrow mut Lowerer, text: String) -> KirValue {
+    var index = -1
+    for entry in state.addedStrings {
+        if entry.text == text { index = entry.index }
+    }
+    if index < 0 {
+        index = state.tree.strings.count
+        state.tree.strings.append(text)
+        declareStringsFrom(state, index)
+        state.addedStrings.append(AddedStringEntry { text = text, index = index })
+    }
+    return slotPointer(state, kGlobalAddr(state, state.stringHandles[index]), "i8")
+}
+// `try { ... } catch (...) { ... }`.
+function emitTry(state: borrow mut Lowerer, tryStmt: TryStatement) {
+    let dispatch = kBlock(state)
+    let after = kBlock(state)
+    let scopeStart = state.active
+    let target = TryTarget { block = dispatch, scope = scopeStart }
+    if state.tryDepth < state.tryTargets.count {
+        state.tryTargets[state.tryDepth] = target
+    } else {
+        state.tryTargets.append(target)
+    }
+    state.tryDepth = state.tryDepth + 1
+    for child in tryStmt.body {
+        if !state.terminated { emitStatement(state, child) }
+    }
+    destroyScope(state, scopeStart, -1)
+    state.active = scopeStart
+    state.tryDepth = state.tryDepth - 1
+    if !state.terminated { kBr(state, after) }
+    state.terminated = false
+    kSwitchTo(state, dispatch)
+    for handler in tryStmt.handlers {
+        let matched = kBlock(state)
+        let next = kBlock(state)
+        if handler.declType == "" {
+            kCondBr(state, kConstInt(state, "i1", 1), matched, next)
+        } else {
+            let name = addedString(state, catchName(handlerType(handler)))
+            let test = callRuntime(state, "karc_exception_matches", ["*[0 x i8]"], "i32", [name])
+            kCondBr(state, kIcmp(state, "ne", test, kConstInt(state, "i32", 0)), matched, next)
+        }
+        kSwitchTo(state, matched)
+        emitHandler(state, handler, after)
+        kSwitchTo(state, next)
+    }
+    // No handler took it: on to the next enclosing one.
+    leaveAlongside(state, after)
+    state.terminated = false
+}
+// The type a handler catches, without the reference.
+function handlerType(handler: CatchStatement) -> String {
+    if handler.reference == -1 { return elementOfPointer(handler.declType) }
+    return handler.declType
+}
+// One matched handler: takes the exception, binds it, runs the body and,
+// unless the body rethrew, destroys and frees it.
+function emitHandler(state: borrow mut Lowerer, handler: CatchStatement, after: KirBlockBuilder) {
+    let storage = callRuntime(state, "karc_exception_catch", [], "*[0 x i8]", [])
+    let scopeStart = state.active
+    let caught = handlerType(handler)
+    let named = handler.declType != "" && !(utf8Count(handler.name) > 4 && utf8Slice(handler.name, 0, 4) == "_arg")
+    if named {
+        let pointerType = joinText(["*[0 x ", caught, "]"])
+        let object = kBitcast(state, storage, pointerType)
+        if handler.reference == -1 {
+            let slot = declare(state, handler.name, pointerType, caught, handler.span)
+            state.slotsData[slot].reference = true
+            kStore(state, object, state.slotsData[slot].address)
+        } else if isClassType(caught) {
+            let slot = declare(state, handler.name, caught, "", handler.span)
+            zeroAggregate(state, state.slotsData[slot].address, caught)
+            copyInto(state, slotPointer(state, state.slotsData[slot].address, caught), object, caught)
+        } else {
+            let slot = declare(state, handler.name, caught, "", handler.span)
+            let source = placeFromPointer(state, Value { reference = object, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false })
+            kStore(state, kLoad(state, source.address), state.slotsData[slot].address)
+        }
+    }
+    state.handlers.append(HandlerEntry { storage = storage, ty = caught })
+    for child in handler.body {
+        if !state.terminated { emitStatement(state, child) }
+    }
+    var handlers: [HandlerEntry] = []
+    for i in 0..(state.handlers.count - 1) {
+        handlers.append(state.handlers[i])
+    }
+    state.handlers = handlers
+    if !state.terminated {
+        destroyScope(state, scopeStart, -1)
+        releaseException(state, storage, caught)
+        kBr(state, after)
+    }
+    state.active = scopeStart
+    state.terminated = false
+}
+// At the end of a handler: the exception is destroyed as the type it was
+// caught as (through the vtable for a polymorphic class) and freed, unless
+// the handler rethrew it.
+function releaseException(state: borrow mut Lowerer, storage: KirValue, caught: String) {
+    let pending = callRuntime(state, "karc_exception_pending", [], "i32", [])
+    let release = kBlock(state)
+    let done = kBlock(state)
+    kCondBr(state, kIcmp(state, "eq", pending, kConstInt(state, "i32", 0)), release, done)
+    kSwitchTo(state, release)
+    // An exception_ptr took it: it outlives the handler.
+    let kept = callRuntime(state, "karc_exception_kept", [], "i32", [])
+    let free = kBlock(state)
+    let forget = kBlock(state)
+    kCondBr(state, kIcmp(state, "eq", kept, kConstInt(state, "i32", 0)), free, forget)
+    kSwitchTo(state, free)
+    let saved = state.unwinding
+    state.unwinding = true
+    if isClassType(caught) && hasDestructor(state, caught) {
+        let object = kBitcast(state, storage, joinText(["*[0 x ", caught, "]"]))
+        if vptrOwner(state, caught) != "" {
+            emitVirtualDestroy(state, object, caught)
+        } else {
+            emitDestroy(state, object, caught)
+        }
+    }
+    state.unwinding = saved
+    callRuntime(state, "karc_operator_delete", ["*[0 x i8]"], "unit", [storage])
+    kBr(state, forget)
+    kSwitchTo(state, forget)
+    callRuntime(state, "karc_exception_forget", [], "unit", [])
+    kBr(state, done)
+    kSwitchTo(state, done)
+}
+// Where main returns: standard output's buffer is emptied, when the unit
+// sees the std's (<cstdio> declares karc_output_flush).
+function flushOutput(state: borrow mut Lowerer) {
+    if functionsNamed(state, "karc_output_flush").count > 0 {
+        callRuntime(state, "karc_output_flush", [], "unit", [])
+    }
+}
+// Which functions of the unit cannot throw: those with a body that throws
+// nothing, allocates nothing, uses no class values or indirect calls, and
+// calls only functions that cannot throw. Calls to them need no check.
+function noThrowFunctions(tree: CppTree) -> [Bool] {
+    var result: [Bool] = []
+    for fn in tree.functions { result.append(!fn.isProto && throwFreeFunction(tree, fn)) }
+    var changed = true
+    while changed {
+        changed = false
+        for i in 0..tree.functions.count {
+            if result[i] {
+                var calls: [String] = []
+                for id in tree.functions[i].body { collectStatementCalls(tree, id, calls) }
+                for name in calls {
+                    if result[i] && !callCannotThrow(tree, result, name) {
+                        result[i] = false
+                        changed = true
+                    }
+                }
+            }
+        }
+    }
+    return result
+}
+function callCannotThrow(tree: CppTree, noThrow: [Bool], name: String) -> Bool {
+    var found = false
+    for i in 0..tree.functions.count {
+        let fn = tree.functions[i]
+        if fn.name == name || qualifiedNamesMatch(fn.name, name) {
+            found = true
+            if !fn.cLinkage && !noThrow[i] {
+                // A declaration without a body here may still be defined as
+                // one that cannot throw.
+                var defined = false
+                for j in 0..tree.functions.count {
+                    if !tree.functions[j].isProto && tree.functions[j].name == fn.name && noThrow[j] { defined = true }
+                }
+                if !defined { return false }
+            }
+        }
+    }
+    return found || isBuiltinName(name)
+}
+function throwFreeFunction(tree: CppTree, fn: CppFunction) -> Bool {
+    for parameter in fn.parameters {
+        if firstByte(parameterClassOf(parameter)) == 37 { return false }
+    }
+    if isClassType(fn.returnType) || methodOwnerType(tree, fn.name) != "" { return false }
+    for id in fn.body {
+        if !throwFreeStatement(tree, id) { return false }
+    }
+    return true
+}
+function throwFreeBody(tree: CppTree, body: [StmtId]) -> Bool {
+    for child in body {
+        if !throwFreeStatement(tree, child) { return false }
+    }
+    return true
+}
+function throwFreeLocal(tree: CppTree, decl: LocalDeclaration) -> Bool {
+    if isClassType(decl.declType) { return false }
+    if hasExpr(decl.initializer) && !throwFreeExpression(tree, decl.initializer) { return false }
+    return true
+}
+function throwFreeStatement(tree: CppTree, id: StmtId) -> Bool {
+    let statement = tree.statements[id.value]
+    match statement.kind {
+        Declare(decl) -> return throwFreeLocal(tree, decl)
+        IfInit(decl) -> return throwFreeLocal(tree, decl)
+        Assignment(assign) -> {
+            if !throwFreeExpression(tree, assign.place) { return false }
+            return throwFreeExpression(tree, assign.value)
+        }
+        ArrayDecl(decl) -> {
+            if isClassType(decl.elementType) { return false }
+            if hasExpr(decl.initializer) { return throwFreeExpression(tree, decl.initializer) }
+            return true
+        }
+        StructDecl -> return false
+        Group(body) -> return throwFreeBody(tree, body)
+        DeclGroup(body) -> return throwFreeBody(tree, body)
+        ExprStmt(expression) -> return throwFreeExpression(tree, expression)
+        Return(returned) -> {
+            if hasExpr(returned.value) { return throwFreeExpression(tree, returned.value) }
+            return true
+        }
+        While(loop) -> {
+            match loop.initializer {
+                Some(decl) -> { if !throwFreeLocal(tree, decl) { return false } }
+                None -> {}
+            }
+            if !throwFreeExpression(tree, loop.condition) { return false }
+            return throwFreeBody(tree, loop.body)
+        }
+        DoWhile(loop) -> {
+            if !throwFreeExpression(tree, loop.condition) { return false }
+            return throwFreeBody(tree, loop.body)
+        }
+        For(loop) -> {
+            if !throwFreeBody(tree, loop.control) { return false }
+            if !throwFreeExpression(tree, loop.condition) { return false }
+            return throwFreeBody(tree, loop.body)
+        }
+        If(branch) -> {
+            match branch.initializer {
+                Some(decl) -> { if !throwFreeLocal(tree, decl) { return false } }
+                None -> {}
+            }
+            if !throwFreeExpression(tree, branch.condition) { return false }
+            if !throwFreeBody(tree, branch.body) { return false }
+            return throwFreeBody(tree, branch.elseBody)
+        }
+        Switch(value) -> {
+            if !throwFreeExpression(tree, value.expression) { return false }
+            return throwFreeBody(tree, value.body)
+        }
+        Case(value) -> return throwFreeExpression(tree, value)
+        Default -> return true
+        Break -> return true
+        Continue -> return true
+        Label -> return true
+        Goto -> return true
+        RangeFor -> return false
+        GlobalInit(init) -> {
+            if isClassType(init.declType) { return false }
+            return throwFreeExpression(tree, init.initializer)
+        }
+        Try -> return false
+    }
+}
+function throwFreeExpression(tree: CppTree, id: ExprId) -> Bool {
+    let e = tree.expressions[id.value]
+    match e.kind {
+        NumberLit -> return true
+        FloatLit -> return true
+        StringLit -> return true
+        Name -> return true
+        Neg(operand) -> return throwFreeExpression(tree, operand)
+        Positive(operand) -> return throwFreeExpression(tree, operand)
+        Not(operand) -> return throwFreeExpression(tree, operand)
+        BitNot(operand) -> return throwFreeExpression(tree, operand)
+        AddrOf(operand) -> return throwFreeExpression(tree, operand)
+        Deref(operand) -> return throwFreeExpression(tree, operand)
+        Sizeof(operand) -> return throwFreeExpression(tree, operand)
+        Cast(cast) -> return throwFreeExpression(tree, cast.operand)
+        Call(call) -> {
+            if hasExpr(call.receiver) || call.name == "__builtin_klf_throw" || utf8Byte(call.name, 0) == 64 { return false }
+            for argument in call.arguments {
+                if !throwFreeExpression(tree, argument) { return false }
+            }
+            return true
+        }
+        Field(field) -> return throwFreeExpression(tree, field.base)
+        Index(index) -> return throwFreeExpression(tree, index.base) && throwFreeExpression(tree, index.index)
+        PreStep(step) -> return throwFreeExpression(tree, step.operand)
+        PostStep(step) -> return throwFreeExpression(tree, step.operand)
+        Binary(binary) -> return throwFreeExpression(tree, binary.left) && throwFreeExpression(tree, binary.right)
+        Ternary(ternary) -> return throwFreeExpression(tree, ternary.condition) &&
+            throwFreeExpression(tree, ternary.thenValue) &&
+            throwFreeExpression(tree, ternary.elseValue)
+        New -> return false
+        Delete -> return false
+    }
+}
+function collectBodyCalls(tree: CppTree, body: [StmtId], calls: borrow mut [String]) {
+    for child in body { collectStatementCalls(tree, child, calls) }
+}
+function collectLocalCalls(tree: CppTree, decl: LocalDeclaration, calls: borrow mut [String]) {
+    if hasExpr(decl.initializer) { collectExpressionCalls(tree, decl.initializer, calls) }
+}
+function collectStatementCalls(tree: CppTree, id: StmtId, calls: borrow mut [String]) {
+    let statement = tree.statements[id.value]
+    match statement.kind {
+        Declare(decl) -> collectLocalCalls(tree, decl, calls)
+        IfInit(decl) -> collectLocalCalls(tree, decl, calls)
+        Assignment(assign) -> {
+            collectExpressionCalls(tree, assign.place, calls)
+            collectExpressionCalls(tree, assign.value, calls)
+        }
+        ArrayDecl(decl) -> {
+            if hasExpr(decl.initializer) { collectExpressionCalls(tree, decl.initializer, calls) }
+        }
+        StructDecl(decl) -> {
+            if hasExpr(decl.initializer) { collectExpressionCalls(tree, decl.initializer, calls) }
+        }
+        Group(body) -> collectBodyCalls(tree, body, calls)
+        DeclGroup(body) -> collectBodyCalls(tree, body, calls)
+        ExprStmt(expression) -> collectExpressionCalls(tree, expression, calls)
+        Return(returned) -> {
+            if hasExpr(returned.value) { collectExpressionCalls(tree, returned.value, calls) }
+        }
+        While(loop) -> {
+            match loop.initializer {
+                Some(decl) -> collectLocalCalls(tree, decl, calls)
+                None -> {}
+            }
+            collectExpressionCalls(tree, loop.condition, calls)
+            collectBodyCalls(tree, loop.body, calls)
+        }
+        DoWhile(loop) -> {
+            collectExpressionCalls(tree, loop.condition, calls)
+            collectBodyCalls(tree, loop.body, calls)
+        }
+        For(loop) -> {
+            collectBodyCalls(tree, loop.control, calls)
+            collectExpressionCalls(tree, loop.condition, calls)
+            collectBodyCalls(tree, loop.body, calls)
+        }
+        If(branch) -> {
+            match branch.initializer {
+                Some(decl) -> collectLocalCalls(tree, decl, calls)
+                None -> {}
+            }
+            collectExpressionCalls(tree, branch.condition, calls)
+            collectBodyCalls(tree, branch.body, calls)
+            collectBodyCalls(tree, branch.elseBody, calls)
+        }
+        Switch(value) -> {
+            collectExpressionCalls(tree, value.expression, calls)
+            collectBodyCalls(tree, value.body, calls)
+        }
+        Case(value) -> collectExpressionCalls(tree, value, calls)
+        Default -> {}
+        Break -> {}
+        Continue -> {}
+        Label -> {}
+        Goto -> {}
+        RangeFor(loop) -> {
+            collectExpressionCalls(tree, loop.range, calls)
+            collectBodyCalls(tree, loop.body, calls)
+        }
+        GlobalInit(init) -> collectExpressionCalls(tree, init.initializer, calls)
+        Try(tryStmt) -> {
+            collectBodyCalls(tree, tryStmt.body, calls)
+            for handler in tryStmt.handlers { collectBodyCalls(tree, handler.body, calls) }
+        }
+    }
+}
+function collectExpressionCalls(tree: CppTree, id: ExprId, calls: borrow mut [String]) {
+    let e = tree.expressions[id.value]
+    match e.kind {
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Name -> {}
+        Neg(operand) -> collectExpressionCalls(tree, operand, calls)
+        Positive(operand) -> collectExpressionCalls(tree, operand, calls)
+        Not(operand) -> collectExpressionCalls(tree, operand, calls)
+        BitNot(operand) -> collectExpressionCalls(tree, operand, calls)
+        AddrOf(operand) -> collectExpressionCalls(tree, operand, calls)
+        Deref(operand) -> collectExpressionCalls(tree, operand, calls)
+        Sizeof(operand) -> collectExpressionCalls(tree, operand, calls)
+        Cast(cast) -> collectExpressionCalls(tree, cast.operand, calls)
+        Call(call) -> {
+            calls.append(call.name)
+            if hasExpr(call.receiver) { collectExpressionCalls(tree, call.receiver, calls) }
+            for argument in call.arguments { collectExpressionCalls(tree, argument, calls) }
+        }
+        Field(field) -> collectExpressionCalls(tree, field.base, calls)
+        Index(index) -> {
+            collectExpressionCalls(tree, index.base, calls)
+            collectExpressionCalls(tree, index.index, calls)
+        }
+        PreStep(step) -> collectExpressionCalls(tree, step.operand, calls)
+        PostStep(step) -> collectExpressionCalls(tree, step.operand, calls)
+        Binary(binary) -> {
+            collectExpressionCalls(tree, binary.left, calls)
+            collectExpressionCalls(tree, binary.right, calls)
+        }
+        Ternary(ternary) -> {
+            collectExpressionCalls(tree, ternary.condition, calls)
+            collectExpressionCalls(tree, ternary.thenValue, calls)
+            collectExpressionCalls(tree, ternary.elseValue, calls)
+        }
+        New(newExpr) -> {
+            if hasExpr(newExpr.count) { collectExpressionCalls(tree, newExpr.count, calls) }
+            if hasExpr(newExpr.initializer) { collectExpressionCalls(tree, newExpr.initializer, calls) }
+            for argument in newExpr.arguments { collectExpressionCalls(tree, argument, calls) }
+        }
+        Delete(deleteExpr) -> collectExpressionCalls(tree, deleteExpr.operand, calls)
+    }
+}
+// A return inside handlers: each one's exception is finished with first.
+function releaseHandlers(state: borrow mut Lowerer) {
+    var i = state.handlers.count
+    while i > 0 {
+        i = i - 1
+        let handler = state.handlers[i]
+        releaseException(state, handler.storage, handler.ty)
+    }
+}

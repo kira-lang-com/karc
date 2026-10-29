@@ -1,0 +1,177 @@
+struct Parser {
+    var tokens: [Token]
+    var position: Int
+    var anonymousDepth: Int
+    var namespacePrefix: String
+    // The scope names are looked up from: the innermost class or namespace,
+    // fully qualified ("" for the global namespace).
+    var scope: String
+    // The namespaces block-scope using-directives in effect nominate.
+    var blockUsings: [String]
+    // `inline` was read before `namespace`.
+    var inlineNamespace: Bool
+    var cLinkageDepth: Int
+    // Whether the type `parseTypeToken` read last ended in `&` or `&&`.
+    var lastReference: Bool
+    // A `>>` that closed an inner template argument list and still owes the
+    // outer one its `>`.
+    var pendingGt: Bool
+    // Class template instances being parsed, innermost last.
+    var instantiating: [String]
+    // The bases a class head listed, taken by the body that follows.
+    var pendingBases: [String]
+    // The member being parsed was declared `virtual`.
+    var nextVirtual: Bool
+    var classScope: [String]
+    var bodyStart: Int
+    var coroutineMarks: Int
+    var bodyParameters: [CppParam]
+    var bodyParametersStart: Int
+    var lambdas: Int
+    var pendingBitWidth: Int
+    var declaratorBase: String
+    var externNext: Bool
+    var defaultedOperators: [CppFunction]
+    var deferredFunctions: [CppFunction]
+    var tree: CppTree
+    var error: String
+    var errorOffset: Int
+    var expected: TokenKind
+}
+function peek(p: borrow Parser) -> Token {
+    return p.tokens[p.position]
+}
+function peekKind(p: borrow Parser) -> TokenKind {
+    return p.tokens[p.position].kind
+}
+// The kind of the token after the current one, for one-token lookahead.
+function peek2Kind(p: borrow Parser) -> TokenKind {
+    if p.position + 1 < p.tokens.count {
+        return p.tokens[p.position + 1].kind
+    }
+    return .End
+}
+function consume(p: borrow mut Parser) -> Token {
+    let value = peek(p)
+    if p.position + 1 < p.tokens.count {
+        p.position = p.position + 1
+    }
+    return value
+}
+// The end offset of the most recently consumed token, for closing a span.
+function prevEnd(p: borrow Parser) -> Int {
+    if p.position > 0 {
+        return p.tokens[p.position - 1].end
+    }
+    return 0
+}
+function spanFrom(p: borrow Parser, start: Int) -> Span {
+    return Span { start = start, end = prevEnd(p) }
+}
+function tokenSpan(t: Token) -> Span {
+    return Span { start = t.start, end = t.end }
+}
+function parseError(p: borrow mut Parser, message: String, offset: Int) {
+    if p.error == "" {
+        p.error = message
+        p.errorOffset = offset
+    }
+}
+function expect(p: borrow mut Parser, kind: TokenKind) -> Token {
+    let value = peek(p)
+    if value.kind != kind {
+        if p.error == "" { p.expected = kind }
+        var shown = value.text
+        if value.kind == .Number { shown = decimalText(value.number) }
+        parseError(p, joinText(["Unexpected token `", shown, "`"]), value.start)
+        return Token { space = false, spelling = "", kind = kind, text = "", number = 0, start = value.start, end = value.end, line = value.line }
+    }
+    return consume(p)
+}
+function addExpr(p: borrow mut Parser, node: Expr) -> ExprId {
+    let index = p.tree.expressions.count
+    p.tree.expressions.append(node)
+    return ExprId { value = index }
+}
+function addStatement(p: borrow mut Parser, node: Statement) -> StmtId {
+    let index = p.tree.statements.count
+    p.tree.statements.append(node)
+    return StmtId { value = index }
+}
+function newParser(tokens: [Token], sourceName: String) -> Parser {
+    let tree = newCppTree(sourceName)
+    var cLinkageDepth = 0
+    if tree.cInput { cLinkageDepth = 1 }
+    return Parser {
+        tokens = tokens,
+        position = 0,
+        anonymousDepth = 0,
+        namespacePrefix = "",
+        scope = "",
+        blockUsings = [],
+        inlineNamespace = false,
+        cLinkageDepth = cLinkageDepth,
+        lastReference = false,
+        pendingGt = false,
+        instantiating = [],
+        pendingBases = [],
+        nextVirtual = false,
+        classScope = [],
+        bodyStart = 0,
+        coroutineMarks = 0,
+        bodyParameters = [],
+        bodyParametersStart = 0,
+        lambdas = 0,
+        pendingBitWidth = -1,
+        declaratorBase = "",
+        externNext = false,
+        defaultedOperators = [],
+        deferredFunctions = [],
+        tree = tree,
+        error = "",
+        errorOffset = 0,
+        expected = .End
+    }
+}
+function parserForTree(tree: CppTree, scope: String) -> Parser {
+    var p = newParser([], tree.sourceName)
+    p.namespacePrefix = namespacePrefixOf(tree, scope)
+    p.scope = scope
+    p.tree = tree
+    return p
+}
+function parseTokens(tokens: [Token], sourceName: String) -> Parser {
+    var p = newParser(tokens, sourceName)
+    while peekKind(p) != .End && p.error == "" {
+        parseTopLevel(p)
+        flushDeferred(p)
+    }
+    addGlobalInitializer(p)
+    return p
+}
+function hasScope(name: String) -> Bool {
+    if utf8Count(name) < 2 { return false }
+    for i in 0..(utf8Count(name) - 1) {
+        if utf8Byte(name, i) == 58 && utf8Byte(name, i + 1) == 58 { return true }
+    }
+    return false
+}
+function declarationName(p: borrow Parser, name: String) -> String {
+    if p.namespacePrefix == "" || p.anonymousDepth > 0 || hasScope(name) { return name }
+    return joinText([p.namespacePrefix, name])
+}
+function parseNamespaceName(p: borrow mut Parser) -> String {
+    var name: String = ""
+    if peekKind(p) == .Ident { name = consume(p).text }
+    while peekKind(p) == .Colon {
+        consume(p)
+        expect(p, .Colon)
+        let part = expect(p, .Ident).text
+        if name == "" { name = part }
+        else { name = joinText([name, "::", part]) }
+    }
+    return name
+}
+function namespaceScope(current: String, name: String) -> String {
+    return joinText([current, name, "::"])
+}

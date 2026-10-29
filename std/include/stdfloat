@@ -1,0 +1,11 @@
+// <stdfloat>: the fixed-width floating-point types KArc has. float is
+// double in KArc, so both 32 and 64 bits name the 64-bit type.
+#ifndef KARC_STD_STDFLOAT
+#define KARC_STD_STDFLOAT
+
+namespace std {
+typedef double float32_t;
+typedef double float64_t;
+}
+
+#endif

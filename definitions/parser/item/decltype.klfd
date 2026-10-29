@@ -1,0 +1,148 @@
+// `decltype`, answered while parsing: the type of a literal, of a variable
+// declared earlier (an `auto` one through its initializer, a lambda as its
+// closure class), of a cast, of a class temporary or of a call of a
+// function declared before. Anything else is
+// `auto`, which a declaration with an initializer resolves itself.
+
+// After `decltype`: `(auto)` or `(expression)`, then any `::member`.
+function parseDecltype(p: borrow mut Parser) -> String {
+    consume(p)
+    expect(p, .LParen)
+    if peekKind(p) == .Ident && peek(p).text == "auto" && peek2Kind(p) == .RParen {
+        consume(p)
+        consume(p)
+        return "auto"
+    }
+    let e = expression(p, 0)
+    expect(p, .RParen)
+    var ty = guessType(p, e, 0)
+    if ty == "" { ty = "auto" }
+    if isClassType(ty) && peekKind(p) == .Colon && peek2Kind(p) == .Colon {
+        consume(p)
+        consume(p)
+        let member = expect(p, .Ident).text
+        let alias = typedefAlias(p, joinText([nominalName(ty), "::", member]))
+        if alias != "" { return alias }
+    }
+    return ty
+}
+// The type `id` has, as far as the parser can tell; "" when it cannot.
+function guessType(p: borrow Parser, id: ExprId, depth: Int) -> String {
+    if depth > 8 { return "" }
+    let e = p.tree.expressions[id.value]
+    match e.kind {
+        NumberLit(number) -> {
+            match number.suffix {
+                "char" -> return "i8"
+                "bool" -> return "i1"
+                else -> return literalType(number)
+            }
+        }
+        FloatLit -> return "f64"
+        StringLit -> return "*[0 x i8]"
+        Cast(cast) -> return cast.ty
+        Call(call) -> {
+            if hasExpr(call.receiver) { return "" }
+            if utf8Count(call.name) > 9 && utf8Slice(call.name, 0, 9) == "@lambda::" { return joinText(["%", utf8Slice(call.name, 9, utf8Count(call.name))]) }
+            if isClassName(p, call.name) { return joinText(["%", unqualifiedName(call.name)]) }
+            for fn in p.tree.functions {
+                if (fn.name == call.name || qualifiedNamesMatch(fn.name, call.name)) && fn.returnType != "auto" && call.explicitArguments == 0 { return referentOf(fn) }
+            }
+            return ""
+        }
+        Name(named) -> return declaredType(p, named.name, depth)
+        Neg -> return ""
+        Positive(operand) -> return promotedUnaryType(guessType(p, operand, depth + 1))
+        Not -> return ""
+        BitNot -> return ""
+        AddrOf -> return ""
+        Deref -> return ""
+        Sizeof -> return ""
+        Field -> return ""
+        Index -> return ""
+        PreStep -> return ""
+        PostStep -> return ""
+        Binary -> return ""
+        Ternary -> return ""
+        New -> return ""
+        Delete -> return ""
+    }
+}
+// The type of the latest variable declared as `name`.
+function declaredType(p: borrow Parser, name: String, depth: Int) -> String {
+    var i = p.tree.statements.count
+    var parametersSeen = false
+    while i > 0 {
+        i = i - 1
+        if i < p.bodyParametersStart && !parametersSeen {
+            // Past the body's locals: its parameters.
+            parametersSeen = true
+            let parameter = parameterType(p, name)
+            if parameter != "" { return parameter }
+        }
+        let stmt = p.tree.statements[i]
+        match stmt.kind {
+            Declare(decl) -> {
+                if decl.name == name {
+                    if isDeducedSpelling(decl.declType) {
+                        if !hasExpr(decl.initializer) { return "" }
+                        return guessType(p, decl.initializer, depth + 1)
+                    }
+                    if decl.reference == -1 { return elementOfPointer(decl.declType) }
+                    return decl.declType
+                }
+            }
+            StructDecl(decl) -> {
+                if decl.name == name {
+                    if decl.declType == "auto" {
+                        if !hasExpr(decl.initializer) { return "" }
+                        return guessType(p, decl.initializer, depth + 1)
+                    }
+                    return decl.declType
+                }
+            }
+            IfInit(decl) -> {
+                if decl.name == name { return decl.declType }
+            }
+            ArrayDecl(decl) -> {
+                if decl.name == name { return joinText(["[", decimalText(decl.size), " x ", decl.elementType, "]"]) }
+            }
+            Assignment -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Case -> {}
+            Default -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            GlobalInit -> {}
+            Try -> {}
+        }
+    }
+    if !parametersSeen {
+        let parameter = parameterType(p, name)
+        if parameter != "" { return parameter }
+    }
+    for g in p.tree.globals {
+        if g.name == name || qualifiedNamesMatch(g.name, name) { return g.declType }
+    }
+    return ""
+}
+function parameterType(p: borrow Parser, name: String) -> String {
+    for parameter in p.bodyParameters {
+        if parameter.name == name {
+            if parameter.reference && isPointerType(parameter.declType) { return elementOfPointer(parameter.declType) }
+            return parameter.declType
+        }
+    }
+    return ""
+}

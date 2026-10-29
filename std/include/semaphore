@@ -1,0 +1,36 @@
+// <semaphore>: counting_semaphore and binary_semaphore. acquire() runs the
+// queued tasks of other threads until a release makes a count available.
+#ifndef KARC_STD_SEMAPHORE
+#define KARC_STD_SEMAPHORE
+
+#include <exception>
+#include <__thread_tasks>
+
+namespace std {
+
+template <long Most = 1000000>
+class counting_semaphore {
+public:
+    counting_semaphore(long count) : count_(count) {}
+    void release(long update = 1) { count_ += update; }
+    void acquire() {
+        while (count_ <= 0) {
+            if (!karc_task_run_one()) { terminate(); }
+        }
+        count_--;
+    }
+    bool try_acquire() {
+        if (count_ <= 0) { return false; }
+        count_--;
+        return true;
+    }
+    static long max() { return Most; }
+
+private:
+    long count_;
+};
+typedef counting_semaphore<1> binary_semaphore;
+
+}
+
+#endif

@@ -1,0 +1,170 @@
+// Multiple inheritance. A polymorphic base after the first is a secondary
+// subobject with a table pointer of its own: the complete class gives it a
+// table in the base's slot layout (`C::__vtable@<offset>`), whose entries
+// the complete class overrides are thunks that move `this` from the
+// subobject back to the complete object. Every table's `@top` slot holds its
+// subobject's offset, so `delete` and dynamic_cast find the complete object.
+
+struct Subobject {
+    let ty: String
+    let offset: Int
+}
+// The secondary polymorphic subobjects of a `ty` object, at any depth.
+function secondaryBases(state: Lowerer, ty: String, base: Int) -> [Subobject] {
+    var found: [Subobject] = []
+    let record = structIndex(state, nominalName(ty))
+    if record < 0 { return found }
+    let fields = state.tree.structs[record].fields
+    for i in 0..fields.count {
+        if isBaseField(fields[i]) && vptrOwner(state, fields[i].declType) != "" {
+            let offset = base + fieldOffset(state.tree, ty, i)
+            if i > 0 { found.append(Subobject { ty = fields[i].declType, offset = offset }) }
+            for deeper in secondaryBases(state, fields[i].declType, offset) { found.append(deeper) }
+        }
+    }
+    return found
+}
+function secondaryTableName(ty: String, offset: Int) -> String {
+    return joinText([nominalName(ty), "::__vtable@", decimalText(offset)])
+}
+function declareSecondaryTables(state: borrow mut Lowerer, ty: String, s: CppStruct) {
+    for sub in secondaryBases(state, ty, 0) {
+        state.tree.globals.append(CppGlobal { name = secondaryTableName(ty, sub.offset), nameSpan = s.nameSpan, declType = vtableType(), arraySize = vtableSlots(state, sub.ty).count, initValue = 0, hasInit = false, initList = [], internal = true, span = s.span })
+    }
+}
+// The complete class's overrider of slot `key` of a secondary subobject:
+// a function of the complete class's primary chain, reached through a thunk.
+function completeOverrider(state: Lowerer, ty: String, key: String) -> Int {
+    match key {
+        "@type", "@top" -> return -1
+        else -> return slotImplementation(state, ty, key)
+    }
+}
+function thunkKey(implementation: Int, offset: Int) -> String {
+    return joinText([decimalText(implementation), "@", decimalText(offset)])
+}
+// Declares and emits the thunks every class's secondary tables need.
+function emitThunks(state: borrow mut Lowerer) {
+    for index in 0..state.tree.structs.count {
+        let ty = joinText(["%", state.tree.structs[index].name])
+        if vptrOwner(state, ty) != "" {
+            for sub in secondaryBases(state, ty, 0) {
+                for key in vtableSlots(state, sub.ty) {
+                    let implementation = completeOverrider(state, ty, key)
+                    if implementation >= 0 && thunkFor(state, thunkKey(implementation, sub.offset)) < 0 {
+                        emitThunk(state, implementation, sub.offset)
+                    }
+                }
+            }
+        }
+    }
+}
+function thunkFor(state: Lowerer, key: String) -> Int {
+    for i in 0..state.thunks.count {
+        if state.thunks[i].key == key { return i }
+    }
+    return -1
+}
+// `implementation` called with `this` pointing `offset` bytes into its
+// object.
+function emitThunk(state: borrow mut Lowerer, implementation: Int, offset: Int) {
+    let callee = functionSlotForFunction(state, implementation)
+    if callee < 0 { return }
+    let fn = state.tree.functions[implementation]
+    let parameters = state.functionSlots[callee].parameters
+    let result = state.functionSlots[callee].result
+    let signature = kSignatureNamed(state, fn.nameSpan, joinText([fn.name, "__karc_thunk", decimalText(offset)]), result, functionSuffix(state.tree, fn))
+    for parameter in parameters { kSignatureParameter(state, signature, parameter) }
+    let handle = kDeclareFunction(signature)
+    state.thunks.append(ThunkEntry { key = thunkKey(implementation, offset), handle = handle })
+    kOpenBody(handle)
+    resetFunctionState(state, implementation, handle)
+    var thisIndex = 0
+    if isClassType(fn.returnType) { thisIndex = 1 }
+    for i in 0..parameters.count {
+        var value = kParameter(handle, i)
+        if i == thisIndex { value = kBitcast(state, bytesAt(state, value, 0 - offset), parameters[i]) }
+        kArgument(state, value)
+    }
+    if result == "unit" {
+        kCallVoid(state, state.functionSlots[callee].handle)
+        kReturnVoid(state)
+    } else {
+        kReturn(state, kCall(state, state.functionSlots[callee].handle, result))
+    }
+}
+// The byte pointer `offset` bytes from `pointer`.
+function bytesAt(state: borrow mut Lowerer, pointer: KirValue, offset: Int) -> KirValue {
+    let bytes = kAddressOf(state, kBitcast(state, pointer, "*[0 x i8]"), "[0 x i8]")
+    return slotPointer(state, kElemAddr(state, bytes, kConstInt(state, "i64", offset), "i8"), "i8")
+}
+// Fills and installs the secondary tables of the `ty` object at `object`.
+function setSecondaryTables(state: borrow mut Lowerer, object: KirValue, ty: String) {
+    for sub in secondaryBases(state, ty, 0) {
+        let table = ensureGlobalSlot(state, secondaryTableName(ty, sub.offset))
+        if table >= 0 {
+            let slots = vtableSlots(state, sub.ty)
+            for i in 0..slots.count {
+                var entry = kNull(state, vtableType())
+                match slots[i] {
+                    "@type" -> entry = kBitcast(state, addedString(state, typeChain(state, ty)), vtableType())
+                    "@top" -> entry = kBitcast(state, kConstInt(state, "i64", sub.offset), vtableType())
+                    else -> {
+                        let overrider = completeOverrider(state, ty, slots[i])
+                        let thunk = thunkFor(state, thunkKey(overrider, sub.offset))
+                        if overrider >= 0 && thunk >= 0 {
+                            entry = kBitcast(state, kFuncRef(state, state.thunks[thunk].handle), vtableType())
+                        } else {
+                            let own = slotImplementation(state, sub.ty, slots[i])
+                            let callee = functionSlotForFunction(state, own)
+                            if own >= 0 && callee >= 0 { entry = kBitcast(state, kFuncRef(state, state.functionSlots[callee].handle), vtableType()) }
+                        }
+                    }
+                }
+                kStore(state, entry, kElemAddr(state, state.slotsData[table].address, kConstInt(state, "i64", i), vtableType()))
+            }
+            let subobject = kBitcast(state, bytesAt(state, object, sub.offset), joinText(["*[0 x ", sub.ty, "]"]))
+            let root = vptrOwner(state, sub.ty)
+            let field = fieldPointer(state, upcast(state, subobject, sub.ty, root), root, 0, vtableType())
+            let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = joinText(["*[0 x ", vtableType(), "]"]), unsigned = false, floating = false }
+            let tablePointer = kBitcast(state, slotPointer(state, state.slotsData[table].address, vtableType()), vtableType())
+            kStore(state, tablePointer, placeFromPointer(state, fieldValue).address)
+        }
+    }
+}
+// The complete object the polymorphic `ty` object at `pointer` is part of.
+function completeObject(state: borrow mut Lowerer, pointer: KirValue, ty: String) -> KirValue {
+    let root = vptrOwner(state, ty)
+    let holder = upcast(state, pointer, ty, root)
+    let field = fieldPointer(state, holder, root, 0, vtableType())
+    let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = joinText(["*[0 x ", vtableType(), "]"]), unsigned = false, floating = false }
+    let table = kBitcast(state, kLoad(state, placeFromPointer(state, fieldValue).address), joinText(["*[0 x ", vtableType(), "]"]))
+    let entries = kAddressOf(state, table, joinText(["[0 x ", vtableType(), "]"]))
+    let top = kBitcast(state, kLoad(state, kElemAddr(state, entries, kConstInt(state, "i64", 2), vtableType())), "i64")
+    let bytes = kAddressOf(state, kBitcast(state, pointer, "*[0 x i8]"), "[0 x i8]")
+    let negated = kBinary(state, "sub", false, true, kConstInt(state, "i64", 0), top)
+    return slotPointer(state, kElemAddr(state, bytes, negated, "i8"), "i8")
+}
+// The pointer `pointer` converted to `target`, a pointer to one of its
+// class's bases or derived classes: the address of that subobject or of the
+// object containing it.
+function adjustClassPointer(state: borrow mut Lowerer, pointer: Value, target: String) -> KirValue {
+    let from = elementOfPointer(pointer.pointer)
+    let to = elementOfPointer(target)
+    if !isClassType(from) || !isClassType(to) || from == to { return pointer.reference }
+    if isBaseOf(state, to, from) { return upcast(state, pointer.reference, from, to) }
+    if isBaseOf(state, from, to) {
+        let offset = baseOffset(state, to, from)
+        if offset != 0 { return kBitcast(state, bytesAt(state, pointer.reference, 0 - offset), pointer.pointer) }
+    }
+    return pointer.reference
+}
+function baseOffset(state: Lowerer, derived: String, base: String) -> Int {
+    var offset = 0
+    var current = derived
+    for step in basePath(state, derived, base) {
+        offset = offset + fieldOffset(state.tree, current, step)
+        current = state.tree.structs[structIndex(state, nominalName(current))].fields[step].declType
+    }
+    return offset
+}

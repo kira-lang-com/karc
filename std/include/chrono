@@ -1,0 +1,290 @@
+// <chrono>: durations, clocks and time points. A duration<Rep, Period>
+// counts ticks of Period seconds; conversions between durations scale by
+// the ratio of their periods, in integers when both counts are integral.
+// The literal operators (100ms, 2h, 1.5s) are declared at global scope.
+#ifndef KARC_STD_CHRONO
+#define KARC_STD_CHRONO
+
+#include <ctime>
+#include <ratio>
+#include <limits>
+
+namespace std {
+namespace chrono {
+
+inline long karc_gcd(long a, long b) {
+    if (a < 0) { a = -a; }
+    if (b < 0) { b = -b; }
+    while (b != 0) {
+        long rest = a % b;
+        a = b;
+        b = rest;
+    }
+    return a == 0 ? 1 : a;
+}
+
+template <typename Rep, typename Period = ratio<1>>
+class duration {
+public:
+    typedef Rep rep;
+    typedef Period period;
+
+    duration() : count_(0) {}
+    duration(Rep count) : count_(count) {}
+    // From any other duration, scaled to this period.
+    template <typename D>
+    duration(const D& other) : count_(0) { karc_set(other.count(), other.karc_num(), other.karc_den()); }
+
+    Rep count() const { return count_; }
+    long karc_num() const { return Period::num; }
+    long karc_den() const { return Period::den; }
+    // `value` ticks of num/den seconds, in this duration's ticks.
+    template <typename R>
+    void karc_set(R value, long num, long den) {
+        long top = num * Period::den;
+        long bottom = den * Period::num;
+        long common = karc_gcd(top, bottom);
+        top = top / common;
+        bottom = bottom / common;
+        if ((R)0.5 != (R)0 || (Rep)0.5 != (Rep)0) {
+            count_ = (Rep)((double)value * (double)top / (double)bottom);
+        } else {
+            long whole = (long)value;
+            count_ = (Rep)(whole / bottom * top + whole % bottom * top / bottom);
+        }
+    }
+
+    static duration zero() { return duration((Rep)0); }
+    static duration min() { return duration(numeric_limits<Rep>::lowest()); }
+    static duration max() { return duration(numeric_limits<Rep>::max()); }
+
+    duration operator+() const { return *this; }
+    duration operator-() const { return duration(-count_); }
+    duration operator*(Rep factor) const { return duration(count_ * factor); }
+    duration operator/(Rep divisor) const { return duration(count_ / divisor); }
+    Rep operator/(const duration& other) const { return count_ / other.count_; }
+    duration operator%(const duration& other) const { return duration(count_ % other.count_); }
+    duration& operator+=(const duration& other) {
+        count_ += other.count_;
+        return *this;
+    }
+    duration& operator-=(const duration& other) {
+        count_ -= other.count_;
+        return *this;
+    }
+    duration& operator*=(Rep factor) {
+        count_ *= factor;
+        return *this;
+    }
+    duration& operator/=(Rep divisor) {
+        count_ /= divisor;
+        return *this;
+    }
+    duration& operator++() {
+        count_++;
+        return *this;
+    }
+    duration& operator--() {
+        count_--;
+        return *this;
+    }
+    bool operator==(const duration& other) const { return count_ == other.count_; }
+    bool operator!=(const duration& other) const { return count_ != other.count_; }
+
+private:
+    Rep count_;
+};
+
+// Between durations of two periods: in the finer one, as the common type
+// is for the standard periods (one divides the other).
+template <typename R1, typename P1, typename R2, typename P2>
+auto operator+(const duration<R1, P1>& a, const duration<R2, P2>& b) {
+    if constexpr (P1::num * P2::den <= P2::num * P1::den) {
+        return duration<R1, P1>(a.count() + duration<R1, P1>(b).count());
+    } else {
+        return duration<R2, P2>(duration<R2, P2>(a).count() + b.count());
+    }
+}
+template <typename R1, typename P1, typename R2, typename P2>
+auto operator-(const duration<R1, P1>& a, const duration<R2, P2>& b) {
+    if constexpr (P1::num * P2::den <= P2::num * P1::den) {
+        return duration<R1, P1>(a.count() - duration<R1, P1>(b).count());
+    } else {
+        return duration<R2, P2>(duration<R2, P2>(a).count() - b.count());
+    }
+}
+template <typename R1, typename P1, typename R2, typename P2>
+bool karc_duration_less(const duration<R1, P1>& a, const duration<R2, P2>& b) {
+    if constexpr (P1::num * P2::den <= P2::num * P1::den) {
+        return a.count() < duration<R1, P1>(b).count();
+    } else {
+        return duration<R2, P2>(a).count() < b.count();
+    }
+}
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator<(const duration<R1, P1>& a, const duration<R2, P2>& b) { return karc_duration_less(a, b); }
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator>(const duration<R1, P1>& a, const duration<R2, P2>& b) { return karc_duration_less(b, a); }
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator<=(const duration<R1, P1>& a, const duration<R2, P2>& b) { return !karc_duration_less(b, a); }
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator>=(const duration<R1, P1>& a, const duration<R2, P2>& b) { return !karc_duration_less(a, b); }
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator==(const duration<R1, P1>& a, const duration<R2, P2>& b) { return !karc_duration_less(a, b) && !karc_duration_less(b, a); }
+template <typename R1, typename P1, typename R2, typename P2>
+bool operator!=(const duration<R1, P1>& a, const duration<R2, P2>& b) { return karc_duration_less(a, b) || karc_duration_less(b, a); }
+
+typedef duration<long, nano> nanoseconds;
+typedef duration<long, micro> microseconds;
+typedef duration<long, milli> milliseconds;
+typedef duration<long> seconds;
+typedef duration<long, ratio<60>> minutes;
+typedef duration<long, ratio<3600>> hours;
+typedef duration<long, ratio<86400>> days;
+typedef duration<long, ratio<604800>> weeks;
+typedef duration<long, ratio<2629746>> months;
+typedef duration<long, ratio<31556952>> years;
+
+template <typename To, typename From>
+To duration_cast(const From& from) {
+    To result;
+    result.karc_set(from.count(), from.karc_num(), from.karc_den());
+    return result;
+}
+// Rounding toward negative infinity, positive infinity and to nearest
+// (ties to even).
+template <typename To, typename From>
+To floor(const From& from) {
+    To result = duration_cast<To>(from);
+    From back = result;
+    if (from < back) { result = result - To(1); }
+    return result;
+}
+template <typename To, typename From>
+To ceil(const From& from) {
+    To result = duration_cast<To>(from);
+    From back = result;
+    if (back < from) { result = result + To(1); }
+    return result;
+}
+template <typename To, typename From>
+To round(const From& from) {
+    To low = floor<To>(from);
+    To high = low + To(1);
+    From lowBack = low;
+    From highBack = high;
+    auto below = from.count() - lowBack.count();
+    auto above = highBack.count() - from.count();
+    if (below < above) { return low; }
+    if (above < below) { return high; }
+    return low.count() % 2 == 0 ? low : high;
+}
+template <typename D>
+D abs(const D& value) { return value.count() < 0 ? -value : value; }
+
+template <typename Clock, typename Duration = typename Clock::duration>
+class time_point {
+public:
+    typedef Clock clock;
+    typedef Duration duration;
+
+    time_point() : since_() {}
+    time_point(const Duration& since) : since_(since) {}
+    template <typename T>
+    time_point(const T& other) : since_(other.time_since_epoch()) {}
+    Duration time_since_epoch() const { return since_; }
+
+    time_point operator+(const Duration& step) const { return time_point(since_ + step); }
+    time_point operator-(const Duration& step) const { return time_point(since_ - step); }
+    Duration operator-(const time_point& other) const { return since_ - other.since_; }
+    time_point& operator+=(const Duration& step) {
+        since_ += step;
+        return *this;
+    }
+    time_point& operator-=(const Duration& step) {
+        since_ -= step;
+        return *this;
+    }
+    bool operator==(const time_point& other) const { return since_ == other.since_; }
+    bool operator!=(const time_point& other) const { return since_ != other.since_; }
+    bool operator<(const time_point& other) const { return since_ < other.since_; }
+    bool operator>(const time_point& other) const { return since_ > other.since_; }
+    bool operator<=(const time_point& other) const { return since_ <= other.since_; }
+    bool operator>=(const time_point& other) const { return since_ >= other.since_; }
+    static time_point min() {
+        Duration zero;
+        return time_point(zero.min());
+    }
+    static time_point max() {
+        Duration zero;
+        return time_point(zero.max());
+    }
+
+private:
+    Duration since_;
+};
+
+template <typename To, typename T>
+To time_point_cast(const T& from) {
+    To result(duration_cast<typename To::duration>(from.time_since_epoch()));
+    return result;
+}
+
+inline long karc_clock_nanoseconds(int clock) {
+    struct timespec now;
+    clock_gettime(clock, &now);
+    return now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+struct steady_clock {
+    typedef nanoseconds duration;
+    typedef long rep;
+    typedef nano period;
+    typedef time_point<steady_clock, nanoseconds> time_point;
+    static const bool is_steady = true;
+    static time_point<steady_clock, nanoseconds> now() {
+        return time_point<steady_clock, nanoseconds>(nanoseconds(karc_clock_nanoseconds(CLOCK_MONOTONIC)));
+    }
+    int unused;
+};
+struct system_clock {
+    typedef nanoseconds duration;
+    typedef long rep;
+    typedef nano period;
+    typedef time_point<system_clock, nanoseconds> time_point;
+    static const bool is_steady = false;
+    static time_point<system_clock, nanoseconds> now() {
+        return time_point<system_clock, nanoseconds>(nanoseconds(karc_clock_nanoseconds(CLOCK_REALTIME)));
+    }
+    static time_t to_time_t(const time_point<system_clock, nanoseconds>& when) { return when.time_since_epoch().count() / 1000000000; }
+    static time_point<system_clock, nanoseconds> from_time_t(time_t seconds) {
+        return time_point<system_clock, nanoseconds>(nanoseconds((long)seconds * 1000000000));
+    }
+    int unused;
+};
+typedef steady_clock high_resolution_clock;
+template <typename D> using sys_time = time_point<system_clock, D>;
+typedef sys_time<seconds> sys_seconds;
+typedef sys_time<days> sys_days;
+
+}
+
+namespace literals {
+namespace chrono_literals {}
+}
+namespace chrono_literals {}
+
+}
+
+inline std::chrono::hours operator""h(unsigned long long count) { return std::chrono::hours((long)count); }
+inline std::chrono::minutes operator""min(unsigned long long count) { return std::chrono::minutes((long)count); }
+inline std::chrono::seconds operator""s(unsigned long long count) { return std::chrono::seconds((long)count); }
+inline std::chrono::milliseconds operator""ms(unsigned long long count) { return std::chrono::milliseconds((long)count); }
+inline std::chrono::microseconds operator""us(unsigned long long count) { return std::chrono::microseconds((long)count); }
+inline std::chrono::nanoseconds operator""ns(unsigned long long count) { return std::chrono::nanoseconds((long)count); }
+inline std::chrono::duration<double, std::ratio<3600>> operator""h(long double count) { return std::chrono::duration<double, std::ratio<3600>>((double)count); }
+inline std::chrono::duration<double, std::ratio<60>> operator""min(long double count) { return std::chrono::duration<double, std::ratio<60>>((double)count); }
+inline std::chrono::duration<double> operator""s(long double count) { return std::chrono::duration<double>((double)count); }
+inline std::chrono::duration<double, std::milli> operator""ms(long double count) { return std::chrono::duration<double, std::milli>((double)count); }
+
+#endif

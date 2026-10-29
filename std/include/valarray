@@ -1,0 +1,62 @@
+// <valarray>: std::valarray, element-wise arithmetic over a vector.
+#ifndef KARC_STD_VALARRAY
+#define KARC_STD_VALARRAY
+
+#include <cstddef>
+#include <vector>
+#include <initializer_list>
+#include <cmath>
+
+namespace std {
+
+template <typename T>
+class valarray {
+public:
+    valarray() {}
+    valarray(size_t count) : items_(count) {}
+    valarray(const T& value, size_t count) : items_(count, value) {}
+    valarray(initializer_list<T> list) : items_(list) {}
+    size_t size() const { return items_.size(); }
+    T& operator[](size_t index) { return items_[index]; }
+    T sum() const {
+        T total = T();
+        for (size_t i = 0; i < items_.size(); i++) { total = total + items_[i]; }
+        return total;
+    }
+    T min() const {
+        T best = items_[0];
+        for (size_t i = 1; i < items_.size(); i++) { if (items_[i] < best) { best = items_[i]; } }
+        return best;
+    }
+    T max() const {
+        T best = items_[0];
+        for (size_t i = 1; i < items_.size(); i++) { if (best < items_[i]) { best = items_[i]; } }
+        return best;
+    }
+    valarray operator+(const valarray& other) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] + other.items_[i]; } return r; }
+    valarray operator-(const valarray& other) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] - other.items_[i]; } return r; }
+    valarray operator*(const valarray& other) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] * other.items_[i]; } return r; }
+    valarray operator/(const valarray& other) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] / other.items_[i]; } return r; }
+    valarray operator*(const T& factor) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] * factor; } return r; }
+    valarray operator+(const T& addend) const { valarray r(*this); for (size_t i = 0; i < r.size(); i++) { r.items_[i] = r.items_[i] + addend; } return r; }
+    T* begin() { return items_.begin(); }
+    T* end() { return items_.end(); }
+
+private:
+    vector<T> items_;
+};
+
+template <typename T> valarray<T> sqrt(const valarray<T>& values) {
+    valarray<T> r(values);
+    for (size_t i = 0; i < r.size(); i++) { r[i] = sqrt(r[i]); }
+    return r;
+}
+template <typename T> valarray<T> abs(const valarray<T>& values) {
+    valarray<T> r(values);
+    for (size_t i = 0; i < r.size(); i++) { if (r[i] < 0) { r[i] = 0 - r[i]; } }
+    return r;
+}
+
+}
+
+#endif

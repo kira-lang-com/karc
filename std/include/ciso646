@@ -1,0 +1,5 @@
+// <ciso646>: nothing; `and`, `or` and the other alternative tokens are
+// keywords in C++.
+#ifndef KARC_STD_CISO646
+#define KARC_STD_CISO646
+#endif

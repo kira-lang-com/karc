@@ -1,0 +1,273 @@
+// Braced lists as arguments. The parser gives `{a, b}` in an expression the
+// call `@braced`; a call rewrites it for the parameter it initializes: a
+// `std::initializer_list<E>` becomes `@list::initializer_list__E`, a class
+// `T{a, b}`, and a scalar its one element.
+
+function isBracedCall(state: Lowerer, id: ExprId) -> Bool {
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Call(call) -> return !hasExpr(call.receiver) && call.name == "@braced"
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Name -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+function bracedPayloadArguments(expr: Expr) -> [ExprId] {
+    match expr.kind {
+        Call(call) -> return call.arguments
+        NumberLit -> return []
+        FloatLit -> return []
+        StringLit -> return []
+        Name -> return []
+        Neg -> return []
+        Positive -> return []
+        Not -> return []
+        BitNot -> return []
+        AddrOf -> return []
+        Deref -> return []
+        Sizeof -> return []
+        Cast -> return []
+        Field -> return []
+        Index -> return []
+        PreStep -> return []
+        PostStep -> return []
+        Binary -> return []
+        Ternary -> return []
+        New -> return []
+        Delete -> return []
+    }
+}
+function addLoweredExpr(state: borrow mut Lowerer, e: Expr) -> ExprId {
+    state.tree.expressions.append(e)
+    return ExprId { value = state.tree.expressions.count - 1 }
+}
+function bracedArguments(state: borrow mut Lowerer, fn: CppFunction, arguments: [ExprId]) -> [ExprId] {
+    var result: [ExprId] = []
+    for i in 0..arguments.count {
+        var argument = arguments[i]
+        if i < fn.parameters.count && isBracedCall(state, argument) {
+            let e = state.tree.expressions[argument.value]
+            let wanted = parameterClassOf(fn.parameters[i])
+            if isInitializerList(wanted) {
+                argument = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = joinText(["@list::", nominalName(wanted)]), arguments = bracedPayloadArguments(e), explicitArguments = 0, awaitTransform = false }), span = e.span, nameSpan = e.nameSpan })
+            } else if isClassType(wanted) {
+                // `f({5, 10})` for a `const vector<int>&`: its
+                // initializer-list constructor when it has one.
+                var arguments = bracedPayloadArguments(e)
+                let listType = listConstructorType(state, wanted)
+                if listType != "" {
+                    let list = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = joinText(["@list::", nominalName(listType)]), arguments = bracedPayloadArguments(e), explicitArguments = 0, awaitTransform = false }), span = e.span, nameSpan = e.nameSpan })
+                    arguments = [list]
+                }
+                argument = addLoweredExpr(state, Expr { kind = .Call(CallExpression { receiver = noExpr(), name = nominalName(wanted), arguments = arguments, explicitArguments = 0, awaitTransform = false }), span = e.span, nameSpan = e.nameSpan })
+            }
+        }
+        result.append(argument)
+    }
+    return result
+}
+// The initializer_list type a constructor of class `ty` takes alone, or "".
+function listConstructorType(state: Lowerer, ty: String) -> String {
+    for fn in state.tree.functions {
+        if unqualifiedName(fn.name) == constructorName(ty) && methodOwnerType(state.tree, fn.name) == ty &&
+            fn.parameters.count == 1 && isInitializerList(parameterClassOf(fn.parameters[0])) {
+            return parameterClassOf(fn.parameters[0])
+        }
+    }
+    return ""
+}
+// The call's arguments followed by the defaults of the parameters it
+// omits, evaluated where the call is; a bare name in a member function's
+// default is looked up in its class first.
+function withDefaults(state: borrow mut Lowerer, fn: CppFunction, arguments: [ExprId]) -> [ExprId] {
+    var result = arguments
+    var i = arguments.count
+    while i < fn.parameters.count && hasExpr(fallbackFor(state, fn, i)) {
+        var fallback = fallbackFor(state, fn, i)
+        let e = state.tree.expressions[fallback.value]
+        let owner = methodOwnerType(state.tree, fn.name)
+        match e.kind {
+            Name(named) -> {
+                if !hasScope(named.name) && owner != "" {
+                    let member = joinText([nominalName(owner), "::", named.name])
+                    for g in state.tree.globals {
+                        if g.name == member || qualifiedSuffix(g.name, member) {
+                            fallback = addLoweredExpr(state, Expr { kind = .Name(NameExpression { name = member, explicitArguments = 0, valueUse = true }), span = e.span, nameSpan = e.nameSpan })
+                        }
+                    }
+                }
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Call -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+        result.append(fallback)
+        i = i + 1
+    }
+    return result
+}
+// `@braced` left as is: its one element, or zero; `@list::L`: an
+// initializer_list temporary over a stack array of the elements.
+function emitBraced(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    if call.name == "@braced" {
+        if call.arguments.count > 0 { return emitExpression(state, call.arguments[0]) }
+        return zeroValue(state)
+    }
+    let listType = joinText(["%", utf8Slice(call.name, 7, utf8Count(call.name))])
+    let list = emitInitializerList(state, listType, call.arguments, span)
+    return Value { reference = list, boolean = false, wide = true, pointer = joinText(["*[0 x ", listType, "]"]), unsigned = false, floating = false }
+}
+// A `std::initializer_list` of type `listType` over `arguments`, as a
+// pointer to a stack temporary.
+function emitInitializerList(state: borrow mut Lowerer, listType: String, arguments: [ExprId], span: Span) -> KirValue {
+    let record = structIndex(state, nominalName(listType))
+    let element = elementOfPointer(state.tree.structs[record].fields[0].declType)
+    var count = arguments.count
+    if count < 1 { count = 1 }
+    let arrayType = joinText(["[", decimalText(count), " x ", element, "]"])
+    let storage = declare(state, joinText(["__karc_list_", decimalText(state.slots)]), arrayType, element, span)
+    zeroAggregate(state, state.slotsData[storage].address, arrayType)
+    for i in 0..arguments.count {
+        let address = kElemAddr(state, state.slotsData[storage].address, kConstInt(state, "i64", i), element)
+        if isClassType(element) {
+            // `{{k, v}, ...}`: each inner list constructs one element.
+            var elementArguments: [ExprId] = [arguments[i]]
+            let target = slotPointer(state, address, element)
+            if isBracedCall(state, arguments[i]) {
+                // An inner list is the element's own list first: a
+                // vector<vector<int>> element {3, 1} holds 3 and 1.
+                elementArguments = bracedPayloadArguments(state.tree.expressions[arguments[i].value])
+                if !emitListConstruct(state, target, element, elementArguments) { emitConstruct(state, target, element, elementArguments) }
+            } else {
+                emitConstruct(state, target, element, elementArguments)
+            }
+        } else {
+            kStore(state, coerceRef(state, emitExpression(state, arguments[i]), element), address)
+        }
+    }
+    let list = declare(state, joinText(["__karc_list_", decimalText(state.slots)]), listType, "", span)
+    zeroAggregate(state, state.slotsData[list].address, listType)
+    let first = slotPointer(state, state.slotsData[storage].address, element)
+    kStore(state, kBitcast(state, first, state.tree.structs[record].fields[0].declType), kFieldAddr(state, state.slotsData[list].address, 0, state.tree.structs[record].fields[0].declType))
+    kStore(state, kConstInt(state, state.tree.structs[record].fields[1].declType, arguments.count), kFieldAddr(state, state.slotsData[list].address, 1, state.tree.structs[record].fields[1].declType))
+    return slotPointer(state, state.slotsData[list].address, listType)
+}
+// Parameter `index`'s default: on this declaration, or on another one of the
+// same function (defaults are usually on the prototype).
+function fallbackFor(state: Lowerer, fn: CppFunction, index: Int) -> ExprId {
+    if hasExpr(fn.parameters[index].fallback) { return fn.parameters[index].fallback }
+    for other in state.tree.functions {
+        if other.name == fn.name && other.parameters.count == fn.parameters.count && hasExpr(other.parameters[index].fallback) {
+            return other.parameters[index].fallback
+        }
+    }
+    return noExpr()
+}
+// Stores a braced list or string literal into the array at `address`;
+// elements it does not name stay zero.
+function emitArrayInit(state: borrow mut Lowerer, address: KirAddress, arrayType: String, id: ExprId) {
+    let element = arrayElementType(arrayType)
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        StringLit(string) -> {
+            let bytes = literalUnits(state.tree.strings[string.index], string.prefix)
+            for i in 0..bytes.count {
+                kStore(state, kConstInt(state, element, bytes[i]), kElemAddr(state, address, kConstInt(state, "i64", i), element))
+            }
+        }
+        Call(call) -> {
+            if call.name != "@braced" { return }
+            for i in 0..call.arguments.count {
+                let argument = call.arguments[i]
+                let slot = kElemAddr(state, address, kConstInt(state, "i64", i), element)
+                let item = state.tree.expressions[argument.value]
+                if isArrayType(element) {
+                    emitArrayInit(state, slot, element, argument)
+                } else if isClassType(element) {
+                    var arguments: [ExprId] = [argument]
+                    match item.kind {
+                        Call(inner) -> {
+                            if inner.name == "@braced" { arguments = inner.arguments }
+                        }
+                        NumberLit -> {}
+                        FloatLit -> {}
+                        StringLit -> {}
+                        Name -> {}
+                        Neg -> {}
+                        Positive -> {}
+                        Not -> {}
+                        BitNot -> {}
+                        AddrOf -> {}
+                        Deref -> {}
+                        Sizeof -> {}
+                        Cast -> {}
+                        Field -> {}
+                        Index -> {}
+                        PreStep -> {}
+                        PostStep -> {}
+                        Binary -> {}
+                        Ternary -> {}
+                        New -> {}
+                        Delete -> {}
+                    }
+                    emitConstruct(state, slotPointer(state, slot, element), element, arguments)
+                } else {
+                    kStore(state, coerceRef(state, emitExpression(state, argument), element), slot)
+                }
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+}

@@ -1,0 +1,178 @@
+// <string_view>: std::string_view, a pointer and a length into characters
+// owned elsewhere.
+#ifndef KARC_STD_STRING_VIEW
+#define KARC_STD_STRING_VIEW
+
+#include <cstddef>
+#include <cstring>
+#include <string>
+#include <exception>
+#include <iterator>
+
+namespace std {
+
+class string_view {
+public:
+    typedef char value_type;
+    typedef const char* iterator;
+    typedef const char* const_iterator;
+    typedef size_t size_type;
+    static const size_t npos = -1;
+
+    string_view() : text_(""), size_(0) {}
+    string_view(const char* text) : text_(text), size_(strlen(text)) {}
+    string_view(const char* text, size_t count) : text_(text), size_(count) {}
+    string_view(const char* first, const char* last) : text_(first), size_(last - first) {}
+    string_view(const string& text) : text_(text.c_str()), size_(text.size()) {}
+
+    size_t size() const { return size_; }
+    size_t length() const { return size_; }
+    size_t max_size() const { return 1152921504606846975ul; }
+    bool empty() const { return size_ == 0; }
+    const char* data() const { return text_; }
+    char operator[](size_t index) const { return text_[index]; }
+    char at(size_t index) const {
+        if (index >= size_) { karc_throw_out_of_range("string_view::at"); }
+        return text_[index];
+    }
+    char front() const { return text_[0]; }
+    char back() const { return text_[size_ - 1]; }
+    const char* begin() const { return text_; }
+    const char* end() const { return text_ + size_; }
+    const char* cbegin() const { return text_; }
+    const char* cend() const { return text_ + size_; }
+    reverse_iterator<const char*> rbegin() const { return reverse_iterator<const char*>(text_ + size_); }
+    reverse_iterator<const char*> rend() const { return reverse_iterator<const char*>(text_); }
+
+    string_view substr(size_t position, size_t count = npos) const {
+        if (position > size_) { karc_throw_out_of_range("string_view::substr"); }
+        if (count == npos || position + count > size_) { count = size_ - position; }
+        return string_view(text_ + position, count);
+    }
+    void remove_prefix(size_t count) {
+        text_ = text_ + count;
+        size_ = size_ - count;
+    }
+    void remove_suffix(size_t count) { size_ = size_ - count; }
+    void swap(string_view& other) {
+        string_view held = *this;
+        *this = other;
+        other = held;
+    }
+    size_t copy(char* out, size_t count, size_t position = 0) const {
+        if (position > size_) { karc_throw_out_of_range("string_view::copy"); }
+        if (count > size_ - position) { count = size_ - position; }
+        memcpy(out, text_ + position, count);
+        return count;
+    }
+
+    size_t find(string_view needle, size_t from = 0) const {
+        if (needle.size_ > size_) { return npos; }
+        for (size_t i = from; i + needle.size_ <= size_; i++) {
+            if (memcmp(text_ + i, needle.text_, needle.size_) == 0) { return i; }
+        }
+        return npos;
+    }
+    size_t find(char c, size_t from = 0) const {
+        for (size_t i = from; i < size_; i++) {
+            if (text_[i] == c) { return i; }
+        }
+        return npos;
+    }
+    size_t find(const char* needle, size_t from = 0) const { return find(string_view(needle), from); }
+    size_t rfind(string_view needle, size_t from = npos) const {
+        if (needle.size_ > size_) { return npos; }
+        size_t i = size_ - needle.size_;
+        if (from < i) { i = from; }
+        while (true) {
+            if (memcmp(text_ + i, needle.text_, needle.size_) == 0) { return i; }
+            if (i == 0) { return npos; }
+            i--;
+        }
+    }
+    size_t rfind(char c, size_t from = npos) const { return rfind(string_view(&c, 1), from); }
+    size_t rfind(const char* needle, size_t from = npos) const { return rfind(string_view(needle), from); }
+    size_t find_first_of(string_view set, size_t from = 0) const {
+        for (size_t i = from; i < size_; i++) {
+            if (set.find(text_[i]) != npos) { return i; }
+        }
+        return npos;
+    }
+    size_t find_first_of(char c, size_t from = 0) const { return find(c, from); }
+    size_t find_first_of(const char* set, size_t from = 0) const { return find_first_of(string_view(set), from); }
+    size_t find_last_of(string_view set, size_t from = npos) const {
+        if (size_ == 0) { return npos; }
+        size_t i = size_ - 1;
+        if (from < i) { i = from; }
+        while (true) {
+            if (set.find(text_[i]) != npos) { return i; }
+            if (i == 0) { return npos; }
+            i--;
+        }
+    }
+    size_t find_last_of(char c, size_t from = npos) const { return rfind(c, from); }
+    size_t find_last_of(const char* set, size_t from = npos) const { return find_last_of(string_view(set), from); }
+    size_t find_first_not_of(string_view set, size_t from = 0) const {
+        for (size_t i = from; i < size_; i++) {
+            if (set.find(text_[i]) == npos) { return i; }
+        }
+        return npos;
+    }
+    size_t find_first_not_of(char c, size_t from = 0) const { return find_first_not_of(string_view(&c, 1), from); }
+    size_t find_first_not_of(const char* set, size_t from = 0) const { return find_first_not_of(string_view(set), from); }
+    size_t find_last_not_of(string_view set, size_t from = npos) const {
+        if (size_ == 0) { return npos; }
+        size_t i = size_ - 1;
+        if (from < i) { i = from; }
+        while (true) {
+            if (set.find(text_[i]) == npos) { return i; }
+            if (i == 0) { return npos; }
+            i--;
+        }
+    }
+    size_t find_last_not_of(char c, size_t from = npos) const { return find_last_not_of(string_view(&c, 1), from); }
+    size_t find_last_not_of(const char* set, size_t from = npos) const { return find_last_not_of(string_view(set), from); }
+
+    bool starts_with(string_view prefix) const { return prefix.size_ <= size_ && memcmp(text_, prefix.text_, prefix.size_) == 0; }
+    bool starts_with(char c) const { return size_ > 0 && text_[0] == c; }
+    bool starts_with(const char* prefix) const { return starts_with(string_view(prefix)); }
+    bool ends_with(string_view suffix) const {
+        return suffix.size_ <= size_ && memcmp(text_ + size_ - suffix.size_, suffix.text_, suffix.size_) == 0;
+    }
+    bool ends_with(char c) const { return size_ > 0 && text_[size_ - 1] == c; }
+    bool ends_with(const char* suffix) const { return ends_with(string_view(suffix)); }
+    bool contains(string_view needle) const { return find(needle) != npos; }
+    bool contains(char c) const { return find(c) != npos; }
+    bool contains(const char* needle) const { return find(string_view(needle)) != npos; }
+
+    int compare(string_view other) const {
+        size_t common = size_;
+        if (other.size_ < common) { common = other.size_; }
+        int order = memcmp(text_, other.text_, common);
+        if (order != 0) { return order < 0 ? -1 : 1; }
+        if (size_ < other.size_) { return -1; }
+        if (size_ > other.size_) { return 1; }
+        return 0;
+    }
+    int compare(size_t position, size_t count, string_view other) const { return substr(position, count).compare(other); }
+    int compare(const char* other) const { return compare(string_view(other)); }
+    bool operator==(string_view other) const { return compare(other) == 0; }
+    bool operator!=(string_view other) const { return compare(other) != 0; }
+    bool operator<(string_view other) const { return compare(other) < 0; }
+    bool operator>(string_view other) const { return compare(other) > 0; }
+    bool operator<=(string_view other) const { return compare(other) <= 0; }
+    bool operator>=(string_view other) const { return compare(other) >= 0; }
+    // `string(view)`: KArc's string takes a view through this conversion.
+    operator string() const { return string(text_, size_); }
+    string str() const { return string(text_, size_); }
+
+private:
+    const char* text_;
+    size_t size_;
+};
+
+}
+
+inline std::string_view operator""sv(const char* text, size_t length) { return std::string_view(text, length); }
+
+#endif

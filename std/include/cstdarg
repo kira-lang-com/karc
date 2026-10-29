@@ -1,0 +1,15 @@
+// <cstdarg>. A KArc variadic function receives its extra arguments as 64-bit
+// words packed by the caller; a va_list walks them.
+#ifndef KARC_STD_CSTDARG
+#define KARC_STD_CSTDARG
+
+typedef char* va_list;
+
+char* karc_va_next(char** list);
+
+#define va_start(list, last) list = __builtin_klf_va_start()
+#define va_arg(list, T) (*(T*)karc_va_next(&list))
+#define va_copy(destination, source) destination = source
+#define va_end(list)
+
+#endif

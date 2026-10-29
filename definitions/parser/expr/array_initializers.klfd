@@ -1,0 +1,29 @@
+function inferredArraySize(tree: CppTree, init: ExprId) -> Int {
+    let e = tree.expressions[init.value]
+    match e.kind {
+        Call(call) -> {
+            if call.name == "@braced" { return call.arguments.count }
+        }
+        StringLit(string) -> { return literalUnits(tree.strings[string.index], string.prefix).count + 1 }
+        NumberLit -> {}
+        FloatLit -> {}
+        Name -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    return 0
+}

@@ -1,0 +1,272 @@
+// Globals. An initializer that is an integer constant goes into the global's
+// bytes; any other (a class, a floating-point or pointer value, a non-constant
+// expression, an array of such) becomes a `GlobalInit` statement in the
+// unit's `__karc_global_init_N`, a KIR initializer that runs before `main`.
+
+struct ParsedGlobalInitializer {
+    let arraySize: Int
+    let initValue: Int
+    let hasInit: Bool
+    let initList: [Int]
+    let dynamic: ExprId
+}
+
+function parseGlobalInitializer(p: borrow mut Parser, declType: String, nameSpan: Span, start: Int, isExtern: Bool) -> ParsedGlobalInitializer {
+    var arraySize = 0
+    var hasArray = false
+    if isArrayType(declType) { arraySize = arrayLength(declType); hasArray = true }
+    var initValue = 0
+    var hasInit = false
+    var initList: [Int] = []
+    var dynamic = noExpr()
+    if peekKind(p) == .LBracket {
+        hasArray = true
+        consume(p)
+        if peekKind(p) != .RBracket { arraySize = constantExpression(p, expression(p, 0)) }
+        expect(p, .RBracket)
+    }
+    let isClass = isClassType(declType) && !hasArray
+    if peekKind(p) == .LParen || peekKind(p) == .LBrace {
+        let constructed = constructorArguments(p, start)
+        if isClass {
+            dynamic = constructed
+        } else {
+            let e = p.tree.expressions[constructed.value]
+            match e.kind {
+                Call(call) -> {
+                    if call.arguments.count > 0 { dynamic = call.arguments[0] }
+                }
+                NumberLit -> {}
+                FloatLit -> {}
+                StringLit -> {}
+                Name -> {}
+                Neg -> {}
+                Positive -> {}
+                Not -> {}
+                BitNot -> {}
+                AddrOf -> {}
+                Deref -> {}
+                Sizeof -> {}
+                Cast -> {}
+                Field -> {}
+                Index -> {}
+                PreStep -> {}
+                PostStep -> {}
+                Binary -> {}
+                Ternary -> {}
+                New -> {}
+                Delete -> {}
+            }
+        }
+    } else if peekKind(p) == .Assign {
+        consume(p)
+        let value = expression(p, 0)
+        let e = p.tree.expressions[value.value]
+        var braced = false
+        var bracedArguments: [ExprId] = []
+        var stringIndex = -1
+        match e.kind {
+            Call(call) -> {
+                if call.name == "@braced" {
+                    braced = true
+                    bracedArguments = call.arguments
+                }
+            }
+            StringLit(string) -> { stringIndex = string.index }
+            NumberLit -> {}
+            FloatLit -> {}
+            Name -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+        if hasArray && braced && constantList(p, bracedArguments) {
+            for element in bracedArguments { initList.append(constantExpression(p, element)) }
+            if arraySize == 0 { arraySize = initList.count }
+        } else if hasArray {
+            if arraySize == 0 && braced { arraySize = bracedArguments.count }
+            if arraySize == 0 && stringIndex >= 0 { arraySize = decodedBytes(p.tree.strings[stringIndex]).count + 1 }
+            dynamic = value
+        } else if isConstant(p, value) && isIntegerSpelling(declType) {
+            initValue = constantExpression(p, value)
+            hasInit = true
+        } else if isClass && braced {
+            dynamic = eCall(p, "@construct{}", bracedArguments, e.span, e.nameSpan, noExpr())
+        } else {
+            dynamic = value
+        }
+    } else if isClass && !isExtern {
+        dynamic = eCall(p, "@construct", [], nameSpan, nameSpan, noExpr())
+    }
+    return ParsedGlobalInitializer {
+        arraySize = arraySize,
+        initValue = initValue,
+        hasInit = hasInit,
+        initList = initList,
+        dynamic = dynamic
+    }
+}
+
+function parseGlobalVariable(p: borrow mut Parser, name: String, nameSpan: Span, declType: String, internal: Bool, start: Int) {
+    let isExtern = p.externNext
+    let initializer = parseGlobalInitializer(p, declType, nameSpan, start, isExtern)
+    var elementType = declType
+    if isArrayType(elementType) { elementType = arrayElementType(elementType) }
+    // `int a = 1, *b;`: more declarators of the same base type.
+    let more = peekKind(p) == .Comma
+    if more { consume(p) } else { expect(p, .Semicolon) }
+    let global = CppGlobal { name = name, nameSpan = nameSpan, declType = elementType, arraySize = initializer.arraySize, initValue = initializer.initValue, hasInit = initializer.hasInit, initList = initializer.initList, internal = internal, span = spanFrom(p, start) }
+    // The definition of a static member the class declared replaces the
+    // declaration.
+    var declared = -1
+    for i in 0..p.tree.globals.count {
+        if p.tree.globals[i].name == name { declared = i }
+    }
+    if declared >= 0 && !isExtern {
+        let previous = p.tree.globals[declared]
+        p.tree.globals[declared] = CppGlobal { name = name, nameSpan = previous.nameSpan, declType = elementType, arraySize = initializer.arraySize, initValue = initializer.initValue, hasInit = initializer.hasInit, initList = initializer.initList, internal = previous.internal, span = previous.span }
+    } else if declared < 0 {
+        p.tree.globals.append(global)
+    }
+    if hasExpr(initializer.dynamic) && !isExtern {
+        p.tree.globalInits.append(addStatement(p, sGlobalInit(name, elementType, initializer.arraySize, initializer.dynamic, nameSpan)))
+    }
+    if more {
+        p.externNext = isExtern
+        parseNamedTopLevel(p, p.declaratorBase, start, internal)
+    }
+}
+// Whether the `(` ahead opens a parameter list rather than constructor
+// arguments: it is empty, or starts with a type.
+function parameterListAhead(p: borrow Parser) -> Bool {
+    if p.position + 1 >= p.tokens.count { return true }
+    let next = p.tokens[p.position + 1].kind
+    if next == .RParen || next == .Ellipsis { return true }
+    var q = p
+    q.position = p.position + 1
+    return startsType(q)
+}
+function isIntegerSpelling(ty: String) -> Bool {
+    match ty {
+        "i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64" -> return true
+        else -> return false
+    }
+}
+function constantList(p: borrow Parser, elements: [ExprId]) -> Bool {
+    for element in elements {
+        if !isConstant(p, element) { return false }
+    }
+    return true
+}
+// Whether `constantExpression` can evaluate `id`.
+function isConstant(p: borrow Parser, id: ExprId) -> Bool {
+    let e = p.tree.expressions[id.value]
+    match e.kind {
+        NumberLit -> return true
+        Neg(operand) -> return isConstant(p, operand)
+        Positive(operand) -> return isConstant(p, operand)
+        BitNot(operand) -> return isConstant(p, operand)
+        Not(operand) -> return isConstant(p, operand)
+        Ternary(ternary) -> return isConstant(p, ternary.condition) && isConstant(p, ternary.thenValue) && isConstant(p, ternary.elseValue)
+        Binary(binary) -> {
+            match binary.op {
+                "+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^", "&&", "||", "==", "!=", "<", ">", "<=", ">=" -> {
+                    return isConstant(p, binary.left) && isConstant(p, binary.right)
+                }
+                else -> return false
+            }
+        }
+        Name(named) -> return namedConstant(p, named.name) >= 0
+        FloatLit -> return false
+        StringLit -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Call -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+// The index of the enum constant or constant-initialized integer global
+// `name` is: an enum constant as its value's position, -1 for none.
+// Whether `name` names enum constant `c`. An unqualified name only names an
+// unqualified constant: `fixed` is not `chars_format::fixed`.
+function enumConstantNamed(c: CppEnumConstant, name: String) -> Bool {
+    if c.name == name { return true }
+    return hasScope(name) && qualifiedNamesMatch(c.name, name)
+}
+// `P::num` with P an alias (a template's type parameter): `Class::num`.
+function staticMemberSpelling(p: borrow Parser, name: String) -> String {
+    if !hasScope(name) { return name }
+    let aliased = typedefAlias(p, scopeOf(name))
+    if isClassType(aliased) { return joinText([nominalName(aliased), "::", unqualifiedName(name)]) }
+    return name
+}
+function namedConstant(p: borrow Parser, spelled: String) -> Int {
+    let name = staticMemberSpelling(p, spelled)
+    for i in 0..p.tree.enumConstants.count {
+        if enumConstantNamed(p.tree.enumConstants[i], name) { return i }
+    }
+    for g in p.tree.globals {
+        if (g.name == name || qualifiedNamesMatch(g.name, name)) && g.hasInit && g.arraySize == 0 { return 0 }
+    }
+    return -1
+}
+// After the unit is parsed: the function running its global initializers.
+// Its name comes from the globals it initializes, so units initializing the
+// same header globals share one and units initializing others each keep
+// their own.
+function addGlobalInitializer(p: borrow mut Parser) {
+    if p.tree.globalInits.count == 0 { return }
+    let first = p.tree.statements[p.tree.globalInits[0].value]
+    var names: [String] = []
+    for id in p.tree.globalInits {
+        let statement = p.tree.statements[id.value]
+        match statement.kind {
+            GlobalInit(init) -> names.append(init.name)
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            Group -> {}
+            DeclGroup -> {}
+            ExprStmt -> {}
+            Return -> {}
+            While -> {}
+            DoWhile -> {}
+            For -> {}
+            If -> {}
+            Switch -> {}
+            Case -> {}
+            Default -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            RangeFor -> {}
+            Try -> {}
+        }
+        names.append(";")
+    }
+    let name = joinText(["__karc_global_init_", decimalText(sourceHash(joinText(names)))])
+    p.tree.functions.append(CppFunction { name = name, nameSpan = first.span, parameters = [], returnType = "unit", body = p.tree.globalInits, isProto = false, internal = true, cLinkage = false, refReturn = false, isConst = false, span = first.span })
+}

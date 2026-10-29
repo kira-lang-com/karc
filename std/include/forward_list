@@ -1,0 +1,262 @@
+// <forward_list>: std::forward_list, a singly linked list. A head node
+// stands before the first element, so before_begin() is an iterator too.
+// Nodes come from the Allocator parameter, as runs of elements.
+#ifndef KARC_STD_FORWARD_LIST
+#define KARC_STD_FORWARD_LIST
+
+#include <cstddef>
+#include <cstdlib>
+#include <new>
+#include <utility>
+#include <initializer_list>
+#include <cstring>
+#include <__allocator>
+
+namespace std {
+
+template <typename T>
+struct forward_list_node {
+    forward_list_node<T>* next;
+    T value;
+};
+
+template <typename T>
+class forward_list_iterator {
+public:
+    forward_list_iterator() : node_(0) {}
+    forward_list_iterator(forward_list_node<T>* node) : node_(node) {}
+    T& operator*() const { return node_->value; }
+    T* operator->() const { return &node_->value; }
+    forward_list_iterator& operator++() {
+        node_ = node_->next;
+        return *this;
+    }
+    forward_list_iterator operator++(int) {
+        forward_list_iterator old(node_);
+        node_ = node_->next;
+        return old;
+    }
+    bool operator==(const forward_list_iterator& other) const { return node_ == other.node_; }
+    bool operator!=(const forward_list_iterator& other) const { return node_ != other.node_; }
+    forward_list_node<T>* node_;
+};
+
+template <typename T>
+struct karc_forward_less {
+    bool operator()(const T& a, const T& b) const { return a < b; }
+    int unused;
+};
+
+template <typename T, typename Allocator = allocator<T>>
+class forward_list {
+public:
+    typedef Allocator allocator_type;
+    typedef T value_type;
+    typedef size_t size_type;
+    typedef forward_list_iterator<T> iterator;
+    typedef forward_list_iterator<T> const_iterator;
+
+    forward_list() : head_(0) { init(); }
+    explicit forward_list(const Allocator& alloc) : alloc_(alloc), head_(0) { init(); }
+    forward_list(initializer_list<T> items) : head_(0) {
+        init();
+        assign(items.begin(), items.end());
+    }
+    template <typename I>
+    forward_list(I first, I last) : head_(0) {
+        init();
+        assign(first, last);
+    }
+    forward_list(const forward_list& other) : alloc_(other.alloc_), head_(0) {
+        init();
+        assign(other.begin(), other.end());
+    }
+    forward_list(forward_list&& other) : head_(0) {
+        init();
+        swap(other);
+    }
+    ~forward_list() {
+        clear();
+        freeNode(head_);
+    }
+    Allocator get_allocator() const { return alloc_; }
+    forward_list& operator=(const forward_list& other) {
+        if (this != &other) { assign(other.begin(), other.end()); }
+        return *this;
+    }
+    template <typename I>
+    void assign(I first, I last) {
+        clear();
+        forward_list_node<T>* tail = head_;
+        for (; first != last; ++first) { tail = linkAfter(tail, *first); }
+    }
+
+    bool empty() const { return head_->next == 0; }
+    size_t max_size() const { return 1152921504606846975ul; }
+    T& front() const { return head_->next->value; }
+    forward_list_iterator<T> before_begin() const { return forward_list_iterator<T>(head_); }
+    forward_list_iterator<T> cbefore_begin() const { return forward_list_iterator<T>(head_); }
+    forward_list_iterator<T> begin() const { return forward_list_iterator<T>(head_->next); }
+    forward_list_iterator<T> end() const { return forward_list_iterator<T>(0); }
+    forward_list_iterator<T> cbegin() const { return begin(); }
+    forward_list_iterator<T> cend() const { return end(); }
+
+    void push_front(const T& value) { linkAfter(head_, value); }
+    template <typename... Args>
+    T& emplace_front(Args&&... args) { return linkAfter(head_, T(std::forward<Args>(args)...))->value; }
+    void pop_front() { unlinkAfter(head_); }
+    forward_list_iterator<T> insert_after(forward_list_iterator<T> position, const T& value) {
+        return forward_list_iterator<T>(linkAfter(position.node_, value));
+    }
+    template <typename... Args>
+    forward_list_iterator<T> emplace_after(forward_list_iterator<T> position, Args&&... args) {
+        return forward_list_iterator<T>(linkAfter(position.node_, T(std::forward<Args>(args)...)));
+    }
+    forward_list_iterator<T> erase_after(forward_list_iterator<T> position) {
+        unlinkAfter(position.node_);
+        return forward_list_iterator<T>(position.node_->next);
+    }
+    forward_list_iterator<T> erase_after(forward_list_iterator<T> position, forward_list_iterator<T> last) {
+        while (position.node_->next != last.node_) { unlinkAfter(position.node_); }
+        return last;
+    }
+    void clear() {
+        while (head_->next != 0) { unlinkAfter(head_); }
+    }
+    void resize(size_t count) { resize(count, T()); }
+    void resize(size_t count, const T& value) {
+        forward_list_node<T>* at = head_;
+        size_t kept = 0;
+        while (at->next != 0 && kept < count) {
+            at = at->next;
+            kept++;
+        }
+        while (at->next != 0) { unlinkAfter(at); }
+        for (; kept < count; kept++) { at = linkAfter(at, value); }
+    }
+    void swap(forward_list& other) {
+        Allocator alloc = alloc_;
+        alloc_ = other.alloc_;
+        other.alloc_ = alloc;
+        forward_list_node<T>* head = head_;
+        head_ = other.head_;
+        other.head_ = head;
+    }
+
+    void remove(const T& value) {
+        forward_list_node<T>* at = head_;
+        while (at->next != 0) {
+            if (at->next->value == value) { unlinkAfter(at); } else { at = at->next; }
+        }
+    }
+    template <typename P>
+    void remove_if(P predicate) {
+        forward_list_node<T>* at = head_;
+        while (at->next != 0) {
+            if (predicate(at->next->value)) { unlinkAfter(at); } else { at = at->next; }
+        }
+    }
+    void unique() {
+        forward_list_node<T>* at = head_->next;
+        while (at != 0 && at->next != 0) {
+            if (at->next->value == at->value) { unlinkAfter(at); } else { at = at->next; }
+        }
+    }
+    void reverse() {
+        forward_list_node<T>* reversed = 0;
+        forward_list_node<T>* at = head_->next;
+        while (at != 0) {
+            forward_list_node<T>* next = at->next;
+            at->next = reversed;
+            reversed = at;
+            at = next;
+        }
+        head_->next = reversed;
+    }
+    // Moves all of `other`'s nodes after `position`.
+    void splice_after(forward_list_iterator<T> position, forward_list& other) {
+        forward_list_node<T>* first = other.head_->next;
+        if (first == 0) { return; }
+        forward_list_node<T>* last = first;
+        while (last->next != 0) { last = last->next; }
+        last->next = position.node_->next;
+        position.node_->next = first;
+        other.head_->next = 0;
+    }
+    // Merges the sorted `other` into this sorted list.
+    template <typename C>
+    void merge(forward_list& other, C less) {
+        forward_list_node<T>* at = head_;
+        forward_list_node<T>* theirs = other.head_->next;
+        other.head_->next = 0;
+        while (theirs != 0) {
+            while (at->next != 0 && !less(theirs->value, at->next->value)) { at = at->next; }
+            forward_list_node<T>* next = theirs->next;
+            theirs->next = at->next;
+            at->next = theirs;
+            at = theirs;
+            theirs = next;
+        }
+    }
+    void merge(forward_list& other) { merge(other, karc_forward_less<T>()); }
+    // A stable merge sort that relinks the nodes.
+    template <typename C>
+    void sort(C less) {
+        forward_list_node<T>* slow = head_->next;
+        if (slow == 0 || slow->next == 0) { return; }
+        forward_list_node<T>* fast = slow->next;
+        while (fast != 0 && fast->next != 0) {
+            slow = slow->next;
+            fast = fast->next->next;
+        }
+        forward_list half;
+        half.head_->next = slow->next;
+        slow->next = 0;
+        sort(less);
+        half.sort(less);
+        merge(half, less);
+    }
+    void sort() { sort(karc_forward_less<T>()); }
+
+    bool operator==(const forward_list& other) const {
+        forward_list_node<T>* mine = head_->next;
+        forward_list_node<T>* theirs = other.head_->next;
+        while (mine != 0 && theirs != 0) {
+            if (!(mine->value == theirs->value)) { return false; }
+            mine = mine->next;
+            theirs = theirs->next;
+        }
+        return mine == 0 && theirs == 0;
+    }
+    bool operator!=(const forward_list& other) const { return !(*this == other); }
+
+private:
+    void init() { head_ = newNode(); }
+    // A node is allocated as enough elements to hold it.
+    static size_t nodeUnits() { return (sizeof(forward_list_node<T>) + sizeof(T) - 1) / sizeof(T); }
+    forward_list_node<T>* newNode() {
+        T* raw = alloc_.allocate(nodeUnits());
+        memset(raw, 0, nodeUnits() * sizeof(T));
+        return (forward_list_node<T>*)raw;
+    }
+    void freeNode(forward_list_node<T>* node) { alloc_.deallocate((T*)node, nodeUnits()); }
+    forward_list_node<T>* linkAfter(forward_list_node<T>* at, const T& value) {
+        forward_list_node<T>* added = newNode();
+        new (&added->value) T(value);
+        added->next = at->next;
+        at->next = added;
+        return added;
+    }
+    void unlinkAfter(forward_list_node<T>* at) {
+        forward_list_node<T>* doomed = at->next;
+        at->next = doomed->next;
+        doomed->value.~T();
+        freeNode(doomed);
+    }
+    Allocator alloc_;
+    forward_list_node<T>* head_;
+};
+
+}
+
+#endif

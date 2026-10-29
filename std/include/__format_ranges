@@ -1,0 +1,124 @@
+// Part of <format>: the C++23 formatting of ranges and pairs. A sequence
+// is `[a, b]`, a set `{a, b}`, a map `{k: v}` and a pair `(a, b)`; strings
+// and characters inside them are quoted.
+#ifndef KARC_STD_FORMAT_RANGES
+#define KARC_STD_FORMAT_RANGES
+
+#include <vector>
+#include <deque>
+#include <list>
+#include <set>
+#include <map>
+#include <array>
+#include <utility>
+
+namespace std {
+
+// One element as it appears inside a range: quoted if text.
+template <typename T>
+string karc_format_element(const T& value) {
+    karc_format_arg items[] = {karc_arg(value)};
+    string text = karc_vformat("{}", items, 1);
+    if (items[0].kind_ == 6) { return string("\"") + text + "\""; }
+    if (items[0].kind_ == 4) { return string("'") + text + "'"; }
+    return text;
+}
+template <typename I>
+string karc_format_sequence(I first, I last, const char* open, const char* close) {
+    string text(open);
+    bool more = false;
+    for (; first != last; ++first) {
+        if (more) { text += ", "; }
+        text += karc_format_element(*first);
+        more = true;
+    }
+    text += close;
+    return text;
+}
+template <typename I>
+string karc_format_mapping(I first, I last) {
+    string text("{");
+    bool more = false;
+    for (; first != last; ++first) {
+        if (more) { text += ", "; }
+        text += karc_format_element((*first).first);
+        text += ": ";
+        text += karc_format_element((*first).second);
+        more = true;
+    }
+    text += "}";
+    return text;
+}
+inline back_insert_iterator<string> karc_format_write(const string& text, format_context& context) {
+    back_insert_iterator<string> out = context.out();
+    for (size_t i = 0; i < text.size(); i++) {
+        *out = text[i];
+        ++out;
+    }
+    return out;
+}
+
+template <typename T, typename A>
+struct formatter<vector<T, A>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const vector<T, A>& value, format_context& context) const {
+        vector<T, A>& items = (vector<T, A>&)value;
+        return karc_format_write(karc_format_sequence(items.begin(), items.end(), "[", "]"), context);
+    }
+    int unused;
+};
+template <typename T, typename A>
+struct formatter<deque<T, A>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const deque<T, A>& value, format_context& context) const {
+        return karc_format_write(karc_format_sequence(value.begin(), value.end(), "[", "]"), context);
+    }
+    int unused;
+};
+template <typename T, typename A>
+struct formatter<list<T, A>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const list<T, A>& value, format_context& context) const {
+        list<T, A>& items = (list<T, A>&)value;
+        return karc_format_write(karc_format_sequence(items.begin(), items.end(), "[", "]"), context);
+    }
+    int unused;
+};
+template <typename T, size_t N>
+struct formatter<array<T, N>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const array<T, N>& value, format_context& context) const {
+        array<T, N>& items = (array<T, N>&)value;
+        return karc_format_write(karc_format_sequence(items.begin(), items.end(), "[", "]"), context);
+    }
+    int unused;
+};
+template <typename T, typename C, typename A>
+struct formatter<set<T, C, A>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const set<T, C, A>& value, format_context& context) const {
+        return karc_format_write(karc_format_sequence(value.begin(), value.end(), "{", "}"), context);
+    }
+    int unused;
+};
+template <typename K, typename V, typename C, typename A>
+struct formatter<map<K, V, C, A>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const map<K, V, C, A>& value, format_context& context) const {
+        return karc_format_write(karc_format_mapping(value.begin(), value.end()), context);
+    }
+    int unused;
+};
+template <typename A, typename B>
+struct formatter<pair<A, B>> {
+    const char* parse(format_parse_context& context) { return context.begin(); }
+    back_insert_iterator<string> format(const pair<A, B>& value, format_context& context) const {
+        string text = string("(") + karc_format_element(value.first) + ", " + karc_format_element(value.second) + ")";
+        return karc_format_write(text, context);
+    }
+    int unused;
+};
+
+}
+
+#endif

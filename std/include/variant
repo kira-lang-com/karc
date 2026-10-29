@@ -1,0 +1,162 @@
+// <variant>: std::variant over a pack. Every alternative is a member, all of
+// them constructed, and index() says which one holds the value; get<T> and
+// get<N> read it, visit calls a function object with it.
+#ifndef KARC_STD_VARIANT
+#define KARC_STD_VARIANT
+
+#include <cstddef>
+#include <exception>
+#include <string>
+
+namespace std {
+
+class bad_variant_access : public exception {
+public:
+    const char* what() const override { return "bad variant access"; }
+};
+
+struct monostate {
+    bool operator==(const monostate& other) const { return true; }
+    int unused;
+};
+
+template <typename... Ts>
+class variant {
+public:
+    Ts... alternatives;
+
+    variant() : index_(0) {}
+    variant(const char* text) : index_(0) {
+        if (karc_index_of((const char**)0) >= 0) {
+            assign(text);
+        } else {
+            assign(string(text));
+        }
+    }
+    template <typename T>
+    variant(const T& value) : index_(0) { assign(value); }
+    variant& operator=(const char* text) {
+        if (karc_index_of((const char**)0) >= 0) {
+            assign(text);
+        } else {
+            assign(string(text));
+        }
+        return *this;
+    }
+    template <typename T>
+    variant& operator=(const T& value) {
+        assign(value);
+        return *this;
+    }
+    size_t index() const { return index_; }
+    bool valueless_by_exception() const { return false; }
+
+    // The position of the alternative of type T, -1 for none; `tag` only
+    // carries the type.
+    template <typename T>
+    int karc_index_of(T* tag) const {
+        int position = 0;
+        int found = -1;
+        karc_match(__is_same(T, Ts), position++, found)...;
+        return found;
+    }
+    // The address of alternative `k`.
+    void* karc_slot(int k) {
+        int position = 0;
+        void* found = 0;
+        found = karc_pick((void*)&alternatives, position++, k, found)...;
+        return found;
+    }
+    template <typename T>
+    void assign(const T& value) {
+        int k = karc_index_of((T*)0);
+        if (k < 0) { karc_throw_bad_variant_access(); }
+        index_ = k;
+        *(T*)karc_slot(k) = value;
+    }
+    template <typename F>
+    void karc_visit(F& action) {
+        int position = 0;
+        karc_visit_one(action, alternatives, position++)...;
+    }
+    template <typename F>
+    auto karc_visit_auto(F& action) { return karc_visit_at(action, (int)index_, alternatives...); }
+    template <typename R, typename F>
+    void karc_visit_into(F& action, R& result) {
+        int position = 0;
+        karc_visit_one_into(action, alternatives, position++, result)...;
+    }
+    bool operator==(const variant& other) const {
+        if (index_ != other.index_) { return false; }
+        int position = 0;
+        bool same = true;
+        karc_equal_one(alternatives, other.alternatives, position++, same)...;
+        return same;
+    }
+    bool operator!=(const variant& other) const { return !(*this == other); }
+
+private:
+    void karc_match(bool matches, int position, int& found) const {
+        if (matches && found < 0) { found = position; }
+    }
+    void* karc_pick(void* address, int position, int wanted, void* found) {
+        if (position == wanted) { return address; }
+        return found;
+    }
+    template <typename F, typename A>
+    void karc_visit_one(F& action, A& alternative, int position) {
+        if (position == (int)index_) { action(alternative); }
+    }
+    template <typename F, typename A, typename R>
+    void karc_visit_one_into(F& action, A& alternative, int position, R& result) {
+        if (position == (int)index_) { result = action(alternative); }
+    }
+    template <typename A>
+    void karc_equal_one(const A& mine, const A& theirs, int position, bool& same) const {
+        if (position == (int)index_ && !(mine == theirs)) { same = false; }
+    }
+
+    size_t index_;
+};
+
+template <typename T, typename... Ts>
+bool holds_alternative(const variant<Ts...>& value) { return value.karc_index_of((T*)0) == (int)value.index(); }
+
+template <typename T, typename... Ts>
+T& get(variant<Ts...>& value) {
+    int k = value.karc_index_of((T*)0);
+    if (k != (int)value.index()) { karc_throw_bad_variant_access(); }
+    return *(T*)value.karc_slot(k);
+}
+
+template <typename T, typename... Ts>
+T* get_if(variant<Ts...>* value) {
+    int k = value->karc_index_of((T*)0);
+    if (k != (int)value->index()) { return 0; }
+    return (T*)value->karc_slot(k);
+}
+
+// The action applied to the `position`-th of the alternatives.
+template <typename F, typename A>
+auto karc_visit_at(F& action, int position, A& first) { return action(first); }
+template <typename F, typename A, typename B, typename... Rest>
+auto karc_visit_at(F& action, int position, A& first, B& second, Rest&... rest) {
+    if (position == 0) { return action(first); }
+    return karc_visit_at(action, position - 1, second, rest...);
+}
+
+// visit(f, v) calls f with the alternative v holds and returns what f
+// returns; visit<R>(f, v) converts that to R.
+template <typename F, typename V>
+auto visit(F action, V& value) { return value.karc_visit_auto(action); }
+
+template <typename R, typename F, typename V>
+R visit(F action, V& value) {
+    R result = R();
+    value.karc_visit_into(action, result);
+    return result;
+}
+
+}
+
+#endif

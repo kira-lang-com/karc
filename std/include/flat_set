@@ -1,0 +1,127 @@
+// <flat_set>: std::flat_set and std::flat_multiset, sorted vectors: lookups
+// are binary searches, iterators are element pointers, and inserting or
+// erasing moves the elements after the position.
+#ifndef KARC_STD_FLAT_SET
+#define KARC_STD_FLAT_SET
+
+#include <cstddef>
+#include <utility>
+#include <vector>
+#include <functional>
+#include <initializer_list>
+
+namespace std {
+
+template <typename T, typename C = less<T>>
+class flat_set {
+public:
+    typedef T key_type;
+    typedef T value_type;
+    typedef T* iterator;
+    typedef T* const_iterator;
+
+    flat_set() {}
+    flat_set(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { insert(*item); }
+    }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    void clear() { items_.clear(); }
+    T* begin() { return items_.begin(); }
+    T* end() { return items_.end(); }
+    T* lower_bound(const T& key) { return items_.begin() + bound(key, false); }
+    T* upper_bound(const T& key) { return items_.begin() + bound(key, true); }
+    T* find(const T& key) {
+        T* found = lower_bound(key);
+        if (found != items_.end() && !less_(key, *found)) { return found; }
+        return items_.end();
+    }
+    size_t count(const T& key) { return find(key) == items_.end() ? 0 : 1; }
+    bool contains(const T& key) { return find(key) != items_.end(); }
+    pair<T*, bool> insert(const T& value) {
+        size_t index = bound(value, false);
+        if (index < items_.size() && !less_(value, items_[index])) { return pair<T*, bool>(items_.begin() + index, false); }
+        items_.insert(items_.begin() + index, value);
+        return pair<T*, bool>(items_.begin() + index, true);
+    }
+    template <typename... Args>
+    pair<T*, bool> emplace(Args&&... args) { return insert(T(std::forward<Args>(args)...)); }
+    T* erase(T* position) { return items_.erase(position); }
+    size_t erase(const T& key) {
+        T* found = find(key);
+        if (found == items_.end()) { return 0; }
+        items_.erase(found);
+        return 1;
+    }
+
+private:
+    size_t bound(const T& key, bool after) {
+        size_t low = 0;
+        size_t high = items_.size();
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            bool before = after ? !less_(key, items_[middle]) : less_(items_[middle], key);
+            if (before) { low = middle + 1; } else { high = middle; }
+        }
+        return low;
+    }
+    vector<T> items_;
+    C less_;
+};
+
+template <typename T, typename C = less<T>>
+class flat_multiset {
+public:
+    typedef T key_type;
+    typedef T value_type;
+    typedef T* iterator;
+
+    flat_multiset() {}
+    flat_multiset(initializer_list<T> items) {
+        for (const T* item = items.begin(); item != items.end(); item++) { insert(*item); }
+    }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.size() == 0; }
+    void clear() { items_.clear(); }
+    T* begin() { return items_.begin(); }
+    T* end() { return items_.end(); }
+    T* lower_bound(const T& key) { return items_.begin() + bound(key, false); }
+    T* upper_bound(const T& key) { return items_.begin() + bound(key, true); }
+    pair<T*, T*> equal_range(const T& key) { return pair<T*, T*>(lower_bound(key), upper_bound(key)); }
+    T* find(const T& key) {
+        T* found = lower_bound(key);
+        if (found != items_.end() && !less_(key, *found)) { return found; }
+        return items_.end();
+    }
+    size_t count(const T& key) { return upper_bound(key) - lower_bound(key); }
+    bool contains(const T& key) { return find(key) != items_.end(); }
+    T* insert(const T& value) {
+        size_t index = bound(value, true);
+        items_.insert(items_.begin() + index, value);
+        return items_.begin() + index;
+    }
+    T* erase(T* position) { return items_.erase(position); }
+    size_t erase(const T& key) {
+        size_t removed = count(key);
+        items_.erase(lower_bound(key), upper_bound(key));
+        return removed;
+    }
+
+private:
+    size_t bound(const T& key, bool after) {
+        size_t low = 0;
+        size_t high = items_.size();
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            bool before = after ? !less_(key, items_[middle]) : less_(items_[middle], key);
+            if (before) { low = middle + 1; } else { high = middle; }
+        }
+        return low;
+    }
+    vector<T> items_;
+    C less_;
+};
+
+}
+
+#endif

@@ -1,0 +1,128 @@
+function scalarTypeToken(t: Token) -> Bool {
+    let k = t.kind
+    if k == .KwInt || k == .KwChar || k == .KwBool || k == .KwLong || k == .KwUnsigned || k == .KwSigned { return true }
+    if k != .Ident { return false }
+    match t.text {
+        "double", "float", "short" -> return true
+        else -> return false
+    }
+}
+// `T(x)` for a non-class `T`: `(T)x`, and `T()` is a zero `T`.
+function functionalCast(p: borrow mut Parser, ty: String, start: Int) -> ExprId {
+    expect(p, .LParen)
+    var operand = eNumber(p, 0, spanFrom(p, start))
+    if peekKind(p) != .RParen { operand = expression(p, 0) }
+    expect(p, .RParen)
+    return eCast(p, ty, operand, spanFrom(p, start))
+}
+// Whether the `<` ahead opens template arguments rather than a comparison:
+// its matching `>` comes before any `;`, brace or unmatched `)`, and is
+// followed by `(`, `{` or `::`. A local named like a template (`count < 2`)
+// then compares.
+// For a variable template, which is a value: `is_same_v<A, B> << x` too.
+function variableArgumentsAhead(p: borrow Parser) -> Bool {
+    if templateArgumentsAhead(p) { return true }
+    var angle = 0
+    for i in p.position..p.tokens.count {
+        let kind = p.tokens[i].kind
+        if kind == .Semicolon || kind == .LBrace || kind == .RBrace || kind == .End { return false }
+        if kind == .Lt { angle = angle + 1 }
+        if kind == .Gt { angle = angle - 1 }
+        if kind == .Shr { angle = angle - 2 }
+        if angle <= 0 && (kind == .Gt || kind == .Shr) {
+            if i + 1 >= p.tokens.count { return false }
+            let next = p.tokens[i + 1].kind
+            return next == .Shl || next == .EqEq || next == .NotEq || next == .Plus || next == .Minus || next == .Star ||
+                next == .Slash || next == .Percent || next == .Amp || next == .Pipe || next == .Caret
+        }
+    }
+    return false
+}
+function templateArgumentsAhead(p: borrow Parser) -> Bool {
+    var angle = 0
+    var paren = 0
+    for i in p.position..p.tokens.count {
+        let kind = p.tokens[i].kind
+        if kind == .Semicolon || kind == .LBrace || kind == .RBrace || kind == .AndAnd || kind == .OrOr || kind == .End { return false }
+        if kind == .Lt { angle = angle + 1 }
+        if kind == .LParen { paren = paren + 1 }
+        if kind == .RParen {
+            if paren == 0 { return false }
+            paren = paren - 1
+        }
+        if (kind == .Gt || kind == .Shr) && paren == 0 {
+            if kind == .Gt { angle = angle - 1 } else { angle = angle - 2 }
+            if angle <= 0 {
+                if angle < 0 || i + 1 >= p.tokens.count { return true }
+                let next = p.tokens[i + 1].kind
+                return next == .LParen || next == .LBrace || next == .Colon || next == .Gt || next == .Shr || next == .Comma || next == .RParen ||
+                    next == .Semicolon || next == .AndAnd || next == .OrOr || next == .Question || next == .RBracket || next == .RBrace
+            }
+        }
+    }
+    return false
+}
+// Whether class `derived` has `base` among its bases, directly or not.
+function classDerivesFrom(tree: CppTree, derived: String, base: String) -> Bool {
+    if !isClassType(derived) || !isClassType(base) { return false }
+    for s in tree.structs {
+        if joinText(["%", s.name]) == derived {
+            for field in s.fields {
+                if isBaseField(field) && (field.declType == base || classDerivesFrom(tree, field.declType, base)) { return true }
+            }
+        }
+    }
+    return false
+}
+// Whether class `ty` declares a copy constructor, copy assignment or
+// destructor of its own.
+function classHasSpecialMembers(tree: CppTree, ty: String) -> Bool {
+    let bare = unqualifiedName(nominalName(ty))
+    for fn in tree.functions {
+        if methodOwnerType(tree, fn.name) == ty {
+            let member = unqualifiedName(fn.name)
+            if member == joinText(["~", bare]) || member == "operator=" { return true }
+            if member == bare && fn.parameters.count == 1 && parameterClassOf(fn.parameters[0]) == ty { return true }
+        }
+    }
+    return false
+}
+function isCompoundAssign(kind: TokenKind) -> Bool {
+    return kind == .PlusEq || kind == .MinusEq || kind == .StarEq || kind == .SlashEq || kind == .PercentEq ||
+        kind == .AmpEq || kind == .PipeEq || kind == .CaretEq || kind == .ShlEq || kind == .ShrEq
+}
+// `a::f` where `namespace a = b::c;`: `b::c::f`.
+function expandNamespaceAlias(p: borrow Parser, name: String) -> String {
+    for alias in p.tree.namespaceAliases {
+        let prefix = joinText([alias.name, "::"])
+        let size = utf8Count(prefix)
+        if utf8Count(name) > size && utf8Slice(name, 0, size) == prefix {
+            return joinText([alias.target, "::", utf8Slice(name, size, utf8Count(name))])
+        }
+    }
+    return name
+}
+// `L"..."`, `u"..."`, `U"..."` or `u8"..."`, and the same prefixes on a
+// character literal: the prefix sets the width of each element.
+function wideLiteral(p: borrow mut Parser, prefix: Token) -> ExprId {
+    consume(p)
+    let t = peek(p)
+    if t.kind == .Number {
+        consume(p)
+        return eNumber(p, t.number, spanFrom(p, prefix.start))
+    }
+    consume(p)
+    var raw = t.text
+    while peekKind(p) == .Str {
+        raw = joinText([raw, consume(p).text])
+    }
+    let index = p.tree.strings.count
+    p.tree.strings.append(raw)
+    let id = eStr(p, index, spanFrom(p, prefix.start))
+    var marker = ""
+    if prefix.text == "L" || prefix.text == "U" { marker = "wide4" }
+    if prefix.text == "u" { marker = "wide2" }
+    let e = p.tree.expressions[id.value]
+    p.tree.expressions[id.value] = stringWithPrefix(e, marker)
+    return id
+}
