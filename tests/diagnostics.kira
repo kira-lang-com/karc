@@ -1,0 +1,31 @@
+import KLF
+import Foundation
+
+@Test
+function rendersAnUndeclaredNameWithItsPosition() {
+    expect!(!compiles("int main() {\n    return missing;\n}"))
+    expect!(diagnosed(1021, 2, 12))
+    expect!(reported("unknown name"))
+}
+
+@Test
+function reportsAParseErrorFromTheParsePhase() {
+    expect!(!compiles("int main() {\n    return 1\n}"))
+    expect!(diagnosed(1202, 3, 1))
+    expect!(reported("parse expected a semicolon"))
+}
+
+@Test
+function diagnosticsStartEmptyForEachTest() {
+    expect!(!reported("parse expected a semicolon"))
+    expect!(!diagnosed(1202, 3, 1))
+}
+
+@Test
+function successfulRunReplacesPreviousDiagnostics() {
+    expect!(!compiles("int main() { return missing; }"))
+    expect!(reported("unknown name"))
+    expect!(run("int main() { return 42; }") == 42)
+    expect!(!reported("unknown name"))
+    expect!(!reported("Built: Ok"))
+}

@@ -1,0 +1,28 @@
+import KLF
+
+function formatKArc() -> Bool {
+    let source = sourceText()
+    let lexed = lexForFormatting(copy source)
+    if lexed.error != "" { return false }
+    var starts: [Int] = []
+    var ends: [Int] = []
+    var previousEnd = 0
+    for token in lexed.tokens {
+        if token.kind != .End && token.end > token.start && token.start >= previousEnd {
+            starts.append(token.start)
+            ends.append(token.end)
+            previousEnd = token.end
+        }
+    }
+    return layoutTokens(move source, move starts, move ends, LayoutRules {
+        spacedCalls = ["if", "while", "for", "switch", "catch"],
+        keywords = ["return", "if", "else", "while", "for", "switch", "case", "throw", "co_return"],
+        ambiguous = ["<", ">", ">>"],
+        spacedArrow = false,
+        labels = ["case", "default"],
+        semicolons = true,
+        literals = false,
+        headers = ["if", "else", "while", "for", "switch", "struct", "class", "union", "enum", "namespace", "try", "catch"],
+        inlineBlocks = false
+    })
+}

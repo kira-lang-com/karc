@@ -4,6 +4,10 @@
 #include <cstdlib>
 #include "platform.h"
 
+#if defined(__KARC_TARGET_WINDOWS_MSVC__)
+#include "filesystem_windows.h"
+#else
+
 extern "C" {
 int fstatat(int directory, const char* path, void* buffer, int flags);
 long getdents64(int descriptor, void* buffer, unsigned long size);
@@ -107,3 +111,4 @@ int karc_fs_rename(const char* from, const char* to) { return renameat(KARC_AT_F
 int karc_fs_current(char* buffer, int room) { return getcwd(buffer, room) != 0; }
 int karc_fs_change_directory(const char* path) { return chdir(path); }
 int karc_fs_resolve(const char* path, char* buffer) { return realpath(path, buffer) != 0; }
+#endif

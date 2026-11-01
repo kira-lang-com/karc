@@ -1,0 +1,28 @@
+import KLF
+
+// Source locations encoded for included files are negative. Only publish
+// declarations in this unit; its included files are analyzed independently.
+function recordKArcSymbol(fileKey: Int, span: Span, name: Span, kind: Int) {
+    let length = source_len()
+    if name.start < 0 || name.end <= name.start || name.end > length { return }
+    var start = span.start
+    var end = span.end
+    if start < 0 || start > name.start || end < name.end || end > length {
+        start = name.start
+        end = name.end
+    }
+    let entity = fileKey * 4294967296 + name.start
+    if editor_symbol(entity, -1, start, end, name.start, name.end, kind, -1) != 1 { runtimeTrap() }
+}
+
+function recordKArcSymbols(tree: borrow CppTree) {
+    if editor_mode() == 0 { return }
+    let fileKey = sourceHash(sourceName())
+    for item in tree.functions {
+        if !item.isProto { recordKArcSymbol(fileKey, item.span, item.nameSpan, 11) }
+    }
+    for item in tree.globals { recordKArcSymbol(fileKey, item.span, item.nameSpan, 12) }
+    for item in tree.structs {
+        if !item.instance { recordKArcSymbol(fileKey, item.span, item.nameSpan, 22) }
+    }
+}

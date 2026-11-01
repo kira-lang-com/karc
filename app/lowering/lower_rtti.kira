@@ -1,0 +1,107 @@
+import KLF
+// Run-time type information. Every polymorphic class's table holds, in its
+// second slot, the chain of names it can be seen as, `;Derived;Base;`, the
+// same chain a throw hands the exception runtime. dynamic_cast checks the
+// target's name against the object's chain; typeid reads the first name.
+
+// The name chain in the table of the object `pointer` (of static type
+// `ty`) points at.
+function dynamicChain(state: borrow mut Lowerer, pointer: KirValue, ty: String) -> KirValue {
+    let root = vptrOwner(copy state, copy ty)
+    let holder = upcast(state, pointer, copy ty, copy root)
+    let field = fieldPointer(state, holder, copy root, 0, vtableType())
+    let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = joinText(["*[0 x ", vtableType(), "]"]), unsigned = false, floating = false }
+    let table = kLoad(state, placeFromPointer(state, copy fieldValue).address)
+    let typedTable = kBitcast(state, table, joinText(["*[0 x ", vtableType(), "]"]))
+    let entries = kAddressOf(state, typedTable, joinText(["[0 x ", vtableType(), "]"]))
+    return kLoad(state, kElemAddr(state, entries, kConstInt(state, "i64", 1), vtableType()))
+}
+// `dynamic_cast<T*>(p)` (null when the object is not a T) and
+// `dynamic_cast<T&>(r)` (std::bad_cast then).
+function emitDynamicCast(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    let target = state.tree.explicitArguments[call.explicitArguments - 1][0]
+    let toReference = call.name == "@dynamic_cast&"
+    let operandType = staticType(state, call.arguments[0])
+    var sourceClass = operandType
+    if isPointerType(copy sourceClass) { sourceClass = elementOfPointer(copy sourceClass) }
+    let targetClass = elementOfPointer(copy target)
+    var pointer = kNull(state, copy target)
+    if isPointerType(copy operandType) {
+        pointer = kBitcast(state, emitExpression(state, call.arguments[0]).reference, joinText(["*[0 x ", sourceClass, "]"]))
+    } else {
+        pointer = methodReceiver(state, call.arguments[0], copy sourceClass)
+    }
+    let resultType = joinText(["*[0 x ", targetClass, "]"])
+    if vptrOwner(copy state, copy sourceClass) == "" || isBaseOf(copy state, copy targetClass, copy sourceClass) {
+        // An upcast, which needs no check.
+        return Value { reference = kBitcast(state, upcast(state, pointer, copy sourceClass, copy targetClass), copy resultType), boolean = false, wide = true, pointer = resultType, unsigned = false, floating = false }
+    }
+    let name = addedString(state, catchName(copy targetClass))
+    // The result: the pointer when the object is a target, else null.
+    let resultSlot = declare(state, joinText(["__karc_cast_", decimalText(state.slots)]), copy resultType, copy targetClass, copy span)
+    kStore(state, kNull(state, copy resultType), state.slotsData[resultSlot].address)
+    let hit = callRuntime(state, "karc_type_chain_has", ["*[0 x i8]", "*[0 x i8]"], "i32", [kBitcast(state, dynamicChainOrNull(state, pointer, copy sourceClass), "*[0 x i8]"), name])
+    let store = kBlock(state)
+    let after = kBlock(state)
+    kCondBr(state, kIcmp(state, "ne", hit, kConstInt(state, "i32", 0)), store, after)
+    kSwitchTo(state, store)
+    kStore(state, kBitcast(state, completeObject(state, pointer, copy sourceClass), copy resultType), state.slotsData[resultSlot].address)
+    kBr(state, after)
+    kSwitchTo(state, after)
+    let result = kLoad(state, state.slotsData[resultSlot].address)
+    if toReference {
+        let failed = kBlock(state)
+        let fine = kBlock(state)
+        let resultNull = callRuntime(state, "karc_is_null", ["*[0 x i8]"], "i32", [kBitcast(state, result, "*[0 x i8]")])
+        kCondBr(state, kIcmp(state, "ne", resultNull, kConstInt(state, "i32", 0)), failed, fine)
+        kSwitchTo(state, failed)
+        callRuntime(state, "karc_throw_bad_cast_c", [], "unit", [])
+        afterCall(state, -1)
+        kBr(state, fine)
+        kSwitchTo(state, fine)
+    }
+    return Value { reference = result, boolean = false, wide = true, pointer = resultType, unsigned = false, floating = false }
+}
+// The chain of a possibly null object: null for null.
+function dynamicChainOrNull(state: borrow mut Lowerer, pointer: KirValue, ty: String) -> KirValue {
+    let slot = declare(state, joinText(["__karc_chain_", decimalText(state.slots)]), "*[0 x i8]", "i8", Span { start = 0, end = 0 })
+    kStore(state, kNull(state, "*[0 x i8]"), state.slotsData[slot].address)
+    let isNull = callRuntime(state, "karc_is_null", ["*[0 x i8]"], "i32", [kBitcast(state, pointer, "*[0 x i8]")])
+    let read = kBlock(state)
+    let after = kBlock(state)
+    kCondBr(state, kIcmp(state, "eq", isNull, kConstInt(state, "i32", 0)), read, after)
+    kSwitchTo(state, read)
+    kStore(state, kBitcast(state, dynamicChain(state, pointer, copy ty), "*[0 x i8]"), state.slotsData[slot].address)
+    kBr(state, after)
+    kSwitchTo(state, after)
+    return kLoad(state, state.slotsData[slot].address)
+}
+// `typeid(expr)` or `typeid(T)`: a std::type_info naming the dynamic type
+// of a polymorphic object, else the static type.
+function emitTypeid(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    let named = state.tree.explicitArguments[call.explicitArguments - 1][0]
+    var chain = kNull(state, "*[0 x i8]")
+    if named != "" {
+        chain = addedString(state, typeChain(copy state, copy named))
+    } else {
+        let ty = staticType(state, call.arguments[0])
+        if isClassType(copy ty) && vptrOwner(copy state, copy ty) != "" {
+            chain = kBitcast(state, dynamicChain(state, methodReceiver(state, call.arguments[0], copy ty), copy ty), "*[0 x i8]")
+        } else {
+            emitExpression(state, call.arguments[0])
+            chain = addedString(state, typeChain(copy state, copy ty))
+        }
+    }
+    let infoType = "%std::type_info"
+    if structIndex(copy state, "std::type_info") < 0 {
+        lowerError(state, diagUnsupportedExpression(), copy span)
+        return zeroValue(state)
+    }
+    let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), copy infoType, "", copy span)
+    zeroAggregate(state, state.slotsData[slot].address, copy infoType)
+    let object = slotPointer(state, state.slotsData[slot].address, copy infoType)
+    let field = fieldPointer(state, object, copy infoType, 0, "*[0 x i8]")
+    let fieldValue = Value { reference = field, boolean = false, wide = true, pointer = "*[0 x *[0 x i8]]", unsigned = false, floating = false }
+    kStore(state, chain, placeFromPointer(state, copy fieldValue).address)
+    return Value { reference = object, boolean = false, wide = true, pointer = joinText(["*[0 x ", infoType, "]"]), unsigned = false, floating = false }
+}

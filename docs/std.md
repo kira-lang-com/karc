@@ -1,8 +1,7 @@
 # The KArc std
 
 `std/` is KArc's standard library, written in C++ and compiled by `karc`
-itself (KLF-RIDL 28.9). Nothing in it is compiled by clang except
-`karc_link.cpp`, the bootstrap listed in `native.list` (see the end).
+itself (KLF-RIDL 28.9).
 
 ## Layout
 
@@ -140,7 +139,7 @@ program in the framework's `karc_std` test prints the same output on both.
   both counts are integral. The clocks count nanoseconds. The literal
   operators (`100ms`, `2h`, `"text"s`, `"text"sv`, `2i`) are declared at
   global scope, so they need no `using namespace`.
-- **Concepts.** Before parsing, `definitions/parser_concept.klfd` turns a
+- **Concepts.** Before parsing, `definitions/parser_concept.kcore` turns a
   concept into a `bool` variable template, drops requires-clauses, makes a
   constrained parameter a plain `typename` and a function with `auto`
   parameters a template. A requires-expression counts as satisfied, and
@@ -168,8 +167,10 @@ program in the framework's `karc_std` test prints the same output on both.
   `is_const` answer false.
 - `std::source_location::current()` does not know the caller's position.
 
-## karc_link.cpp
+## Legacy bootstrap
 
-`karc_link.cpp` predates this std: zero-returning stubs, compiled by clang,
-that keep Harmony's unresolved library calls linkable. It should shrink as
-Harmony moves onto the real std.
+`validation/legacy-bootstrap/karc_link.cpp` contains the old zero-returning
+Harmony compatibility stubs and is retained for reference. It is not part of
+the standard library or the generated toolchain. Programs that relied on
+those stubs need real implementations for those APIs; unresolved calls must
+not be treated as successful implementations.

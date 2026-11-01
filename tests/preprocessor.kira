@@ -1,0 +1,42 @@
+import KLF
+import Foundation
+
+@Test
+function discardsOtherPreprocessingCharactersInExcludedSource() {
+    expect!(run("#if 0\nscan $c %c x\nset x @value\n#endif\nint main() { return 42; }") == 42)
+    expect!(!compiles("int main() { return $; }"))
+    expect!(reported("error[1001]"))
+    expect!(!compiles("#define BAD @\nint main() { return BAD; }"))
+    expect!(reported("error[1001]"))
+}
+
+@Test
+function loadsARegisteredHeaderRelativeToTheSource() {
+    expect!(runFiles([
+        TestSource { name = "src/main.cpp", text = "#include \"value.h\"\nint main() { return HEADER_VALUE; }" },
+        TestSource { name = "src/value.h", text = "#define HEADER_VALUE 42" }
+    ]) == 42)
+}
+
+@Test
+function arcHeadersAreIncludedWithoutBecomingTranslationUnits() {
+    expect!(runFiles([
+        TestSource { name = "main.krc", text = "#include \"helper.krch\"\nint main() { return helper(); }" },
+        TestSource { name = "helper.krch", text = "int helper() { return 42; }" }
+    ]) == 42)
+}
+
+@Test
+function selectsConditionalBranchesAndRejectsInclude() {
+    expect!(run("#define N 2\n#if N == 1\nint main() { return 1; }\n#elif N == 2\nint main() { return 42; }\n#else\nint main() { return 3; }\n#endif") == 42)
+    expect!(!compiles("#include <unregistered_header.h>\nint main() { return 0; }"))
+    expect!(diagnosed(1106, 1, 1))
+    expect!(reported("include source is not found"))
+}
+
+@Test
+function splicesPhysicalLinesBeforePreprocessing() {
+    expect!(run("#define ANSWER 42\nint main() { return ANSWER; }") == 42)
+    expect!(run("#define TWICE(x) ((x) * 2)\nint main() { return TWICE(21); }") == 42)
+    expect!(run("#define N 21\n#define TWICE(x) ((x) * 2)\nint main() { return TWICE(N); }") == 42)
+}

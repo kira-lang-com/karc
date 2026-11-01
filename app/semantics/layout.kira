@@ -1,0 +1,75 @@
+import KLF
+// C layout of karc types: the byte size and alignment the kernel gives a
+// `struct c` record, computed here for `sizeof`, `new` and pointer strides.
+
+function structByName(tree: CppTree, name: String) -> Int {
+    let exact = structNamed(copy tree, copy name)
+    if exact >= 0 { return exact }
+    for i in 0..tree.structs.count {
+        if qualifiedNamesMatch(tree.structs[i].name, copy name) { return i }
+    }
+    return -1
+}
+function roundUp(value: Int, align: Int) -> Int {
+    return (value + align - 1) / align * align
+}
+function typeAlign(tree: CppTree, ty: String) -> Int {
+    let first = utf8Byte(ty, 0)
+    if first == 42 || isFnPtrType(copy ty) { return 8 }
+    if first == 91 { return typeAlign(copy tree, arrayElementType(copy ty)) }
+    if first == 37 {
+        let index = structByName(copy tree, nominalName(copy ty))
+        if index < 0 { return 4 }
+        var align = 1
+        for field in tree.structs[index].fields {
+            let fieldAlign = typeAlign(copy tree, field.declType)
+            if fieldAlign > align { align = fieldAlign }
+        }
+        return align
+    }
+    return typeSize(copy tree, copy ty)
+}
+function typeSize(tree: CppTree, ty: String) -> Int {
+    let first = utf8Byte(ty, 0)
+    if first == 42 || isFnPtrType(copy ty) { return 8 }
+    if first == 91 { return arrayLength(copy ty) * typeSize(copy tree, arrayElementType(copy ty)) }
+    if first == 37 {
+        let index = structByName(copy tree, nominalName(copy ty))
+        if index < 0 { return 4 }
+        if isUnionType(copy tree, copy ty) {
+            var largest = 1
+            for field in tree.structs[index].fields {
+                let size = typeSize(copy tree, field.declType)
+                if size > largest { largest = size }
+            }
+            return roundUp(largest, typeAlign(copy tree, copy ty))
+        }
+        var offset = 0
+        for field in tree.structs[index].fields {
+            offset = roundUp(offset, typeAlign(copy tree, field.declType)) + typeSize(copy tree, field.declType)
+        }
+        // An empty class still takes a byte, as in C++ (its record carries
+        // a padding field; see declareRecordsFrom).
+        if offset == 0 { return 1 }
+        return roundUp(offset, typeAlign(copy tree, copy ty))
+    }
+    match ty {
+        "i1", "i8", "u8" -> return 1
+        "i16", "u16" -> return 2
+        "i64", "u64", "f64" -> return 8
+        else -> return 4
+    }
+}
+// The byte offset of field `index` of class `ty`.
+function fieldOffset(tree: CppTree, ty: String, index: Int) -> Int {
+    let record = structByName(copy tree, nominalName(copy ty))
+    if record < 0 || isUnionType(copy tree, copy ty) { return 0 }
+    var offset = 0
+    let fields = tree.structs[record].fields
+    for i in 0..fields.count {
+        offset = roundUp(offset, typeAlign(copy tree, fields[i].declType))
+        if i == index { return offset }
+        offset = offset + typeSize(copy tree, fields[i].declType)
+    }
+    return offset
+}

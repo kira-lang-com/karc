@@ -1,0 +1,41 @@
+import KLF
+import Foundation
+
+@Test
+function callsAFunctionDefinedInAnotherUnit() {
+    expect!(runFiles([
+        TestSource { name = "math.cpp", text = "int square(int value) {\n    return value * value;\n}" },
+        TestSource { name = "main.cpp", text = "int square(int value);\n\nint main() {\n    return square(7) + 1;\n}" }
+    ]) == 50)
+}
+
+@Test
+function mergesGlobalsStringsAndStructsAcrossUnits() {
+    expect!(runFiles([
+        TestSource { name = "counter.cpp", text = "int total = 0;\n\nconst char *label() {\n    return \"unit\";\n}\n\nint bump(int by) {\n    total = total + by;\n    return total;\n}" },
+        TestSource { name = "main.cpp", text = "int bump(int by);\nconst char *label();\n\nint main() {\n    const char *name = label();\n    int first = (int)name[0];\n    bump(3);\n    return bump(4) + first;\n}" }
+    ]) == 124)
+}
+
+@Test
+function rejectsAFunctionDefinedInTwoUnits() {
+    expect!(!compilesFiles([
+        TestSource { name = "a.cpp", text = "int shared() {\n    return 1;\n}" },
+        TestSource { name = "main.cpp", text = "int shared() {\n    return 2;\n}\n\nint main() {\n    return shared();\n}" }
+    ]))
+    expect!(reported("defines `shared` in more than one unit"))
+}
+
+@Test
+function rejectsAProgramWithoutMain() {
+    expect!(!compilesFiles([
+        TestSource { name = "only.cpp", text = "int helper() {\n    return 1;\n}" }
+    ]))
+    expect!(diagnosed(1033, 1, 1))
+    expect!(reported("missing main"))
+}
+
+@Test
+function compilationDoesNotLink() {
+    expect!(compiles("int missing();\nint main() { return missing(); }"))
+}

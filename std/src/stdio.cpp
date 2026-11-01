@@ -26,7 +26,12 @@ extern "C" void karc_output_flush() {
 // Writes to `descriptor`, through the buffer for standard output.
 extern "C" long karc_write(int descriptor, const char* data, long count) {
     if (descriptor != 1) { return write(descriptor, data, count); }
-    if (outputMode < 0) { outputMode = isatty(1) ? 1 : 0; }
+    if (outputMode < 0) {
+#if defined(__KARC_TARGET_WINDOWS_MSVC__)
+        _setmode(1, KARC_O_BINARY);
+#endif
+        outputMode = isatty(1) ? 1 : 0;
+    }
     if (outputUsed + count > (long)sizeof(output)) { karc_output_flush(); }
     if (count > (long)sizeof(output)) { return write(1, data, count); }
     memcpy(output + outputUsed, data, count);
@@ -150,13 +155,15 @@ int fflush(FILE* stream) {
 // fopen's mode: "r", "w", "a", each with an optional "+" and "b".
 static int openFlags(const char* mode) {
     int plus = 0;
+    int binary = 0;
     for (const char* m = mode; *m; m++) {
         if (*m == '+') { plus = 1; }
+        if (*m == 'b') { binary = KARC_O_BINARY; }
     }
-    if (mode[0] == 'r') { return plus ? KARC_O_RDWR : KARC_O_RDONLY; }
+    if (mode[0] == 'r') { return (plus ? KARC_O_RDWR : KARC_O_RDONLY) | binary; }
     int access = plus ? KARC_O_RDWR : KARC_O_WRONLY;
-    if (mode[0] == 'a') { return access | KARC_O_CREAT | KARC_O_APPEND; }
-    return access | KARC_O_CREAT | KARC_O_TRUNC;
+    if (mode[0] == 'a') { return access | KARC_O_CREAT | KARC_O_APPEND | binary; }
+    return access | KARC_O_CREAT | KARC_O_TRUNC | binary;
 }
 
 FILE* fopen(const char* path, const char* mode) {
@@ -271,8 +278,13 @@ void clearerr(FILE* stream) {
 int fileno(FILE* stream) { return stream->descriptor; }
 int setvbuf(FILE* stream, char* buffer, int mode, size_t size) { return 0; }
 void setbuf(FILE* stream, char* buffer) {}
+#if defined(__KARC_TARGET_WINDOWS_MSVC__)
+int remove(const char* path) { return DeleteFileA(path) || RemoveDirectoryA(path) ? 0 : -1; }
+int rename(const char* from, const char* to) { return MoveFileExA(from, to, 1) ? 0 : -1; }
+#else
 int remove(const char* path) { return unlinkat(KARC_AT_FDCWD, path, 0) == 0 ? 0 : -1; }
 int rename(const char* from, const char* to) { return renameat(KARC_AT_FDCWD, from, KARC_AT_FDCWD, to) == 0 ? 0 : -1; }
+#endif
 
 void perror(const char* message) {
     if (message != 0 && message[0] != 0) {

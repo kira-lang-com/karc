@@ -8,7 +8,7 @@ modes are `.cpp`, clang's C++ with manual memory management, and
 `.krc` is the dialect where reference counting is mandatory and manual memory
 management is removed from the language — see `docs/modes.md`. It is a peer
 of Kira, C and Swift — a language whose compiler KLF *produces from a
-definition* written in KLF Kira. KArc is not a Rust program and this repo is not
+frontend* written in Kira using KLF. KArc is not a Rust program and this repo is not
 a Rust project; the Rust code is the framework (`../kira-language-framework`),
 which KArc targets.
 
@@ -18,7 +18,9 @@ through this frontend as well: `.c` files are KArc's C input mode. The old
 
 ## What's here
 
-- `definitions/` — the KArc language definition in KLF Kira: lexer, parser,
+- `app/` — the Kira implementation of KArc, using the KLF library and RIDL.
+- `definitions/` — the original KCore definition, retained during migration:
+  lexer, parser,
   KIR builder, lowering, diagnostics, and the `construct KArc() extends
   Language<Tree, Program>` declaration the kernel loads.
 - `std/` — KArc's std, C++ compiled by `karc` itself: headers in
@@ -31,25 +33,34 @@ through this frontend as well: `.c` files are KArc's C input mode. The old
 
 ## How it runs
 
-The kernel loads `definitions/`, reads the `Language` declaration and runs
+The KLF driver builds the Kira frontend from `app/`, reads the `Language` declaration and runs
 `units`, `parse`, `elaborate` and `lower`. `lower` builds a `KirModule` through
 the kernel's structural builder services — there is no textual KIR, no harness
 entry point and no JavaScript anywhere in the pipeline. The same package also
 compiles to a native `karc` binary through Cranelift, and that binary is the
 compiler; the VM is the bootstrap and the parity oracle.
 
-`klf build ../karc --out <dir>` goes one step further and produces the whole
-toolchain: the `karc` driver, the std compiled by it to native libraries and
-bytecode, and its headers. Programs built with that driver link the std on
-either engine (`docs/std.md`).
+`klf build ../karc --out <dir>` is intended to produce the whole toolchain:
+the `karc` driver, the std compiled by it to native libraries and bytecode,
+and its headers. The old Harmony compatibility stubs are retained under
+`validation/legacy-bootstrap/` for reference and are not included in the
+toolchain; programs that relied on them need real implementations. See
+`docs/std.md` for the toolchain layout.
 
 ## Validation
 
-Validation runs in the framework repo, where the Rust tests live next to the
-code they exercise (`crates/klf-driver/tests/karc_*.rs`): each C++ program is
-compiled through the executor, checked against the raw KIR verifier and run, on
-the VM and, through the Cranelift-built frontend, natively — where the KIR must
-come out byte-identical to the VM's on every example.
+The Kira frontend's tests live in `tests/*.kira`. Run them with
+`klf test . --unit` from this directory. KLF builds the frontend under test and
+provides it and the VM runner to the Kira test process.
+
+`klf test .` also builds the toolchain and runs `corpus/programs.kcore`,
+including native and VM programs. The tests in `tests/native.kira` compile
+and run native executables; the other execution tests use KLF's VM. The
+original definition in `definitions/` remains available for comparison while
+the migration is verified.
+
+The Kira frontend also provides `karc format` for C, C++, KRC and header
+files. It uses the KLF shared layout and keeps preprocessor directives intact.
 
 The unfinished SQLite target has a pinned build and SQL smoke test in
 [validation/sqlite](validation/sqlite/README.md).

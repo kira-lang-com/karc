@@ -1,0 +1,28 @@
+import KLF
+
+function recordKArcTokens(tokens: borrow [Token]) {
+    if editor_mode() == 0 { return }
+    for token in tokens {
+        let modifiers = match token.kind {
+            KwReturn, KwWhile, KwIf, KwElse, KwFor, KwDo, KwSwitch, KwCase, KwDefault,
+            KwBreak, KwContinue -> 16384
+            else -> 0
+        }
+        var tokenClass = match token.kind {
+            Ident, Other, Placemark, End -> -1
+            Number -> 5
+            Float -> 5
+            Str -> 2
+            KwReturn, KwWhile, KwIf, KwElse, KwFor, KwDo, KwSwitch, KwCase, KwDefault,
+            KwBreak, KwContinue -> 7
+            KwInt, KwChar, KwBool, KwLong, KwVoid, KwConst, KwSizeof, KwStruct, KwTypedef,
+            KwEnum, KwStatic, KwExtern, KwInline, KwRegister, KwVolatile, KwUnsigned, KwSigned -> 7
+            LParen, RParen, LBrace, RBrace, LBracket, RBracket, Semicolon, Comma -> 9
+            else -> 8
+        }
+        if token.kind == .Number && token.text == "char" { tokenClass = 3 }
+        if tokenClass >= 0 && token.end > token.start {
+            if editor_classify(-1, token.start, token.end, tokenClass, modifiers) != 1 { runtimeTrap() }
+        }
+    }
+}

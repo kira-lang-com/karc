@@ -4,7 +4,7 @@ The kernel's diagnostic channel (`klf.diag.error`) carries a number and a byte
 range, not text. karc reports the code and the span it applies to, and declares
 the text of every code in the `diagnostics` member of its `Language`
 declaration, so the kernel renders it with the position it points at. The
-numbers are named by the functions in `definitions/diagnostics.klfd`.
+numbers are named by the functions in `definitions/diagnostics.kcore`.
 
 Most codes are reported from the phase that runs on one translation unit.
 Code 1033 is program-wide because only a linked executable (`--emit bin`) requires `main`; it is checked over every input in `units`.

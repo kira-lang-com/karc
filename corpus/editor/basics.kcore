@@ -1,0 +1,33 @@
+construct KArcEditor() extends EditorCorpus {
+    let cases: [EditorCase] = [
+        EditorCase {
+            name = "format C function",
+            files = [EditorFile { path = "main.c", text = "int main(){return 42;}\n" }],
+            checks = [
+                .Diagnostics(expected: []),
+                .Tokens(golden: "basics.tokens"),
+                .Format(expect: [EditorFile { path = "main.c", text = "int main() {\n    return 42;\n}\n" }])
+            ]
+        },
+        EditorCase {
+            name = "hover on function declaration",
+            files = [EditorFile { path = "hover.c", text = "int $0main(){return 42;}\n" }],
+            checks = [.Diagnostics(expected: []), .Hover(at: "$0", contains: ["main"])]
+        },
+        EditorCase {
+            name = "hover on global declaration",
+            files = [EditorFile { path = "global.c", text = "int $0answer = 42;\n" }],
+            checks = [.Diagnostics(expected: []), .Hover(at: "$0", contains: ["answer"])]
+        },
+        EditorCase {
+            name = "hover on struct declaration",
+            files = [EditorFile { path = "struct.c", text = "struct $0Point { int x; };\n" }],
+            checks = [.Diagnostics(expected: []), .Hover(at: "$0", contains: ["Point"])]
+        },
+        EditorCase {
+            name = "classify literals and operators",
+            files = [EditorFile { path = "tokens.c", text = "int main(){char c='x';return c+1;}\n" }],
+            checks = [.Diagnostics(expected: []), .Tokens(golden: "literals.tokens")]
+        }
+    ]
+}

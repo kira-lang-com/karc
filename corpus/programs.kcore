@@ -1,0 +1,46 @@
+construct Programs() extends Corpus {
+    let cases: [CorpusCase] = [
+        CorpusCase {
+            name = "standard-library-filesystem-vm",
+            sources = ["standard-library-filesystem.cpp"],
+            engine = "vm",
+            exit = 42
+        },
+        CorpusCase {
+            name = "standard-library-allocation-vm",
+            sources = ["standard-library-allocation.cpp"],
+            engine = "vm",
+            exit = 42
+        },
+        CorpusCase {
+            name = "standard-library-filesystem",
+            sources = ["standard-library-filesystem.cpp"],
+            exit = 42
+        },
+        CorpusCase {
+            name = "standard-library-allocation",
+            sources = ["standard-library-allocation.cpp"],
+            exit = 42
+        },
+        CorpusCase {
+            name = "included-function-declaration",
+            sources = ["included-function-declaration.cpp", "included-function-definition.cpp"],
+            exit = 42
+        },
+        CorpusCase {
+            name = "void-pointer-overload",
+            sources = ["void-pointer-overload.cpp"],
+            exit = 12
+        },
+        CorpusCase {
+            name = "std-strings-allocation-classes-and-printf",
+            sources = ["std/app.cpp"],
+            stdout = "drop loop\ndrop loop\ndrop heap!\nklf std\n[ab  |0007] -12 ff\n"
+        },
+        CorpusCase {
+            name = "fibonacci-application",
+            sources = ["../examples/fibonacci/app.cpp"],
+            exit = 55
+        }
+    ]
+}

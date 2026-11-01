@@ -23,16 +23,16 @@ int main() {
 
 ## Files
 
-- `token.klfd`: the `TokenKind` enum, the `reservedWord` keyword classifier and the source lexer, mirroring klf-kira-syntax's `token.rs`.
-- `ast.klfd`: the flat, index-based AST nodes and the shared parser state (`peek`/`consume`/`expect` over the token stream).
-- `parser_expr.klfd`, `parser_stmt.klfd`, `parser_type.klfd`, `parser_decl.klfd`: the precedence expression parser, the statement/declarator parser, the type parser and the top-level declaration parser, split as klf-kira-syntax splits `parser/{exprs,stmts,types,decls}`.
-- `kir.klfd`: the KIR builder — one constructor per instruction, each calling the kernel's structural service, so lowering never names a service directly.
-- `lower_core.klfd`: the `Lowerer` state, the karc-type-to-`KirType` bridge, scopes, slots and conversions.
-- `lower_values.klfd`, `lower_expr.klfd`, `lower_call.klfd`, `lower_stmt.klfd`: struct copies and pointer helpers, expression lowering, call lowering, statement lowering.
-- `lower_module.klfd`: the module pass — records, string literals, globals and function declarations, then one function body at a time.
-- `elaborate.klfd`: the whole-tree checks the `elaborate` phase runs over the parsed tree.
-- `diagnostics.klfd`: the numeric diagnostic codes, spelled out in `diagnostics.md`.
-- `language.klfd`: the `construct KArc() extends Language<Tree, Program>` declaration, its declared diagnostic specs and its four phases.
+- `token.kcore`: the `TokenKind` enum, the `reservedWord` keyword classifier and the source lexer, mirroring klf-kira-syntax's `token.rs`.
+- `ast.kcore`: the flat, index-based AST nodes and the shared parser state (`peek`/`consume`/`expect` over the token stream).
+- `parser_expr.kcore`, `parser_stmt.kcore`, `parser_type.kcore`, `parser_decl.kcore`: the precedence expression parser, the statement/declarator parser, the type parser and the top-level declaration parser, split as klf-kira-syntax splits `parser/{exprs,stmts,types,decls}`.
+- `kir.kcore`: the KIR builder — one constructor per instruction, each calling the kernel's structural service, so lowering never names a service directly.
+- `lower_core.kcore`: the `Lowerer` state, the karc-type-to-`KirType` bridge, scopes, slots and conversions.
+- `lower_values.kcore`, `lower_expr.kcore`, `lower_call.kcore`, `lower_stmt.kcore`: struct copies and pointer helpers, expression lowering, call lowering, statement lowering.
+- `lower_module.kcore`: the module pass — records, string literals, globals and function declarations, then one function body at a time.
+- `elaborate.kcore`: the whole-tree checks the `elaborate` phase runs over the parsed tree.
+- `diagnostics.kcore`: the numeric diagnostic codes, spelled out in `diagnostics.md`.
+- `language.kcore`: the `construct KArc() extends Language<Tree, Program>` declaration, its declared diagnostic specs and its four phases.
 - `host-contract.md`: the host/prelude functions and the remaining driver boundary.
 
 The accepted program above lives in `../examples/fibonacci/app.cpp`. Further
@@ -66,10 +66,10 @@ other function keeps KArc's `name#<signature hash>` linkage. `short` and
 `unsigned short` are 16-bit, and parameters may be pointers to pointers.
 A parameter list may end in `...` (see `std.md` for the calling convention).
 `new`/`delete` expressions allocate through the std. `sizeof` of a struct and
-struct pointer arithmetic use the C layout (`layout.klfd`). An empty statement
+struct pointer arithmetic use the C layout (`layout.kcore`). An empty statement
 `;` is accepted.
 
-Classes (`parser_class.klfd`, `lower_class.klfd`): member functions defined in
+Classes (`parser_class.kcore`, `lower_class.kcore`): member functions defined in
 the class body become `Owner::name` functions with a `this` parameter, as
 out-of-class definitions already did. A constructor `Owner(...)` may have a
 member initializer list; a destructor is `~Owner()`. `T c;`, `T c(args)`,
@@ -156,12 +156,12 @@ in (`std.md`):
 - **Multiple inheritance.** A polymorphic base after the first keeps its
   own table pointer; the complete class gives it a table whose overridden
   entries are thunks moving `this` back to the complete object
-  (`lower_thunk.klfd`). Each table records its subobject's offset, which
+  (`lower_thunk.kcore`). Each table records its subobject's offset, which
   `delete` and `dynamic_cast` use to reach the complete object; casts and
   comparisons between base and derived pointers adjust by the base's offset.
 - **Coroutines.** A function whose body uses `co_await`, `co_yield` or
   `co_return` becomes a ramp under its own name, a resume function and a
-  destroy function (`lower_coroutine.klfd`). The ramp allocates a frame,
+  destroy function (`lower_coroutine.kcore`). The ramp allocates a frame,
   copies the parameters into it, constructs `R::promise_type` at byte 32
   and returns `get_return_object()`; every local of the resume function
   lives in the frame, and each suspension records its point in the frame's
@@ -194,7 +194,7 @@ such as the storage behind a string literal, gets a generated name from the
 kernel. `--emit lib` keeps `main` local for translation-unit libraries;
 `--export main` preserves it for the designated program entry archive.
 
-A KArc program is a C process (`entry = .Process` in `language.klfd`): the
+A KArc program is a C process (`entry = .Process` in `language.kcore`): the
 `main` the backend adds passes `argc`, `argv` and `envp` to the program's
 `main`, whose value is the exit status. A runtime trap is reported on stderr
 and aborts. The bytecode runner, `karc-run file.klbc [ARGUMENT...]`, runs a

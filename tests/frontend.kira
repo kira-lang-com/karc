@@ -1,0 +1,51 @@
+import KLF
+import Foundation
+
+@Test
+function lexesKArcSource() {
+    let result = lex("int main() { return 42; }")
+    expect!(result.error == "")
+    expect!(result.tokens.count > 4)
+    expect!(result.tokens[0].kind == TokenKind.KwInt)
+}
+
+@Test
+function preservesVoidPointerIdentity() {
+    expect!(isPointerType("*[0 x unit]"))
+    expect!(elementOfPointer("*[0 x unit]") == "unit")
+    expect!(elementOfPointer("*[0 x i8]") == "i8")
+}
+
+@Test
+function parsesDistinctPointerOverloads() {
+    let tokens = lex("int pick(char* p); int pick(void* p);")
+    let parser = parseTokens(tokens.tokens, "overloads.cpp")
+    expect!(parser.error == "")
+    expect!(parser.tree.functions.count == 2)
+    expect!(parser.tree.functions[0].parameters[0].declType == "*[0 x i8]")
+    expect!(parser.tree.functions[1].parameters[0].declType == "*[0 x unit]")
+}
+
+@Test
+function selectsWindowsTargetMacros() {
+    let tokens = lex("#if defined(__KARC_TARGET_WINDOWS_MSVC__)\nint windows;\n#else\nint other;\n#endif\n")
+    let processed = preprocessForTarget(tokens.tokens, "test.cpp", "x86_64-pc-windows-msvc")
+    expect!(processed.code == 0)
+    let parser = parseTokens(processed.tokens, "test.cpp")
+    expect!(parser.error == "")
+    expect!(parser.tree.globals.count == 1)
+    expect!(parser.tree.globals[0].name == "windows")
+}
+
+// The conditional cases in the original preprocessor unit tests also need
+// to exercise the Kira frontend while the compile-and-run helpers are ported.
+@Test
+function selectsTheMatchingConditionalBranch() {
+    let tokens = lex("#define N 2\n#if N == 1\nint first;\n#elif N == 2\nint selected;\n#else\nint last;\n#endif\n")
+    let processed = preprocessForTarget(tokens.tokens, "test.cpp", "x86_64-pc-windows-msvc")
+    expect!(processed.code == 0)
+    let parser = parseTokens(processed.tokens, "test.cpp")
+    expect!(parser.error == "")
+    expect!(parser.tree.globals.count == 1)
+    expect!(parser.tree.globals[0].name == "selected")
+}

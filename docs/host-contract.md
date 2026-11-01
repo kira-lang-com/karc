@@ -4,8 +4,7 @@ What karc needs from the framework, and what it no longer needs.
 
 ## Text builtins
 
-The definition language has no string library, so `klf-kira-lower` implements
-these inline:
+KArc imports these helpers from the Kira `KLF` library:
 
 ```kira
 function utf8Count(text: String) -> Int
@@ -20,9 +19,8 @@ function includeText(path: String) -> String
 function includeExists(path: String) -> Bool
 ```
 
-`sourceText` assembles the text of the unit being compiled from
-`klf.source.len` and `klf.source.byte`; the service ABI is i64-only, so the
-text cannot cross it in one piece.
+`sourceText` obtains the unit's byte count and copies its UTF-8 text through
+the KLF kernel services. The library calls those services through RIDL.
 
 `sourceName` and `fileName` expose registered source names. `includeText` and
 `includeExists` look up registered sources by name; KArc resolves an include
@@ -36,8 +34,8 @@ also required, with copy-on-write updating the original variable or field.
 
 Lowering builds KIR through the general low-level builder services
 (`klf.kir.*`), addressed by opaque handles: module, signature, function,
-block, value, address, global and type. `definitions/kir.klfd` is the only
-place that names them. Nothing below the frontend knows a C++ type: karc keeps
+block, value, address, global and type. `app/ir/kir.kira` is the main place that names them.
+Nothing below the frontend knows a C++ type: karc keeps
 its own type spellings and materializes each one into a `KirType` handle
 through `klf.kir.type.integer`, `.address`, `.array`, `.pointer`, `.function`,
 `.record` and `.unit`.
@@ -51,10 +49,9 @@ Diagnostics go through `klf.diag.error(code, start, end)`; the codes are in
 
 ## Driver boundary
 
-`definitions/language.klfd` is a `construct KArc() extends Language<Tree,
-Program>` package. The kernel loads the directory, reads the metadata and
-drives the four phases, so there is no textual KIR and no separate harness
-entry point.
+`app/Language.kira` declares `KArc` as a Kira `Language`. KLF reads its
+metadata, builds the Kira package and calls its RIDL phase entry points. The
+kernel drives the four phases without a separate harness or textual KIR.
 
 A phase artifact carries a payload word the definition owns, so the parsed
 tree travels: `parse` lexes and parses the unit and hands the tree out with
@@ -63,7 +60,8 @@ and `lower` reads the same tree off the program artifact. Nothing is parsed
 twice. `units` returns one unit per input file, so a program can span several
 files and a call may cross units.
 
-The definition is available through both the VM bootstrap path and the native
-frontend produced by `klf build`. The native runtime supplies the builder
-services and artifact heap in the generated driver, so the native frontend can
-lower translation units and emit KIR libraries or executables.
+KCore builds Kira, and Kira builds KArc's native frontend through `klf build`.
+The generated driver supplies the builder services and artifact frames, so
+KArc can lower translation units and emit KIR libraries or executables. KArc
+programs can run through either the KLF VM or the native backend. The former
+KCore definition remains under `definitions/` for migration comparison.

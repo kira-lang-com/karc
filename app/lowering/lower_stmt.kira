@@ -1,0 +1,548 @@
+import KLF
+// Statement lowering. Assignment goes through the place model, so one arm
+// covers scalar, field, index, arrow and dereference writes. Control flow uses
+// real block handles; `break` and `continue` read the innermost target off the
+// two target stacks.
+
+// `T& name = init`: the slot holds the address `name` refers to.
+function emitReferenceDeclare(state: borrow mut Lowerer, decl: LocalDeclaration, span: Span) {
+    let element = elementOfPointer(decl.declType)
+    var address = zeroValue(state).reference
+    if isClassLvalue(state, decl.initializer) {
+        let place = emitPlace(state, decl.initializer)
+        var object = slotPointer(state, place.address, place.ty)
+        // `Base& b = derived`: the base subobject.
+        if isClassType(copy element) && place.ty != element && isBaseOf(copy state, copy element, place.ty) { object = upcast(state, object, place.ty, copy element) }
+        address = kBitcast(state, object, decl.declType)
+    } else if isClassType(copy element) {
+        let mark = state.temporaries.count
+        let value = emitExpression(state, decl.initializer)
+        address = kBitcast(state, value.reference, decl.declType)
+        consumeTemporary(state, mark)
+    } else {
+        address = emitReferenceArgument(state, decl.initializer, decl.declType)
+    }
+    let slot = declare(state, decl.name, decl.declType, copy element, copy span)
+    state.slotsData[slot].reference = true
+    kStore(state, address, state.slotsData[slot].address)
+}
+function emitDeclare(state: borrow mut Lowerer, decl: LocalDeclaration, span: Span) {
+    if decl.reference == -1 && hasExpr(decl.initializer) && decl.declType != "*[0 x auto]" {
+        emitReferenceDeclare(state, copy decl, copy span)
+        return
+    }
+    if isDeducedSpelling(decl.declType) && hasExpr(decl.initializer) {
+        emitAutoDeclare(state, copy decl, copy span)
+        return
+    }
+    var element: String = ""
+    if isPointerType(decl.declType) {
+        element = elementOfPointer(decl.declType)
+    }
+    let slot = declare(state, decl.name, decl.declType, copy element, copy span)
+    if hasExpr(decl.initializer) {
+        storeLocal(state, slot, emitExpression(state, decl.initializer))
+    } else if isPointerType(decl.declType) {
+        kStore(state, kNull(state, decl.declType), state.slotsData[slot].address)
+    } else {
+        storeLocal(state, slot, zeroValue(state))
+    }
+}
+function isConstruct(state: Lowerer, id: ExprId) -> Bool {
+    if !hasExpr(copy id) { return false }
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Call(call) -> return call.name == "@construct" || call.name == "@construct{}"
+        NumberLit -> return false
+        FloatLit -> return false
+        StringLit -> return false
+        Name -> return false
+        Neg -> return false
+        Positive -> return false
+        Not -> return false
+        BitNot -> return false
+        AddrOf -> return false
+        Deref -> return false
+        Sizeof -> return false
+        Cast -> return false
+        Field -> return false
+        Index -> return false
+        PreStep -> return false
+        PostStep -> return false
+        Binary -> return false
+        Ternary -> return false
+        New -> return false
+        Delete -> return false
+    }
+}
+function emitStructDeclare(state: borrow mut Lowerer, decl: StructDeclaration, span: Span) {
+    let sIdx = structIndex(copy state, nominalName(decl.declType))
+    let constructed = isConstruct(copy state, decl.initializer)
+    if sIdx >= 0 && constructed {
+        let slot = declare(state, decl.name, decl.declType, "", copy span)
+        zeroAggregate(state, state.slotsData[slot].address, decl.declType)
+        let object = slotPointer(state, state.slotsData[slot].address, decl.declType)
+        let initializer = state.tree.expressions[decl.initializer.value]
+        match initializer.kind {
+            Call(call) -> {
+                if call.name == "@construct{}" && emitListConstruct(state, object, decl.declType, call.arguments) { return }
+                emitConstruct(state, object, decl.declType, call.arguments)
+                return
+            }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Name -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+        return
+    }
+    if sIdx < 0 {
+        let slot = declare(state, decl.name, decl.declType, "", copy span)
+        if hasExpr(decl.initializer) && !constructed { storeLocal(state, slot, emitExpression(state, decl.initializer)) }
+        else { storeLocal(state, slot, zeroValue(state)) }
+        return
+    }
+    let slot = declare(state, decl.name, decl.declType, "", copy span)
+    zeroAggregate(state, state.slotsData[slot].address, decl.declType)
+    if hasExpr(decl.initializer) {
+        let init = state.tree.expressions[decl.initializer.value]
+        var named = false
+        match init.kind {
+            Name -> { named = true }
+            NumberLit -> {}
+            FloatLit -> {}
+            StringLit -> {}
+            Neg -> {}
+            Positive -> {}
+            Not -> {}
+            BitNot -> {}
+            AddrOf -> {}
+            Deref -> {}
+            Sizeof -> {}
+            Cast -> {}
+            Call -> {}
+            Field -> {}
+            Index -> {}
+            PreStep -> {}
+            PostStep -> {}
+            Binary -> {}
+            Ternary -> {}
+            New -> {}
+            Delete -> {}
+        }
+        if named && staticType(state, decl.initializer) == decl.declType && !needsCopy(copy state, decl.declType) {
+            structCopy(state, slot, decl.initializer, copy span)
+        } else {
+            emitClassInit(state, slot, decl.declType, decl.initializer)
+        }
+    }
+}
+// Copy the returned struct into the sret out-pointer.
+function emitStructReturn(state: borrow mut Lowerer, value: ExprId, returnType: String) {
+    let rhsExpr = state.tree.expressions[value.value]
+    var sourceName = ""
+    match rhsExpr.kind {
+        Name(named) -> { sourceName = named.name }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let sslot = lookup(copy state, copy sourceName)
+    let sIdx = structIndex(copy state, nominalName(copy returnType))
+    let base = structBehindPointer(state, state.sret.unwrap(), copy returnType)
+    if sourceName == "" || sslot < 0 || sIdx < 0 {
+        zeroAggregate(state, base, copy returnType)
+        return
+    }
+    let pointerType = joinText(["*[0 x ", returnType, "]"])
+    if state.slotsData[sslot].ty != returnType && state.slotsData[sslot].ty != pointerType {
+        zeroAggregate(state, base, copy returnType)
+        return
+    }
+    var source = state.slotsData[sslot].address
+    if state.slotsData[sslot].reference || (isPointerType(state.slotsData[sslot].ty) && elementOfPointer(state.slotsData[sslot].ty) == returnType) {
+        source = structBehindPointer(state, kLoad(state, state.slotsData[sslot].address), copy returnType)
+    }
+    copyAggregate(state, source, base, copy returnType)
+}
+// Returns may appear early; each return path deallocates every slot before
+// returning and marks the block done.
+function emitReturn(state: borrow mut Lowerer, returned: ReturnStatement, span: Span) {
+    if returned.marker == "@co_return" {
+        emitCoReturn(state, returned.value, copy span)
+        return
+    }
+    let returnType = state.tree.functions[state.functionIndex].returnType
+    if isClassType(copy returnType) {
+        var kept = -1
+        if hasExpr(returned.value) {
+            kept = emitClassReturn(state, returned.value, copy returnType)
+        }
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, kept)
+        deallocLocals(state)
+        kReturnVoid(state)
+    } else if returnType == "unit" {
+        if hasExpr(returned.value) { emitExpression(state, returned.value) }
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, -1)
+        deallocLocals(state)
+        kReturnVoid(state)
+    } else if state.tree.functions[state.functionIndex].refReturn {
+        let place = emitPlace(state, returned.value)
+        let returnRef = kBitcast(state, slotPointer(state, place.address, place.ty), copy returnType)
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, -1)
+        deallocLocals(state)
+        kReturn(state, returnRef)
+    } else if isPointerType(copy returnType) || isFnPtrType(copy returnType) {
+        let raw = emitExpression(state, returned.value)
+        let returnRef = coerceRef(state, copy raw, copy returnType)
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, -1)
+        deallocLocals(state)
+        kReturn(state, returnRef)
+    } else if returnType == "f64" {
+        let returnRef = convert(state, emitExpression(state, returned.value), "f64").reference
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, -1)
+        deallocLocals(state)
+        kReturn(state, returnRef)
+    } else {
+        let value = asInt(state, emitExpression(state, returned.value))
+        let returnRef = convert(state, copy value, copy returnType).reference
+        releaseHandlers(state)
+        destroyTemporaries(state, 0)
+        destroyScope(state, 0, -1)
+        // main's output shows after its locals' destructors ran.
+        if isMainName(state.tree.functions[state.functionIndex].name) { flushOutput(state) }
+        deallocLocals(state)
+        kReturn(state, returnRef)
+    }
+    state.terminated = true
+}
+function emitLoopBody(state: borrow mut Lowerer, body: [StmtId], breakBlock: KirBlockBuilder, continueBlock: KirBlockBuilder) {
+    let savedBreak = state.breakDepth
+    let savedContinue = state.continueDepth
+    pushBreak(state, breakBlock)
+    pushContinue(state, continueBlock)
+    emitBody(state, copy body)
+    state.breakDepth = savedBreak
+    state.continueDepth = savedContinue
+}
+function emitWhile(state: borrow mut Lowerer, loop: WhileStatement, span: Span) {
+    let loopScope = state.active
+    var initSlot = -1
+    match loop.initializer {
+        Some(init) -> {
+            var element: String = ""
+            if isPointerType(init.declType) { element = elementOfPointer(init.declType) }
+            initSlot = declare(state, init.name, init.declType, copy element, copy span)
+        }
+        None -> {}
+    }
+    let conditionBlock = kBlock(state)
+    let bodyBlock = kBlock(state)
+    let afterBlock = kBlock(state)
+    kBr(state, conditionBlock)
+    kSwitchTo(state, conditionBlock)
+    if initSlot >= 0 {
+        match loop.initializer {
+            Some(init) -> storeLocal(state, initSlot, emitExpression(state, init.initializer))
+            None -> {}
+        }
+    }
+    let condition = emitCondition(state, loop.condition)
+    kCondBr(state, condition.reference, bodyBlock, afterBlock)
+    kSwitchTo(state, bodyBlock)
+    emitLoopBody(state, loop.body, afterBlock, conditionBlock)
+    if !state.terminated { kBr(state, conditionBlock) }
+    state.terminated = false
+    kSwitchTo(state, afterBlock)
+    state.active = loopScope
+}
+function emitForInitializer(state: borrow mut Lowerer, id: StmtId) {
+    let init = state.tree.statements[id.value]
+    match init.kind {
+        Group(body) -> {
+            for child in body { emitStatement(state, copy child) }
+        }
+        Declare -> emitStatement(state, copy id)
+        IfInit -> emitStatement(state, copy id)
+        Assignment -> emitStatement(state, copy id)
+        ArrayDecl -> emitStatement(state, copy id)
+        StructDecl -> emitStatement(state, copy id)
+        DeclGroup -> emitStatement(state, copy id)
+        ExprStmt -> emitStatement(state, copy id)
+        Return -> emitStatement(state, copy id)
+        While -> emitStatement(state, copy id)
+        DoWhile -> emitStatement(state, copy id)
+        For -> emitStatement(state, copy id)
+        If -> emitStatement(state, copy id)
+        Switch -> emitStatement(state, copy id)
+        Case -> emitStatement(state, copy id)
+        Default -> emitStatement(state, copy id)
+        Break -> emitStatement(state, copy id)
+        Continue -> emitStatement(state, copy id)
+        Label -> emitStatement(state, copy id)
+        Goto -> emitStatement(state, copy id)
+        RangeFor -> emitStatement(state, copy id)
+        GlobalInit -> emitStatement(state, copy id)
+        Try -> emitStatement(state, copy id)
+    }
+}
+function emitFor(state: borrow mut Lowerer, loop: ForStatement) {
+    let forScope = state.active
+    emitForInitializer(state, loop.control[0])
+    let conditionBlock = kBlock(state)
+    let bodyBlock = kBlock(state)
+    let stepBlock = kBlock(state)
+    let afterBlock = kBlock(state)
+    kBr(state, conditionBlock)
+    kSwitchTo(state, conditionBlock)
+    let condition = emitCondition(state, loop.condition)
+    kCondBr(state, condition.reference, bodyBlock, afterBlock)
+    kSwitchTo(state, bodyBlock)
+    emitLoopBody(state, loop.body, afterBlock, stepBlock)
+    if !state.terminated { kBr(state, stepBlock) }
+    state.terminated = false
+    kSwitchTo(state, stepBlock)
+    emitStatement(state, loop.control[1])
+    kBr(state, conditionBlock)
+    kSwitchTo(state, afterBlock)
+    state.active = forScope
+}
+function emitDoWhile(state: borrow mut Lowerer, loop: WhileStatement) {
+    let bodyBlock = kBlock(state)
+    let conditionBlock = kBlock(state)
+    let afterBlock = kBlock(state)
+    kBr(state, bodyBlock)
+    kSwitchTo(state, bodyBlock)
+    emitLoopBody(state, loop.body, afterBlock, conditionBlock)
+    if !state.terminated { kBr(state, conditionBlock) }
+    state.terminated = false
+    kSwitchTo(state, conditionBlock)
+    let condition = emitCondition(state, loop.condition)
+    kCondBr(state, condition.reference, bodyBlock, afterBlock)
+    kSwitchTo(state, afterBlock)
+}
+function emitIf(state: borrow mut Lowerer, branch: IfStatement, span: Span) {
+    let scopeStart = state.active
+    match branch.initializer {
+        Some(init) -> emitDeclare(state, copy init, copy span)
+        None -> {}
+    }
+    let condition = emitCondition(state, branch.condition)
+    let thenBlock = kBlock(state)
+    let elseBlock = kBlock(state)
+    let joinBlock = kBlock(state)
+    kCondBr(state, condition.reference, thenBlock, elseBlock)
+    kSwitchTo(state, thenBlock)
+    emitBody(state, branch.body)
+    if !state.terminated { kBr(state, joinBlock) }
+    state.terminated = false
+    kSwitchTo(state, elseBlock)
+    emitBody(state, branch.elseBody)
+    if !state.terminated { kBr(state, joinBlock) }
+    state.terminated = false
+    kSwitchTo(state, joinBlock)
+    state.active = scopeStart
+}
+function emitAssignment(state: borrow mut Lowerer, assignment: AssignmentStatement, span: Span) {
+    let placeType = staticType(state, assignment.place)
+    if isClassType(copy placeType) && structIndex(copy state, nominalName(copy placeType)) >= 0 {
+        emitClassAssignment(state, assignment.place, assignment.value, copy placeType)
+        return
+    }
+    let place = state.tree.expressions[assignment.place.value]
+    match place.kind {
+        Name(named) -> {
+            if assignTargetIsStruct(copy state, named.name) {
+                // Whole-struct assignment `p2 = p1;` copies each field.
+                structCopy(state, lookup(copy state, named.name), assignment.value, copy span)
+                return
+            }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    let target = emitPlace(state, assignment.place)
+    if isClassType(target.ty) {
+        zeroAggregate(state, target.address, target.ty)
+        return
+    }
+    let rhs = state.tree.expressions[assignment.value.value]
+    var value = emitExpression(state, assignment.value)
+    var fnSlot = -1
+    match rhs.kind {
+        Name(named) -> {
+            if lookup(copy state, named.name) < 0 { fnSlot = functionSlotInScope(copy state, named.name) }
+        }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if fnSlot >= 0 {
+        if isFnPtrType(target.ty) {
+            let reference = functionReference(state, fnSlot)
+            value = Value { reference = reference, boolean = false, wide = true, pointer = functionPointerType(copy state, fnSlot), unsigned = false, floating = false }
+        } else {
+            value = zeroValue(state)
+        }
+    }
+    storeToPlace(state, copy target, copy value)
+}
+// Each statement destroys the class temporaries it created and did not move.
+function emitStatement(state: borrow mut Lowerer, id: StmtId) {
+    resumeUnreachableStatement(state, copy id)
+    let mark = state.temporaries.count
+    emitStatementKind(state, copy id)
+    destroyTemporaries(state, mark)
+}
+function emitStatementKind(state: borrow mut Lowerer, id: StmtId) {
+    let stmt = state.tree.statements[id.value]
+    match stmt.kind {
+        DeclGroup(body) -> {
+            for child in body {
+                if shouldEmitStatement(copy state) { emitStatement(state, copy child) }
+            }
+        }
+        Group(body) -> {
+            let scopeStart = state.active
+            for child in body {
+                if shouldEmitStatement(copy state) { emitStatement(state, copy child) }
+            }
+            destroyScope(state, scopeStart, -1)
+            state.active = scopeStart
+        }
+        Declare(decl) -> emitDeclare(state, copy decl, stmt.span)
+        IfInit(decl) -> emitDeclare(state, copy decl, stmt.span)
+        ArrayDecl(decl) -> {
+            let arrayType = joinText(["[", decimalText(decl.size), " x ", decl.elementType, "]"])
+            let slot = declare(state, decl.name, copy arrayType, decl.elementType, stmt.span)
+            if hasExpr(decl.initializer) {
+                zeroAggregate(state, state.slotsData[slot].address, copy arrayType)
+                emitArrayInit(state, state.slotsData[slot].address, copy arrayType, decl.initializer)
+            }
+        }
+        StructDecl(decl) -> emitStructDeclare(state, copy decl, stmt.span)
+        GlobalInit(init) -> emitGlobalInit(state, copy init)
+        Try(tryStmt) -> emitTry(state, copy tryStmt)
+        Assignment(assignment) -> emitAssignment(state, copy assignment, stmt.span)
+        ExprStmt(expression) -> { emitExpression(state, copy expression) }
+        RangeFor(loop) -> emitRangeFor(state, copy loop, stmt.span)
+        Return(returned) -> emitReturn(state, copy returned, stmt.span)
+        While(loop) -> emitWhile(state, copy loop, stmt.span)
+        For(loop) -> emitFor(state, copy loop)
+        DoWhile(loop) -> emitDoWhile(state, copy loop)
+        Switch(switchStmt) -> emitSwitch(state, copy switchStmt)
+        If(branch) -> emitIf(state, copy branch, stmt.span)
+        Break -> {
+            if state.breakDepth == 0 {
+                lowerError(state, diagBreakOutsideLoop(), stmt.span)
+                return
+            }
+            let target = state.breakTargets[state.breakDepth - 1]
+            destroyScope(state, target.scope, -1)
+            kBr(state, target.block)
+            state.terminated = true
+        }
+        Continue -> {
+            if state.continueDepth == 0 {
+                lowerError(state, diagContinueOutsideLoop(), stmt.span)
+                return
+            }
+            let target = state.continueTargets[state.continueDepth - 1]
+            destroyScope(state, target.scope, -1)
+            kBr(state, target.block)
+            state.terminated = true
+        }
+        Label(name) -> emitNamedLabel(state, copy name, stmt.span)
+        Goto(name) -> emitNamedGoto(state, copy name, stmt.span)
+        Case -> emitSwitchMarker(state, copy id)
+        Default -> emitSwitchMarker(state, copy id)
+    }
+}
+function emitBody(state: borrow mut Lowerer, body: [StmtId]) {
+    let scopeStart = state.active
+    for id in body {
+        if shouldEmitStatement(copy state) {
+            emitStatement(state, copy id)
+        }
+    }
+    destroyScope(state, scopeStart, -1)
+    state.active = scopeStart
+}

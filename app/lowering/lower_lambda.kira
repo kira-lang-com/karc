@@ -1,0 +1,477 @@
+import KLF
+// Lambdas (parser/expr/closures.kcore). The capture fields and the operator()'s
+// result type are settled where the lambda is created, since only then are
+// the captured variables' types known; the class's record fields and the
+// operator()'s declaration wait until then.
+
+function isLambdaType(ty: String) -> Bool {
+    let name = nominalName(copy ty)
+    return utf8Count(name) > 14 && utf8Slice(name, 0, 14) == "__karc_lambda_"
+}
+function isLambdaFunction(tree: CppTree, fn: CppFunction) -> Bool {
+    return isLambdaType(joinText(["%", methodOwnerType(copy tree, fn.name)])) || isLambdaType(methodOwnerType(copy tree, fn.name))
+}
+function captureName(field: CppField) -> String {
+    if utf8Byte(field.name, 0) == 38 { return utf8Slice(field.name, 1, utf8Count(field.name)) }
+    // The enclosing object's pointer, captured from `this`.
+    if field.name == "__karc_outer" { return "this" }
+    return field.name
+}
+// The class of the object a lambda captured with `this`, else "".
+function outerClass(state: borrow mut Lowerer) -> String {
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    if owner == "" { return "" }
+    let outerType = memberType(copy state, copy owner, "__karc_outer")
+    if !isPointerType(copy outerType) { return "" }
+    return elementOfPointer(copy outerType)
+}
+// In a lambda that captured `this`: the enclosing object's pointer and
+// class, read from the closure; none (type "") elsewhere.
+function outerObject(state: borrow mut Lowerer) -> Value {
+    let owner = methodOwnerType(state.tree, state.tree.functions[state.functionIndex].name)
+    let selfSlot = lookup(copy state, "this")
+    let outerType = memberType(copy state, copy owner, "__karc_outer")
+    if owner == "" || selfSlot < 0 || !isPointerType(copy outerType) { return Value { reference = kNull(state, "*[0 x i8]"), boolean = false, wide = true, pointer = "", unsigned = false, floating = false } }
+    let self = kLoad(state, state.slotsData[selfSlot].address)
+    let storage = kAddrCast(state, kAddressOf(state, self, arrayOfPointer(state.slotsData[selfSlot].ty)), copy owner)
+    let field = memberPlace(state, storage, copy owner, "__karc_outer")
+    return Value { reference = kLoad(state, field.address), boolean = false, wide = true, pointer = outerType, unsigned = false, floating = false }
+}
+function localType(state: Lowerer, slot: Int) -> String {
+    if state.slotsData[slot].reference { return elementOfPointer(state.slotsData[slot].ty) }
+    return state.slotsData[slot].ty
+}
+// `@lambda::__karc_lambda_N`: settle the class, then build the object.
+function emitLambda(state: borrow mut Lowerer, call: CallExpression, span: Span) -> Value {
+    let className = utf8Slice(call.name, 9, utf8Count(call.name))
+    let structType = joinText(["%", className])
+    let record = structIndex(copy state, copy className)
+    if record < 0 { return zeroValue(state) }
+    let s = state.tree.structs[record]
+    if !capturesTyped(copy s) {
+        var fields: [CppField] = []
+        for field in s.fields {
+            let slot = lookup(copy state, captureName(copy field))
+            if hasExpr(field.fallback) {
+                var ty = staticType(state, field.fallback)
+                if isArrayType(copy ty) { ty = joinText(["*[0 x ", arrayElementType(copy ty), "]"]) }
+                if utf8Byte(field.name, 0) == 38 { ty = joinText(["*[0 x ", ty, "]"]) }
+                fields.append(CppField { name = field.name, nameSpan = field.nameSpan, declType = ty, fallback = field.fallback })
+            } else if slot >= 0 && state.slotsData[slot].global == "" {
+                var ty = localType(copy state, slot)
+                if utf8Byte(field.name, 0) == 38 { ty = joinText(["*[0 x ", ty, "]"]) }
+                fields.append(CppField { name = field.name, nameSpan = field.nameSpan, declType = ty, fallback = field.fallback })
+            }
+        }
+        state.tree.structs[record] = CppStruct { name = s.name, nameSpan = s.nameSpan, fields = fields, internal = s.internal, instance = s.instance, span = s.span }
+        for field in fields { kRecordField(state, state.structTypes[record], field.nameSpan, field.declType) }
+        if fields.count == 0 { kRecordField(state, state.structTypes[record], s.nameSpan, "i8") }
+    }
+    if !lambdaSettled(state, copy className) { settleLambdaFunction(state, copy className) }
+    let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), copy structType, "", copy span)
+    zeroAggregate(state, state.slotsData[slot].address, copy structType)
+    let object = slotPointer(state, state.slotsData[slot].address, copy structType)
+    let fields = state.tree.structs[record].fields
+    for f in 0..fields.count {
+        let source = lookup(copy state, captureName(fields[f]))
+        if hasExpr(fields[f].fallback) {
+            initCapture(state, object, copy structType, f, fields[f])
+        } else if source >= 0 {
+            let member = fieldPointer(state, object, copy structType, f, fields[f].declType)
+            let memberValue = Value { reference = member, boolean = false, wide = true, pointer = joinText(["*[0 x ", fields[f].declType, "]"]), unsigned = false, floating = false }
+            let target = placeFromPointer(state, copy memberValue)
+            if utf8Byte(fields[f].name, 0) == 38 {
+                let place = localPlace(state, source)
+                kStore(state, kBitcast(state, slotPointer(state, place.address, place.ty), fields[f].declType), target.address)
+            } else if isClassType(fields[f].declType) {
+                let place = localPlace(state, source)
+                copyInto(state, member, slotPointer(state, place.address, place.ty), fields[f].declType)
+            } else {
+                kStore(state, coerceRef(state, rvalueFromPlace(state, localPlace(state, source)), fields[f].declType), target.address)
+            }
+        }
+    }
+    state.temporaries.append(slot)
+    return Value { reference = object, boolean = false, wide = true, pointer = joinText(["*[0 x ", structType, "]"]), unsigned = false, floating = false }
+}
+// A lambda made inside the lambda `fn` and returned from it, typed before
+// `fn` is lowered: its captures from `fn`'s parameters, locals and `this`.
+function settleNestedCaptures(state: borrow mut Lowerer, className: String, fn: CppFunction) {
+    let record = structIndex(copy state, copy className)
+    if record < 0 || capturesTyped(state.tree.structs[record]) { return }
+    let s = state.tree.structs[record]
+    var fields: [CppField] = []
+    for field in s.fields {
+        let name = captureName(copy field)
+        var ty = ""
+        if hasExpr(field.fallback) {
+            ty = lambdaExpressionType(state, field.fallback, copy fn)
+        } else if name == "this" {
+            let owner = methodOwnerType(state.tree, fn.name)
+            if owner != "" { ty = joinText(["*[0 x ", owner, "]"]) }
+        } else {
+            let known = isParameterOrLocal(state.tree, copy fn, copy name)
+            if known { ty = lambdaExpressionType(state, addLoweredExpr(state, Expr { kind = .Name(NameExpression { name = name, explicitArguments = 0, valueUse = true }), span = field.nameSpan, nameSpan = field.nameSpan }), copy fn) }
+            if ty != "" && utf8Byte(field.name, 0) == 38 { ty = joinText(["*[0 x ", ty, "]"]) }
+        }
+        if ty != "" { fields.append(CppField { name = field.name, nameSpan = field.nameSpan, declType = ty, fallback = field.fallback }) }
+    }
+    state.tree.structs[record] = CppStruct { name = s.name, nameSpan = s.nameSpan, fields = fields, internal = s.internal, instance = s.instance, span = s.span }
+    for field in fields { kRecordField(state, state.structTypes[record], field.nameSpan, field.declType) }
+    if fields.count == 0 { kRecordField(state, state.structTypes[record], s.nameSpan, "i8") }
+}
+function isParameterOrLocal(tree: CppTree, fn: CppFunction, name: String) -> Bool {
+    for parameter in fn.parameters {
+        if parameter.name == name { return true }
+    }
+    return findDeclaration(copy tree, fn.body, copy name).isSome()
+}
+// `[name = init]` or `[&name = place]`: the field made from its initializer.
+function initCapture(state: borrow mut Lowerer, object: KirValue, structType: String, index: Int, field: CppField) {
+    let member = fieldPointer(state, object, copy structType, index, field.declType)
+    let memberValue = Value { reference = member, boolean = false, wide = true, pointer = joinText(["*[0 x ", field.declType, "]"]), unsigned = false, floating = false }
+    let target = placeFromPointer(state, copy memberValue)
+    if utf8Byte(field.name, 0) == 38 {
+        let place = emitPlace(state, field.fallback)
+        kStore(state, kBitcast(state, slotPointer(state, place.address, place.ty), field.declType), target.address)
+    } else if isClassType(field.declType) {
+        emitConstruct(state, member, field.declType, [field.fallback])
+    } else {
+        kStore(state, coerceRef(state, emitExpression(state, field.fallback), field.declType), target.address)
+    }
+}
+// The place a local slot names: its storage, or what a reference refers to.
+function localPlace(state: borrow mut Lowerer, slot: Int) -> Place {
+    let ty = state.slotsData[slot].ty
+    if state.slotsData[slot].reference {
+        let pointerValue = Value { reference = kLoad(state, state.slotsData[slot].address), boolean = false, wide = true, pointer = ty, unsigned = false, floating = false }
+        return placeFromPointer(state, copy pointerValue)
+    }
+    return Place { address = state.slotsData[slot].address, ty = ty, unsigned = isUnsignedType(copy ty), bitOffset = 0, bitWidth = 0 }
+}
+// Deduce the operator()'s result, then declare it.
+function settleLambdaFunction(state: borrow mut Lowerer, className: String) {
+    for i in 0..state.tree.functions.count {
+        let fn = state.tree.functions[i]
+        if fn.name == joinText([className, "::operator()"]) && functionSlotForFunction(state, i) < 0 {
+            var result = fn.returnType
+            if result == "auto" { result = lambdaResult(state, copy fn, copy className) }
+            state.tree.functions[i] = CppFunction { name = fn.name, nameSpan = fn.nameSpan, parameters = fn.parameters, returnType = result, body = fn.body, isProto = fn.isProto, internal = fn.internal, cLinkage = fn.cLinkage, refReturn = fn.refReturn, isConst = fn.isConst, span = fn.span }
+            declareFunctionAt(state, i)
+        }
+    }
+}
+// The type of the first `return` value in the body, "unit" without one.
+function lambdaResult(state: borrow mut Lowerer, fn: CppFunction, className: String) -> String {
+    let returned = firstReturn(copy state, fn.body)
+    if !hasExpr(copy returned) { return "unit" }
+    let ty = lambdaExpressionType(state, copy returned, copy fn)
+    match ty {
+        "" -> return "i32"
+        "i8", "i16", "u8", "u16" -> return "i32"
+        else -> return ty
+    }
+}
+function firstReturn(state: Lowerer, body: [StmtId]) -> ExprId {
+    for id in body {
+        let found = statementReturn(copy state, state.tree.statements[id.value])
+        if hasExpr(copy found) { return found }
+    }
+    return noExpr()
+}
+function statementReturn(state: Lowerer, statement: Statement) -> ExprId {
+    match statement.kind {
+        Return(returned) -> return returned.value
+        Group(body) -> return firstReturn(copy state, copy body)
+        DeclGroup(body) -> return firstReturn(copy state, copy body)
+        While(loop) -> return firstReturn(copy state, loop.body)
+        DoWhile(loop) -> return firstReturn(copy state, loop.body)
+        For(loop) -> {
+            let bodyReturn = firstReturn(copy state, loop.body)
+            if hasExpr(copy bodyReturn) { return bodyReturn }
+            return firstReturn(copy state, loop.control)
+        }
+        If(branch) -> {
+            let bodyReturn = firstReturn(copy state, branch.body)
+            if hasExpr(copy bodyReturn) { return bodyReturn }
+            return firstReturn(copy state, branch.elseBody)
+        }
+        Switch(switchStmt) -> return firstReturn(copy state, switchStmt.body)
+        RangeFor(loop) -> return firstReturn(copy state, loop.body)
+        Try(tryStmt) -> {
+            let bodyReturn = firstReturn(copy state, tryStmt.body)
+            if hasExpr(copy bodyReturn) { return bodyReturn }
+            for handler in tryStmt.handlers {
+                let handled = firstReturn(copy state, handler.body)
+                if hasExpr(copy handled) { return handled }
+            }
+            return noExpr()
+        }
+        Declare -> return noExpr()
+        IfInit -> return noExpr()
+        Assignment -> return noExpr()
+        ArrayDecl -> return noExpr()
+        StructDecl -> return noExpr()
+        ExprStmt -> return noExpr()
+        Case -> return noExpr()
+        Default -> return noExpr()
+        Break -> return noExpr()
+        Continue -> return noExpr()
+        Label -> return noExpr()
+        Goto -> return noExpr()
+        GlobalInit -> return noExpr()
+    }
+}
+// An expression's type where the lambda's parameters are in scope.
+function lambdaExpressionType(state: borrow mut Lowerer, id: ExprId, fn: CppFunction) -> String {
+    let e = state.tree.expressions[id.value]
+    match e.kind {
+        Call(call) -> {
+            if utf8Count(call.name) > 9 && utf8Slice(call.name, 0, 9) == "@lambda::" {
+                let className = utf8Slice(call.name, 9, utf8Count(call.name))
+                settleNestedCaptures(state, copy className, copy fn)
+                return joinText(["%", className])
+            }
+            if hasExpr(call.receiver) && call.name != "@invoke" {
+                let receiver = lambdaExpressionType(state, call.receiver, copy fn)
+                if isClassType(copy receiver) {
+                    let method = chooseMember(state, copy receiver, utf8Slice(call.name, 9, utf8Count(call.name)), call.arguments)
+                    if method >= 0 { return state.tree.functions[method].returnType }
+                }
+            }
+            return staticType(state, copy id)
+        }
+        Name(named) -> {
+            for parameter in fn.parameters {
+                if parameter.name == named.name { return parameterClassOf(copy parameter) }
+            }
+            match findDeclaration(state.tree, fn.body, named.name) {
+                Some(decl) -> {
+                    if decl.declType != "" && !isDeducedSpelling(decl.declType) {
+                        if decl.reference == -1 { return elementOfPointer(decl.declType) }
+                        return decl.declType
+                    }
+                    if hasExpr(decl.initializer) { return lambdaExpressionType(state, decl.initializer, copy fn) }
+                }
+                None -> {}
+            }
+            return staticType(state, copy id)
+        }
+        Binary(binary) -> {
+            let op = binary.op
+            match op {
+                "==", "!=", "<", ">", "<=", ">=", "&&", "||" -> return "i1"
+                else -> {}
+            }
+            let left = lambdaExpressionType(state, binary.left, copy fn)
+            let right = lambdaExpressionType(state, binary.right, copy fn)
+            if left == "f64" || right == "f64" { return "f64" }
+            if isClassType(copy left) { return staticType(state, copy id) }
+            if left != "" { return left }
+            return right
+        }
+        Not -> return "i1"
+        Neg(operand) -> return lambdaExpressionType(state, copy operand, copy fn)
+        Positive(operand) -> return promotedUnaryType(lambdaExpressionType(state, copy operand, copy fn))
+        Field(field) -> {
+            let base = lambdaExpressionType(state, field.base, copy fn)
+            if isClassType(copy base) { return memberType(copy state, copy base, field.name) }
+            if isPointerType(copy base) { return elementOfPointer(copy base) }
+            return staticType(state, copy id)
+        }
+        Deref(operand) -> {
+            let base = lambdaExpressionType(state, copy operand, copy fn)
+            if isPointerType(copy base) { return elementOfPointer(copy base) }
+            return staticType(state, copy id)
+        }
+        Index(index) -> {
+            let base = lambdaExpressionType(state, index.base, copy fn)
+            if isPointerType(copy base) { return elementOfPointer(copy base) }
+            if isArrayType(copy base) { return arrayElementType(copy base) }
+            return staticType(state, copy id)
+        }
+        NumberLit -> return staticType(state, copy id)
+        FloatLit -> return staticType(state, copy id)
+        StringLit -> return staticType(state, copy id)
+        BitNot -> return staticType(state, copy id)
+        AddrOf -> return staticType(state, copy id)
+        Sizeof -> return staticType(state, copy id)
+        Cast -> return staticType(state, copy id)
+        PreStep -> return staticType(state, copy id)
+        PostStep -> return staticType(state, copy id)
+        Ternary -> return staticType(state, copy id)
+        New -> return staticType(state, copy id)
+        Delete -> return staticType(state, copy id)
+    }
+}
+// Whether the lambda's operator() has been declared, which settling does.
+// Whether the parser typed every capture, so the class was laid out with
+// the others.
+function capturesTyped(s: CppStruct) -> Bool {
+    for field in s.fields {
+        if field.declType == "auto" { return false }
+    }
+    return true
+}
+function lambdaSettled(state: borrow mut Lowerer, className: String) -> Bool {
+    for i in 0..state.tree.functions.count {
+        if state.tree.functions[i].name == joinText([className, "::operator()"]) {
+            return state.tree.functions[i].returnType != "auto" && functionSlotForFunction(state, i) >= 0
+        }
+    }
+    // A generic lambda: settled once its captures have types.
+    let record = structIndex(copy state, copy className)
+    if record < 0 { return true }
+    for field in state.tree.structs[record].fields {
+        if field.declType == "auto" { return false }
+    }
+    return true
+}
+// The statement declaring local `name` in `body`, searched through nested
+// blocks; none when the body does not declare it.
+function declarationNamed(statement: Statement, name: String) -> Optional<LocalDeclaration> {
+    match statement.kind {
+        Declare(decl) -> {
+            if decl.name == name { return .Some(decl) }
+            return .None
+        }
+        StructDecl(decl) -> {
+            if decl.name == name {
+                return .Some(LocalDeclaration { name = decl.name, declType = decl.declType, reference = 0, initializer = decl.initializer })
+            }
+            return .None
+        }
+        IfInit(decl) -> {
+            if decl.name == name { return .Some(decl) }
+            return .None
+        }
+        ArrayDecl -> return .None
+        Assignment -> return .None
+        Group -> return .None
+        DeclGroup -> return .None
+        ExprStmt -> return .None
+        Return -> return .None
+        While -> return .None
+        DoWhile -> return .None
+        For -> return .None
+        If -> return .None
+        Switch -> return .None
+        Case -> return .None
+        Default -> return .None
+        Break -> return .None
+        Continue -> return .None
+        Label -> return .None
+        Goto -> return .None
+        RangeFor -> return .None
+        GlobalInit -> return .None
+        Try -> return .None
+    }
+}
+function findDeclaration(tree: CppTree, body: [StmtId], name: String) -> Optional<LocalDeclaration> {
+    for id in body {
+        let statement = tree.statements[id.value]
+        match declarationNamed(copy statement, copy name) {
+            Some(decl) -> return .Some(decl)
+            None -> {}
+        }
+        match statement.kind {
+            Group(children) -> {
+                match findDeclaration(copy tree, copy children, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            DeclGroup(children) -> {
+                match findDeclaration(copy tree, copy children, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            While(loop) -> {
+                match loop.initializer {
+                    Some(decl) -> { if decl.name == name { return .Some(decl) } }
+                    None -> {}
+                }
+                match findDeclaration(copy tree, loop.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            DoWhile(loop) -> {
+                match findDeclaration(copy tree, loop.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            For(loop) -> {
+                match findDeclaration(copy tree, loop.control, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+                match findDeclaration(copy tree, loop.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            If(branch) -> {
+                match branch.initializer {
+                    Some(decl) -> { if decl.name == name { return .Some(decl) } }
+                    None -> {}
+                }
+                match findDeclaration(copy tree, branch.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+                match findDeclaration(copy tree, branch.elseBody, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            Switch(switchStmt) -> {
+                match findDeclaration(copy tree, switchStmt.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            RangeFor(loop) -> {
+                if loop.name == name {
+                    return .Some(LocalDeclaration { name = loop.name, declType = loop.declType, reference = loop.reference, initializer = loop.range })
+                }
+                match findDeclaration(copy tree, loop.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+            }
+            Try(tryStmt) -> {
+                match findDeclaration(copy tree, tryStmt.body, copy name) {
+                    Some(decl) -> return .Some(decl)
+                    None -> {}
+                }
+                for handler in tryStmt.handlers {
+                    if handler.name == name {
+                        return .Some(LocalDeclaration { name = handler.name, declType = handler.declType, reference = handler.reference, initializer = noExpr() })
+                    }
+                    match findDeclaration(copy tree, handler.body, copy name) {
+                        Some(decl) -> return .Some(decl)
+                        None -> {}
+                    }
+                }
+            }
+            Declare -> {}
+            IfInit -> {}
+            Assignment -> {}
+            ArrayDecl -> {}
+            StructDecl -> {}
+            ExprStmt -> {}
+            Return -> {}
+            Case -> {}
+            Default -> {}
+            Break -> {}
+            Continue -> {}
+            Label -> {}
+            Goto -> {}
+            GlobalInit -> {}
+        }
+    }
+    return .None
+}

@@ -1,6 +1,6 @@
 // <coroutine>: coroutine handles, the trivial awaitables and
 // coroutine_traits. KArc lowers a coroutine to a ramp that allocates its
-// frame and a resume function (lowering/lower_coroutine.klfd); the frame starts with
+// frame and a resume function (lowering/lower_coroutine.kcore); the frame starts with
 // the header below and holds the promise at byte 32.
 #ifndef KARC_STD_COROUTINE
 #define KARC_STD_COROUTINE

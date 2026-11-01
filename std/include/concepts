@@ -1,5 +1,5 @@
 // <concepts>: the standard concepts over <type_traits>. KArc takes each
-// requires-expression as satisfied (definitions/parser/item/concepts.klfd), so
+// requires-expression as satisfied (definitions/parser/item/concepts.kcore), so
 // the concepts that need one hold for every type.
 #ifndef KARC_STD_CONCEPTS
 #define KARC_STD_CONCEPTS

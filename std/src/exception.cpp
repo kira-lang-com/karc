@@ -1,7 +1,7 @@
 // The exception in flight. A throw hands over a heap copy of the thrown value
 // and the names it can be caught as, `;T;Base;...;`; the lowering then leaves
 // every function up to a handler, testing `karc_exception_pending` after each
-// call (see definitions/lowering/lower_exception.klfd).
+// call (see definitions/lowering/lower_exception.kcore).
 #include "platform.h"
 
 extern "C" void karc_output_flush();
@@ -97,7 +97,7 @@ extern "C" void karc_exception_uncaught() {
 extern "C" void karc_exception_suspend() { pending = 0; }
 extern "C" void karc_exception_resume() { pending = 1; }
 
-// For dynamic_cast (definitions/lowering/lower_rtti.klfd): whether `chain`,
+// For dynamic_cast (definitions/lowering/lower_rtti.kcore): whether `chain`,
 // `;T;Base;...;`, names `name`; and a null test on a byte pointer.
 extern "C" int karc_type_chain_has(const char* chain, const char* name) {
     if (chain == 0) { return 0; }

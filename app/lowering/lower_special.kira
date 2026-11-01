@@ -1,0 +1,273 @@
+import KLF
+// The special members C++ declares implicitly: a class without its own
+// destructor, copy constructor or copy assignment destroys, copies or assigns
+// member by member, running the members' own special members. A user
+// destructor runs first and the members are destroyed after it.
+
+// Whether destroying a value of `ty` runs any code.
+function needsDestruction(state: Lowerer, ty: String) -> Bool {
+    if isArrayType(copy ty) { return needsDestruction(copy state, arrayElementType(copy ty)) }
+    if !isClassType(copy ty) { return false }
+    if findMember(state.tree, copy ty, joinText(["~", constructorName(copy ty)]), 0) >= 0 { return true }
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return false }
+    for field in state.tree.structs[index].fields {
+        if needsDestruction(copy state, field.declType) { return true }
+    }
+    return false
+}
+// Whether copying a value of `ty` is more than copying its bytes.
+function needsCopy(state: Lowerer, ty: String) -> Bool {
+    if isArrayType(copy ty) { return needsCopy(copy state, arrayElementType(copy ty)) }
+    if !isClassType(copy ty) { return false }
+    if copyConstructor(copy state, copy ty) >= 0 { return true }
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return false }
+    for field in state.tree.structs[index].fields {
+        if needsCopy(copy state, field.declType) { return true }
+    }
+    return false
+}
+// Calls function `index` with already-lowered arguments, `this` first.
+function callWithValues(state: borrow mut Lowerer, index: Int, values: [KirValue]) {
+    let callee = functionSlotForFunction(state, index)
+    if callee < 0 { return }
+    let parameters = state.functionSlots[callee].parameters
+    for i in 0..values.count {
+        var value = values[i]
+        if i < parameters.count { value = kBitcast(state, value, parameters[i]) }
+        kArgument(state, value)
+    }
+    if state.functionSlots[callee].result == "unit" {
+        kCallVoid(state, state.functionSlots[callee].handle)
+    } else {
+        kCall(state, state.functionSlots[callee].handle, state.functionSlots[callee].result)
+    }
+    afterCall(state, callee)
+    state.lastCallReference = false
+}
+function fieldPointer(state: borrow mut Lowerer, object: KirValue, structType: String, index: Int, fieldType: String) -> KirValue {
+    let address = memberAddress(state, structBehindPointer(state, object, copy structType), copy structType, index, copy fieldType)
+    return slotPointer(state, address, copy fieldType)
+}
+function elementPointer(state: borrow mut Lowerer, array: KirValue, arrayType: String, index: Int) -> KirValue {
+    let element = arrayElementType(copy arrayType)
+    let base = kAddressOf(state, array, copy arrayType)
+    let address = kElemAddr(state, base, kConstInt(state, "i64", index), copy element)
+    return slotPointer(state, address, copy element)
+}
+// Destroys the value of `ty` at `object`.
+function destroyValue(state: borrow mut Lowerer, object: KirValue, ty: String) {
+    if isArrayType(copy ty) {
+        var i = arrayLength(copy ty)
+        while i > 0 {
+            i = i - 1
+            destroyValue(state, elementPointer(state, object, copy ty, i), arrayElementType(copy ty))
+        }
+        return
+    }
+    if !isClassType(copy ty) { return }
+    let destructor = findMember(state.tree, copy ty, joinText(["~", constructorName(copy ty)]), 0)
+    if destructor >= 0 { callWithValues(state, destructor, [object]) }
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return }
+    let fields = state.tree.structs[index].fields
+    var f = fields.count
+    while f > 0 {
+        f = f - 1
+        if needsDestruction(copy state, fields[f].declType) {
+            destroyValue(state, fieldPointer(state, object, copy ty, f, fields[f].declType), fields[f].declType)
+        }
+    }
+}
+// Copy-constructs the value of `ty` at `destination` from `source`.
+function copyInto(state: borrow mut Lowerer, destination: KirValue, source: KirValue, ty: String) {
+    if isArrayType(copy ty) {
+        let element = arrayElementType(copy ty)
+        for i in 0..arrayLength(copy ty) {
+            copyInto(state, elementPointer(state, destination, copy ty, i), elementPointer(state, source, copy ty, i), copy element)
+        }
+        return
+    }
+    if !isClassType(copy ty) {
+        let pointerType = joinText(["*[0 x ", ty, "]"])
+        let sourceValue = Value { reference = source, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false }
+        let destinationValue = Value { reference = destination, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false }
+        let place = placeFromPointer(state, copy sourceValue)
+        let target = placeFromPointer(state, copy destinationValue)
+        kStore(state, kLoad(state, place.address), target.address)
+        return
+    }
+    let constructor = copyConstructor(copy state, copy ty)
+    if constructor >= 0 {
+        callWithValues(state, constructor, [destination, source])
+        return
+    }
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return }
+    if !needsCopy(copy state, copy ty) {
+        copyAggregate(state, structBehindPointer(state, source, copy ty), structBehindPointer(state, destination, copy ty), copy ty)
+        return
+    }
+    let fields = state.tree.structs[index].fields
+    for f in 0..fields.count {
+        copyInto(state, fieldPointer(state, destination, copy ty, f, fields[f].declType), fieldPointer(state, source, copy ty, f, fields[f].declType), fields[f].declType)
+    }
+}
+// Assigns the value of `ty` at `source` to the one at `destination`.
+function assignInto(state: borrow mut Lowerer, destination: KirValue, source: KirValue, ty: String) {
+    if !isClassType(copy ty) || !needsCopy(copy state, copy ty) {
+        if isClassType(copy ty) {
+            copyAggregate(state, structBehindPointer(state, source, copy ty), structBehindPointer(state, destination, copy ty), copy ty)
+        } else {
+            copyInto(state, destination, source, copy ty)
+        }
+        return
+    }
+    let assign = findMember(state.tree, copy ty, "operator=", 1)
+    if assign >= 0 && parameterClassOf(state.tree.functions[assign].parameters[0]) == ty {
+        let callee = functionSlotForFunction(state, assign)
+        if callee >= 0 {
+            kArgument(state, kBitcast(state, destination, state.functionSlots[callee].parameters[0]))
+            kArgument(state, kBitcast(state, source, state.functionSlots[callee].parameters[1]))
+            kCall(state, state.functionSlots[callee].handle, state.functionSlots[callee].result)
+            afterCall(state, callee)
+            state.lastCallReference = false
+        }
+        return
+    }
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return }
+    let fields = state.tree.structs[index].fields
+    for f in 0..fields.count {
+        if isArrayType(fields[f].declType) {
+            let element = arrayElementType(fields[f].declType)
+            for i in 0..arrayLength(fields[f].declType) {
+                let d = elementPointer(state, fieldPointer(state, destination, copy ty, f, fields[f].declType), fields[f].declType, i)
+                let s = elementPointer(state, fieldPointer(state, source, copy ty, f, fields[f].declType), fields[f].declType, i)
+                assignInto(state, d, s, copy element)
+            }
+        } else {
+            assignInto(state, fieldPointer(state, destination, copy ty, f, fields[f].declType), fieldPointer(state, source, copy ty, f, fields[f].declType), fields[f].declType)
+        }
+    }
+}
+// Default-constructs the class members of the zeroed object at `object`, as
+// an implicit or user constructor does before its body.
+function constructMembers(state: borrow mut Lowerer, object: KirValue, ty: String, skip: [String]) {
+    let index = structIndex(copy state, nominalName(copy ty))
+    if index < 0 { return }
+    for b in 0..state.tree.bitFields.count {
+        let bit = state.tree.bitFields[b]
+        if bit.owner == state.tree.structs[index].name && hasExpr(bit.fallback) && !containsText(copy skip, bit.name) {
+            storeToPlace(state, bitPlace(state, structBehindPointer(state, object, copy ty), copy ty, b), emitExpression(state, memberDefault(state, copy ty, bit.fallback)))
+        }
+    }
+    let fields = state.tree.structs[index].fields
+    for f in 0..fields.count {
+        var skipped = false
+        for name in skip {
+            if fields[f].name == name || fields[f].name == joinText(["__base_", unqualifiedName(copy name)]) { skipped = true }
+        }
+        if hasExpr(fields[f].fallback) && !skipped {
+            initializeFromDefault(state, object, copy ty, f, fields[f])
+        } else if isClassType(fields[f].declType) && !skipped {
+            let member = fieldPointer(state, object, copy ty, f, fields[f].declType)
+            let constructor = findMember(state.tree, fields[f].declType, constructorName(fields[f].declType), 0)
+            if constructor >= 0 && state.tree.functions[constructor].parameters.count == 0 {
+                constructMembers(state, member, fields[f].declType, explicitlyInitialized(copy state, constructor))
+                setVtable(state, member, fields[f].declType)
+                callWithValues(state, constructor, [member])
+            } else {
+                constructMembers(state, member, fields[f].declType, [])
+                setVtable(state, member, fields[f].declType)
+            }
+        }
+    }
+}
+// A member with a default initializer, `T name = value;` or `T name{...}`,
+// initialized from it where the object is constructed.
+function initializeFromDefault(state: borrow mut Lowerer, object: KirValue, ty: String, index: Int, field: CppField) {
+    let member = fieldPointer(state, object, copy ty, index, field.declType)
+    let fallback = memberDefault(state, copy ty, field.fallback)
+    if isArrayType(field.declType) {
+        // `T items[N] = {...}` or `char name[N] = "..."`.
+        let arrayPointer = joinText(["*[0 x ", field.declType, "]"])
+        let array = placeFromPointer(state, Value { reference = member, boolean = false, wide = true, pointer = arrayPointer, unsigned = false, floating = false })
+        emitArrayInit(state, array.address, field.declType, copy fallback)
+        return
+    }
+    if isClassType(field.declType) {
+        var arguments: [ExprId] = [fallback]
+        if isBracedCall(copy state, copy fallback) {
+            arguments = bracedPayloadArguments(state.tree.expressions[fallback.value])
+            if emitListConstruct(state, member, field.declType, copy arguments) { return }
+        }
+        emitConstruct(state, member, field.declType, copy arguments)
+        return
+    }
+    let pointerType = joinText(["*[0 x ", field.declType, "]"])
+    let place = placeFromPointer(state, Value { reference = member, boolean = false, wide = true, pointer = pointerType, unsigned = false, floating = false })
+    var value = zeroValue(state)
+    let e = state.tree.expressions[fallback.value]
+    if isBracedCall(copy state, copy fallback) {
+        let arguments = bracedPayloadArguments(copy e)
+        if arguments.count > 0 { value = emitExpression(state, arguments[0]) }
+    } else {
+        value = emitExpression(state, copy fallback)
+    }
+    kStore(state, coerceRef(state, copy value, field.declType), place.address)
+}
+// A default initializer naming a static member of its class, read where
+// the object is made, names it with its class.
+function memberDefault(state: borrow mut Lowerer, ty: String, fallback: ExprId) -> ExprId {
+    let e = state.tree.expressions[fallback.value]
+    var name = ""
+    match e.kind {
+        Name(named) -> { name = named.name }
+        NumberLit -> {}
+        FloatLit -> {}
+        StringLit -> {}
+        Neg -> {}
+        Positive -> {}
+        Not -> {}
+        BitNot -> {}
+        AddrOf -> {}
+        Deref -> {}
+        Sizeof -> {}
+        Cast -> {}
+        Call -> {}
+        Field -> {}
+        Index -> {}
+        PreStep -> {}
+        PostStep -> {}
+        Binary -> {}
+        Ternary -> {}
+        New -> {}
+        Delete -> {}
+    }
+    if name == "" || hasScope(copy name) { return fallback }
+    let member = joinText([nominalName(copy ty), "::", name])
+    for g in state.tree.globals {
+        if g.name == member || qualifiedSuffix(g.name, copy member) {
+            return addLoweredExpr(state, Expr { kind = .Name(NameExpression { name = member, explicitArguments = 0, valueUse = true }), span = e.span, nameSpan = e.nameSpan })
+        }
+    }
+    return fallback
+}
+// A class argument passed by value: the caller copies an lvalue into a
+// temporary (a temporary is passed as it is), the callee uses it in place, and
+// the caller destroys it at the end of the statement.
+function emitByValueClassArgument(state: borrow mut Lowerer, argument: ExprId, ty: String) -> KirValue {
+    if isClassLvalue(state, copy argument) {
+        let slot = declare(state, joinText(["__karc_struct_tmp_", decimalText(state.slots)]), copy ty, "", state.tree.expressions[argument.value].span)
+        zeroAggregate(state, state.slotsData[slot].address, copy ty)
+        let duplicate = slotPointer(state, state.slotsData[slot].address, copy ty)
+        copyInto(state, duplicate, methodReceiver(state, copy argument, copy ty), copy ty)
+        state.temporaries.append(slot)
+        return duplicate
+    }
+    if needsConversion(state, copy argument, copy ty) { return emitConvertedArgument(state, copy argument, copy ty) }
+    let value = emitExpression(state, copy argument)
+    return value.reference
+}
